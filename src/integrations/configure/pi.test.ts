@@ -101,6 +101,16 @@ describe('configurePi', () => {
     })
   })
 
+  it('keeps an "atomic" provider that is not an object as the user\'s, and replaces it', async () => {
+    home = await makeAgentHome()
+    await home.seed(MODELS, '{"providers": {"atomic": "hand-written"}}')
+    await configurePi(agentInput(home.fs))
+    expect(JSON.parse((await home.read(MODELS)) ?? '').providers.atomic.name).toBe('Atomic Chat')
+    expect(JSON.parse((await home.read(`${MODELS}.atomic-chat-backup.json`)) ?? '').previous).toEqual({
+      providers: { atomic: 'hand-written' },
+    })
+  })
+
   it('writes under $PI_CODING_AGENT_DIR, a leading ~ meaning the home', async () => {
     home = await makeAgentHome()
     await configurePi(agentInput(home.fs, { env: { PI_CODING_AGENT_DIR: '~/pi-dir' } }))

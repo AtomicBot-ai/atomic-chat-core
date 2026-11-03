@@ -248,6 +248,12 @@ describe('offPathCandidates', () => {
       'C:\\Users\\u\\AppData\\Local\\Programs\\Zed\\Zed.exe',
       'C:\\Program Files\\Zed\\Zed.exe',
     ])
+    // `%LOCALAPPDATA%` wins over the profile's default, and without `%ProgramFiles%` only the
+    // per-user install is looked for.
+    expect(offPathCandidates('zed', 'C:\\Users\\u', { LOCALAPPDATA: 'D:\\Local' }, 'win32')).toEqual([
+      'D:\\Local\\Programs\\Zed\\bin\\zed.exe',
+      'D:\\Local\\Programs\\Zed\\Zed.exe',
+    ])
     expect(offPathCandidates('zed', undefined, {}, 'linux')).toEqual([])
   })
 

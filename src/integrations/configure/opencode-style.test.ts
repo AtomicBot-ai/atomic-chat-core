@@ -1,12 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { agentInput, makeAgentHome } from '../../../test/helpers/agent-config-home.js'
 import type { AgentHome } from '../../../test/helpers/agent-config-home.js'
-import { writeOpencodeStyleConfig } from './opencode-style.js'
+import { readRoot, writeOpencodeStyleConfig } from './opencode-style.js'
 
 const PATH = '.config/demo/demo.json'
 const TARGET = { file: PATH, others: [] }
 const SPEC = { schema: 'https://demo.example/config.json' }
 const BACKUP = `${PATH}.atomic-chat-backup.json`
+/** A `.jsonc` beside the `.json` wins, so Connect writes it and cleans our entries out of the `.json`. */
+const JSONC = '.config/demo/demo.jsonc'
+const JSONC_TARGET = { file: JSONC, others: [PATH] }
+/** A config an earlier Connect left pointing at us. */
+const CONNECTED = '{"model": "atomic/old", "provider": {"atomic": {"name": "Atomic Chat"}}}'
 
 let home: AgentHome
 afterEach(async () => {
@@ -154,5 +159,83 @@ describe('writeOpencodeStyleConfig', () => {
     expect(Object.keys(parsed.provider)).toEqual(['atomic'])
     expect(parsed.theme).toBe('nord')
     expect(parsed.keep).toEqual([1])
+  })
+
+  it('replaces a $schema an earlier release wrote by mistake, and only that one', async () => {
+    const h = await fresh()
+    const spec = { ...SPEC, staleSchema: 'https://stale.example/config.json' }
+    await h.seed(PATH, '{"$schema": "https://stale.example/config.json"}')
+    await writeOpencodeStyleConfig(agentInput(h.fs), TARGET, spec)
+    expect((await readJson(h, PATH))['$schema']).toBe(SPEC.schema)
+    await h.seed(PATH, '{"$schema": "https://own.example/config.json"}')
+    await writeOpencodeStyleConfig(agentInput(h.fs), TARGET, spec)
+    expect((await readJson(h, PATH))['$schema']).toBe('https://own.example/config.json')
+  })
+
+  it.each([
+    ['text that is not JSON', 'not json'],
+    ['an array', '[1, 2]'],
+    ['a previous that is not an object', '{"previous": 5}'],
+    ['no previous at all', '{"about": "x"}'],
+  ])('treats a backup holding %s as empty, and drops it on a reconnect', async (_label, body) => {
+    const h = await fresh()
+    await h.seed(PATH, CONNECTED)
+    await h.seed(BACKUP, body)
+    await writeOpencodeStyleConfig(agentInput(h.fs, { model: 'm' }), TARGET, SPEC)
+    expect(await h.read(BACKUP)).toBeUndefined()
+    expect((await readJson(h, PATH)).model).toBe('atomic/m')
+  })
+})
+
+describe('the file beside the one Connect writes', () => {
+  it('takes our entries out of it, putting back what they replaced', async () => {
+    const h = await fresh()
+    await h.seed(
+      PATH,
+      '{"model": "atomic/old", "provider": {"atomic": {"name": "Atomic Chat"}, "openrouter": {}}, "theme": "nord"}'
+    )
+    await h.seed(BACKUP, '{"previous": {"model": "openrouter/x"}}')
+    await writeOpencodeStyleConfig(agentInput(h.fs, { model: 'm' }), JSONC_TARGET, SPEC)
+    expect(await readJson(h, PATH)).toEqual({
+      model: 'openrouter/x',
+      provider: { openrouter: {} },
+      theme: 'nord',
+    })
+    const written = await readJson(h, JSONC)
+    expect(written.model).toBe('atomic/m')
+    expect(written.provider.atomic.name).toBe('Atomic Chat')
+  })
+
+  it('leaves it byte for byte when nothing in it is ours', async () => {
+    const h = await fresh()
+    // Rewriting would drop the comment, so an unchanged file proves it was not rewritten.
+    const theirs =
+      '{\n  // mine\n  "model": "openrouter/x",\n  "provider": {"atomic": {"name": "Their own"}}\n}\n'
+    await h.seed(PATH, theirs)
+    await writeOpencodeStyleConfig(agentInput(h.fs), JSONC_TARGET, SPEC)
+    expect(await h.read(PATH)).toBe(theirs)
+  })
+
+  it.each([
+    ['missing', undefined],
+    ['unreadable', '{ "model": '],
+  ])('leaves it as it is when it is %s, and still writes the config', async (_label, body) => {
+    const h = await fresh()
+    if (body !== undefined) await h.seed(PATH, body)
+    await writeOpencodeStyleConfig(agentInput(h.fs, { model: 'm' }), JSONC_TARGET, SPEC)
+    const tree = await h.tree()
+    expect(Object.keys(tree)).toEqual(body === undefined ? [JSONC] : [PATH, JSONC])
+    expect(tree[PATH]).toBe(body)
+    expect(JSON.parse(tree[JSONC] as string).model).toBe('atomic/m')
+  })
+})
+
+describe('readRoot', () => {
+  it('reads a missing file as an empty object and refuses comments when strict', async () => {
+    const h = await fresh()
+    expect(await readRoot(h.fs, PATH, false)).toEqual({})
+    await h.seed(PATH, '{\n  // hello\n  "a": 1\n}\n')
+    expect(await readRoot(h.fs, PATH, true)).toEqual({ a: 1 })
+    await expect(readRoot(h.fs, PATH, false)).rejects.toThrow(/Failed to parse/)
   })
 })

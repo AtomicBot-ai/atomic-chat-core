@@ -93,6 +93,61 @@ describe('configureOpenclaude', () => {
     expect(profileBackup.entries[0].written.env.OPENAI_MODEL).toBe('other')
   })
 
+  it("forgets an earlier release's profile and active pointer, so Disconnect does not put them back", async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      CONFIG,
+      JSON.stringify({
+        activeProviderProfileId: 'provider_atomic_chat',
+        providerProfiles: [{ id: 'provider_atomic_chat', provider: 'atomic-chat', model: 'old' }],
+      })
+    )
+    await configureOpenclaude(agentInput(home.fs))
+    const root = await config()
+    expect(root.providerProfiles).toHaveLength(1)
+    expect(root.providerProfiles[0].model).toBe('AtomicChat/Qwen3.5-9B-GGUF')
+    const backup = JSON.parse((await home.read(`${CONFIG}${SIDECAR}`)) ?? '{}')
+    expect(backup.entries[0]).toMatchObject({ existed: false })
+    expect(backup.entries[0]).not.toHaveProperty('previous')
+    expect(backup.entries[1]).toEqual({
+      path: ['activeProviderProfileId'],
+      existed: false,
+      written: 'provider_atomic_chat',
+    })
+  })
+
+  it('takes a startup profile an earlier release wrote for this server as ours, and keeps any other', async () => {
+    const cases: Array<[string, Record<string, unknown>, boolean]> = [
+      ['ours, through a loopback alias', { OPENAI_BASE_URL: 'http://localhost:1337/v1' }, false],
+      ['the same provider at another server', { OPENAI_BASE_URL: 'http://10.0.0.7:8080/v1' }, true],
+      ['the same provider without a base URL', { OPENAI_MODEL: 'theirs' }, true],
+    ]
+    for (const [label, env, kept] of cases) {
+      home = await makeAgentHome()
+      const startup = { profile: 'atomic-chat', env, createdAt: 'x' }
+      await home.seed(PROFILE, JSON.stringify(startup))
+      await configureOpenclaude(agentInput(home.fs))
+      const entry = JSON.parse((await home.read(`${PROFILE}${SIDECAR}`)) ?? '{}').entries[0]
+      expect(entry.existed, label).toBe(kept)
+      expect(entry.previous, label).toEqual(kept ? startup : undefined)
+      expect(JSON.parse((await home.read(PROFILE)) ?? '{}').env.OPENAI_BASE_URL, label).toBe(
+        'http://127.0.0.1:1337/v1'
+      )
+      await home.cleanup()
+    }
+  })
+
+  it('treats a startup profile it cannot parse as absent and writes a fresh one', async () => {
+    home = await makeAgentHome()
+    await home.seed(PROFILE, '{"profile": ')
+    await configureOpenclaude(agentInput(home.fs))
+    expect(JSON.parse((await home.read(PROFILE)) ?? '{}').profile).toBe('atomic-chat')
+    const backup = JSON.parse((await home.read(`${PROFILE}${SIDECAR}`)) ?? '{}')
+    expect(backup.fileExisted).toBe(false)
+    expect(backup.entries[0].existed).toBe(false)
+    expect(backup.entries[0]).not.toHaveProperty('previous')
+  })
+
   it('follows $OPENCLAUDE_CONFIG_DIR, and its legacy .config.json when that exists', async () => {
     home = await makeAgentHome()
     const env = { OPENCLAUDE_CONFIG_DIR: `${home.path}/oc` }

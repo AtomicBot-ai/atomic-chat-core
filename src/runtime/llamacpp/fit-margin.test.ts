@@ -280,6 +280,13 @@ describe('smallMemoryDefaultCtx', () => {
     expect(at(8, 1, 112)).toBe(18_688)
   })
 
+  it('steps an unaligned default down onto the 256-token grid first', () => {
+    // 20000 is 32 past 19968; the same 2048 MiB at 112 KiB a token then settles on 18688.
+    expect(at(8, 1, 112, 20_000)).toBe(18_688)
+    // At 64 KiB the unaligned default itself fits and is kept as given.
+    expect(at(8, 1, 64, 20_000)).toBe(20_000)
+  })
+
   it('never goes below the previous 16K default, nor above the default it was given', () => {
     expect(at(8, 2.5, 112)).toBe(PREVIOUS_DEFAULT_CTX)
     expect(at(8, 7, 112)).toBe(PREVIOUS_DEFAULT_CTX)

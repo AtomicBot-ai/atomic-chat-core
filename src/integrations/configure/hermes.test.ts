@@ -3,17 +3,23 @@ import { parse as parseYaml } from 'yaml'
 import { agentInput, makeAgentHome, type AgentHome } from '../../../test/helpers/agent-config-home.js'
 import {
   configureHermes,
+  expandHermesHome,
   hermesDir,
+  parseHermesBackup,
   patchModelSection,
   rebuildCustomProviders,
+  renderHermesBackup,
   replaceYamlScalarValue,
   splitCustomProviders,
   upsertAtomicProvider,
   upsertProviderRequestTimeout,
+  type HermesBackup,
 } from './hermes.js'
 
 const CONFIG = '.hermes/config.yaml'
 const BACKUP = '.hermes/config.yaml.atomic-chat-backup.json'
+const ENV = '.hermes/.env'
+const NO_PROXY = 'NO_PROXY=localhost,127.0.0.1,0.0.0.0\nexport no_proxy=localhost,127.0.0.1,0.0.0.0'
 const URL = 'http://127.0.0.1:1337/v1'
 const MODEL = 'unsloth/Qwen3_5-4B-GGUF-Qwen3_5-4B-IQ4_XS'
 const ROUTE: Array<[string, string]> = [
@@ -122,6 +128,21 @@ describe('the line-level YAML edits', () => {
     )
     expect(added).toBe(false)
   })
+
+  it('recognises our entry by a name: line that is not the first line of the item', () => {
+    const [out, added] = upsertAtomicProvider(
+      'custom_providers:\n- base_url: http://old\n  name: atomic-chat\n- name: bridge\n  base_url: http://b\n',
+      'http://u',
+      'm',
+      64,
+      '"k"'
+    )
+    expect(out).toBe(
+      'custom_providers:\n- name: bridge\n  base_url: http://b\n- name: atomic-chat\n  base_url: http://u\n' +
+        '  api_key: "k"\n  model: m\n  models:\n    m:\n      context_length: 64\n'
+    )
+    expect(added).toBe(false)
+  })
 })
 
 describe('pointing the model section at Atomic Chat', () => {
@@ -189,6 +210,30 @@ describe('pointing the model section at Atomic Chat', () => {
       `model:\n  default: ${MODEL}\n  provider: custom\n  base_url: ${URL}\nother: 1\n`
     )
   })
+
+  it("reads CRLF line endings the way Rust's str::lines does, and writes LF", () => {
+    expect(patchModelSection('model:\r\n  default: old\r\n', ROUTE)).toBe(
+      `model:\n  provider: custom\n  base_url: ${URL}\n  default: ${MODEL}\n`
+    )
+  })
+
+  it('skips a column-0 line that is not a key, such as a %YAML directive', () => {
+    expect(patchModelSection('%YAML 1.2\n---\nmodel: old\n', ROUTE)).toBe(
+      `%YAML 1.2\n---\nmodel:\n  default: ${MODEL}\n  provider: custom\n  base_url: ${URL}\n`
+    )
+  })
+
+  it("drops a wrapped scalar's continuation but keeps the comments under it", () => {
+    const out = patchModelSection(
+      'model: anthropic/claude\n  opus-4.6\n\n# picked by setup\ndelegation:\n  provider: openrouter\n',
+      ROUTE
+    )
+    expect(out).toBe(
+      `model:\n  default: ${MODEL}\n  provider: custom\n  base_url: ${URL}\n\n# picked by setup\n` +
+        'delegation:\n  provider: openrouter\n'
+    )
+    expect(chatRoute(out)).toEqual(ours)
+  })
 })
 
 describe('seeding the provider timeout', () => {
@@ -231,6 +276,68 @@ describe('seeding the provider timeout', () => {
     const own = 'providers:\n  custom:\n    request_timeout_seconds: 60\n'
     expect(upsertProviderRequestTimeout(own, 'custom', 180)).toEqual([own, []])
   })
+
+  it('appends the providers block after trailing blank lines, or as the whole of an empty file', () => {
+    const created = ['providers', 'providers.custom', 'providers.custom.request_timeout_seconds']
+    expect(upsertProviderRequestTimeout('a: 1\n\n\n', 'custom', 180)).toEqual([
+      'a: 1\nproviders:\n  custom:\n    request_timeout_seconds: 180\n',
+      created,
+    ])
+    expect(upsertProviderRequestTimeout('', 'custom', 180)).toEqual([
+      'providers:\n  custom:\n    request_timeout_seconds: 180\n',
+      created,
+    ])
+  })
+
+  it("adds the timeout to our existing provider block, not counting a sibling provider's", () => {
+    const [out, created] = upsertProviderRequestTimeout(
+      'providers:\n  custom:\n    base_url: http://x\n\n  openai:\n    request_timeout_seconds: 60\n',
+      'custom',
+      180
+    )
+    expect(out).toBe(
+      'providers:\n  custom:\n    request_timeout_seconds: 180\n    base_url: http://x\n\n' +
+        '  openai:\n    request_timeout_seconds: 60\n'
+    )
+    expect(created).toEqual(['providers.custom.request_timeout_seconds'])
+  })
+})
+
+describe('reading the Disconnect backup', () => {
+  it('reads back what it renders, with and without a header', () => {
+    const full: HermesBackup = {
+      header: 'model: opus',
+      keys: { default: { before: ['  default: opus'], ours: 'm' }, provider: { ours: 'custom' } },
+      created: ['providers'],
+    }
+    expect(parseHermesBackup(renderHermesBackup(full))).toEqual(full)
+    const bare: HermesBackup = { keys: {}, created: [] }
+    expect(parseHermesBackup(renderHermesBackup(bare))).toEqual(bare)
+  })
+
+  it.each([
+    ['text that is not JSON', 'not json'],
+    ['a null root', 'null'],
+    ['no created list', '{"model": {"keys": {}}}'],
+    ['a created list with a non-string', '{"created": [1], "model": {"keys": {}}}'],
+    ['no keys', '{"created": [], "model": {}}'],
+    ['null keys', '{"created": [], "model": {"keys": null}}'],
+    [
+      'a key without the value Connect wrote',
+      '{"created": [], "model": {"keys": {"default": {"before": []}}}}',
+    ],
+    ['a null key entry', '{"created": [], "model": {"keys": {"default": null}}}'],
+    [
+      'original lines that are not a list',
+      '{"created": [], "model": {"keys": {"default": {"ours": "m", "before": "x"}}}}',
+    ],
+    [
+      'original lines that are not strings',
+      '{"created": [], "model": {"keys": {"default": {"ours": "m", "before": [1]}}}}',
+    ],
+  ])('treats a backup with %s as no backup', (_label, text) => {
+    expect(parseHermesBackup(text)).toBeUndefined()
+  })
 })
 
 describe('resolving the Hermes home', () => {
@@ -267,6 +374,13 @@ describe('resolving the Hermes home', () => {
     await home.seed('custom/active_profile', 'ops')
     const custom = `${home.path}/custom`
     expect(await hermesDir({ HERMES_HOME: custom }, 'linux', home.fs)).toBe(`${custom}/profiles/ops`)
+  })
+
+  it('reads a bare ~ as the home itself, and expands a Windows ~\\ or %NAME%\\ prefix', async () => {
+    home = await makeAgentHome()
+    expect(await hermesDir({ HERMES_HOME: '~' }, 'linux', home.fs)).toBe(home.path)
+    expect(expandHermesHome('~\\hermes', {}, 'C:/Users/u')).toBe('C:/Users/u\\hermes')
+    expect(expandHermesHome('%APPDATA%\\hermes', { APPDATA: 'C:/R' }, 'C:/Users/u')).toBe('C:/R\\hermes')
   })
 })
 
@@ -359,9 +473,84 @@ describe('configuring Hermes', () => {
     })
   })
 
+  it('records the whole nested value it replaced, without the comments inside it', async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      CONFIG,
+      'model:\n  default:\n    name: old\n    # from the wizard\n    provider: openrouter\n  provider: auto\n'
+    )
+    await configureHermes(agentInput(home.fs, { model: 'm', apiUrl: URL }))
+    expect(JSON.parse((await home.read(BACKUP)) as string).model.keys.default).toEqual({
+      before: ['  default:', '    name: old', '    provider: openrouter'],
+      ours: 'm',
+    })
+    expect(chatRoute((await home.read(CONFIG)) as string)).toMatchObject({ default: 'm', provider: 'custom' })
+  })
+
+  it('records no originals for an empty model: block', async () => {
+    home = await makeAgentHome()
+    await home.seed(CONFIG, 'model:\nother: 1\n')
+    await configureHermes(agentInput(home.fs, { model: 'm', apiUrl: URL }))
+    expect(JSON.parse((await home.read(BACKUP)) as string).model).toEqual({
+      header: 'model:',
+      keys: {
+        default: { ours: 'm' },
+        provider: { ours: 'custom' },
+        base_url: { ours: URL },
+        api_key: { ours: '"sk-atomic-fixture-key"' },
+        context_length: { ours: '65536' },
+      },
+    })
+  })
+
+  it('keeps the original provider after Hermes renamed ours, and takes a value the user changed as new', async () => {
+    home = await makeAgentHome()
+    await home.seed(CONFIG, 'model:\n  default: opus\n  provider: openrouter\n')
+    const input = agentInput(home.fs, { model: 'a', apiUrl: URL })
+    await configureHermes(input)
+    // Hermes may persist our bare `custom` under the provider's name; the user then picked their own model.
+    const connected = (await home.read(CONFIG)) as string
+    await home.seed(
+      CONFIG,
+      connected
+        .replace('  provider: custom\n', '  provider: custom:atomic-chat\n')
+        .replace('  default: a\n', '  default: mine\n')
+    )
+    await configureHermes(input)
+    const keys = JSON.parse((await home.read(BACKUP)) as string).model.keys
+    expect(keys.provider).toEqual({ before: ['  provider: openrouter'], ours: 'custom' })
+    expect(keys.default).toEqual({ before: ['  default: mine'], ours: 'a' })
+    expect(chatRoute((await home.read(CONFIG)) as string)).toMatchObject({ default: 'a', provider: 'custom' })
+  })
+
   it('never creates a .env, only patches one that already exists', async () => {
     home = await makeAgentHome()
     await configureHermes(agentInput(home.fs))
     expect(Object.keys(await home.tree())).toEqual([CONFIG, BACKUP])
   })
+
+  it.each([
+    ['without a final newline', 'HERMES_THEME=dark'],
+    ['with a final newline', 'HERMES_THEME=dark\n'],
+  ])('adds the loopback proxy bypass to an existing .env %s, once', async (_shape, seed) => {
+    home = await makeAgentHome()
+    await home.seed(ENV, seed)
+    await configureHermes(agentInput(home.fs))
+    const expected = `HERMES_THEME=dark\n\n${NO_PROXY}`
+    expect(await home.read(ENV)).toBe(expected)
+    expect(JSON.parse((await home.read(BACKUP)) as string).created).toContain('env.no_proxy')
+    await configureHermes(agentInput(home.fs))
+    expect(await home.read(ENV)).toBe(expected)
+  })
+
+  it.each(['NO_PROXY=corp.internal\n', 'export no_proxy=corp.internal\n'])(
+    'leaves a .env that already bypasses a proxy alone: %j',
+    async (seed) => {
+      home = await makeAgentHome()
+      await home.seed(ENV, seed)
+      await configureHermes(agentInput(home.fs))
+      expect(await home.read(ENV)).toBe(seed)
+      expect(JSON.parse((await home.read(BACKUP)) as string).created).not.toContain('env.no_proxy')
+    }
+  )
 })

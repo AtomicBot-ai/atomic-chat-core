@@ -106,7 +106,8 @@ async function readUserVar(
   for (const line of result.stdout.split(/\r?\n/)) {
     const match = line.match(/^\s+(\S+)\s+REG_\w+\s+(.*)$/)
     if (match && match[1]?.toLowerCase() === name.toLowerCase()) {
-      const value = (match[2] ?? '').trim()
+      // `(.*)` always takes part in a match, so group 2 is a string here.
+      const value = (match[2] as string).trim()
       return value === '' ? undefined : value
     }
   }
