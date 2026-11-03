@@ -90,7 +90,14 @@ export async function readLockRecord(
       text = await readFile(path, 'utf8')
     } catch (e) {
       if (isEnoent(e)) return undefined
-      throw new AtomicCoreError('IO_ERROR', `Cannot read the instance lock at ${path}`, (e as Error).message)
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `Cannot read the instance lock at ${path}`,
+        (e as Error).message,
+        {
+          cause: e,
+        }
+      )
     }
     const parsed = parseLockRecord(text)
     if (parsed) return parsed
@@ -176,7 +183,8 @@ export class InstanceLock {
         throw new AtomicCoreError(
           'IO_ERROR',
           `Cannot create the instance lock at ${path}`,
-          (e as Error).message
+          (e as Error).message,
+          { cause: e }
         )
       })
       if (handle) {
@@ -254,7 +262,9 @@ async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<bool
   const mutexPath = `${layout.core.instanceLock}.takeover`
   const mutex = await open(mutexPath, 'wx').catch(async (e: unknown) => {
     if (!isEexist(e))
-      throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message)
+      throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message, {
+        cause: e,
+      })
     const age = await stat(mutexPath).then(
       (s) => now() - s.mtimeMs,
       () => 0
