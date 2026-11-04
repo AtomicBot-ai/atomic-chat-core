@@ -183,8 +183,7 @@ describe('InstanceLock.acquire', () => {
     expect(diagnostic).toMatchObject({
       component: 'core',
       operation: 'startup',
-      category: 'operational',
-      reason: classifyFailure(nativeAcquireErr, { component: 'core', operation: 'startup' }).reason,
+      ...classifyFailure(nativeAcquireErr, { component: 'core', operation: 'startup' }),
     })
     expect(diagnosticTags(acquireErr, diagnostic).cause_code).toBe(nativeAcquireErr.code)
 
