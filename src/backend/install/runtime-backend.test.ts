@@ -354,6 +354,33 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('a backend that could not run on this
     }
   })
 
+  it('restores GPU selection on a new binary release while keeping the old release blocked', async () => {
+    const data = await makeTmpDataFolder('atomic-runtime-backend-')
+    try {
+      await install(data)
+      const hardware = ampere()
+      const failed = { version: 'b12019', backend: 'win-cuda-13.3-x64' }
+      await llamaBackendFallback(data.layout, 'llamacpp-upstream', hardware, failed, 'ENGINE_BINARY_BROKEN', {
+        hostArch: 'x64',
+      })
+      await expect(
+        selectInstalledBackend(data.layout, 'llamacpp-upstream', hardware, 'x64')
+      ).resolves.toMatchObject({ backend: 'win-cuda-12.4-x64' })
+      await installFakeBackend(data.layout, { version: 'b12020', backend: failed.backend })
+      await expect(
+        selectInstalledBackend(data.layout, 'llamacpp-upstream', hardware, 'x64')
+      ).resolves.toMatchObject({ version: 'b12020', backend: failed.backend })
+      await expect(
+        ensureBackend(data.layout, 'llamacpp-upstream', failed.backend, failed.version, hardware, 'x64')
+      ).resolves.toMatchObject({ version: 'b12020', backend: failed.backend })
+      await expect(
+        ensureBackend(data.layout, 'llamacpp-upstream', failed.backend, 'b12020', hardware, 'x64')
+      ).resolves.toMatchObject({ version: 'b12020', backend: failed.backend })
+    } finally {
+      await data.cleanup()
+    }
+  })
+
   it('still runs a pack that failed here when it is the only one installed', async () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {

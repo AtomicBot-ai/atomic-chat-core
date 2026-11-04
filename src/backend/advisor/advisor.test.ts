@@ -331,6 +331,23 @@ describe('BackendAdvisor.catalog', () => {
     expect(fresh.recommended).toBe(`${UP}/win-cuda-13.3-x64`)
   })
 
+  it('offers a newer GPU release after a binary failure on the same driver', async () => {
+    await rememberBadBackend(data.layout, {
+      provider: 'llamacpp-upstream',
+      backend: 'win-cuda-13.3-x64',
+      driver: '581.42',
+      reason: 'ENGINE_BINARY_BROKEN',
+      version: 'b1',
+      at: '',
+    })
+    const h = await harness('llamacpp-upstream', host('windows', [rtx4090]))
+    const catalog = await h.advisor.catalog({ current_backend: 'b10405/win-cpu-x64' })
+    expect(catalog.recommended).toBe(`${UP}/win-cuda-13.3-x64`)
+    expect(catalog.available).toContainEqual(
+      expect.objectContaining({ version: UP, backend: 'win-cuda-13.3-x64' })
+    )
+  })
+
   it('upstream offline: the bundled baseline, never cached, never thrown', async () => {
     const h = await harness('llamacpp-upstream', host('windows', [rtx4090]), { routes: OFFLINE })
     const catalog = await h.advisor.catalog()

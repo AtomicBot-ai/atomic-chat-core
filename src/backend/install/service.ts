@@ -30,6 +30,7 @@ import { samePath } from '../../diffusion/containment.js'
 import type { LocalProviderId } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
 import {
+  DOWNLOAD_CANCELLED,
   diskFaultMessage,
   heldFileFaultTag,
   retryTransientFs,
@@ -511,7 +512,10 @@ export class BackendService {
       provider === 'llamacpp'
         ? ensureTurboquantCudart(backend, backendDir, taskId, deps)
         : ensureUpstreamCudart(version, backend, backendDir, taskId, deps)
-    ).catch((error: unknown) => this.deps.log?.(`cudart repair for ${version}/${backend}: ${String(error)}`))
+    ).catch((error: unknown) => {
+      if (error instanceof Error && error.message === DOWNLOAD_CANCELLED) throw error
+      this.deps.log?.(`cudart repair for ${version}/${backend}: ${String(error)}`)
+    })
     if (platform !== 'win32') return
     const companionName = getCudartArchiveName(backend, version)
     const companionUrl = getCudartDownloadUrl(version, backend)
@@ -592,9 +596,10 @@ export class BackendService {
           ...(this.deps.platform ? { platform: this.deps.platform } : {}),
           ...(options.proxy ? { proxy: options.proxy } : {}),
           ...(this.deps.log ? { log: this.deps.log } : {}),
-        }).catch((e: unknown) =>
+        }).catch((e: unknown) => {
+          if (e instanceof Error && e.message === DOWNLOAD_CANCELLED) throw e
           this.deps.log?.(`cudart repair for ${version}/${backend} failed: ${String(e)}`)
-        )
+        })
       }
 
       const verify =

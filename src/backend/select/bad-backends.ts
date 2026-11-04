@@ -3,9 +3,8 @@
  * walks (CUDA 13 → CUDA 12 / ROCm → Vulkan / OpenCL → CPU). Pure: the record list, the GPU facts and
  * the installed packs are parameters; `install/runtime-backend.ts` reads and writes the file.
  *
- * A record is keyed by provider, backend directory name and the machine's GPU driver: a driver update
- * is what usually fixes a build the card refused (CUDA 13.x on Turing before R616), so a new driver
- * forgets the record without anyone clearing it.
+ * GPU incompatibility is keyed by provider, backend and driver. Binary and unexplained crash
+ * failures also match the release tag, so a fixed build can restore acceleration without a driver update.
  */
 
 import type { BackendVersion, GpuProbeInfo } from '../types.js'
@@ -23,7 +22,7 @@ export interface BadBackendEntry {
   driver: string
   /** The error code that marked it (`GPU_BACKEND_INCOMPATIBLE`, …). */
   reason: string
-  /** The release tag that failed; informational, the key ignores it. */
+  /** The release tag that failed; part of the key unless the GPU is incompatible. */
   version: string
   /** ISO time it was marked. */
   at: string
@@ -75,19 +74,26 @@ export function isBackendMarkedBad(
   entries: readonly BadBackendEntry[],
   provider: string,
   backend: string,
-  driver: string
+  driver: string,
+  version: string
 ): boolean {
-  return entries.some((e) => sameKey(e, provider, backend, driver))
+  return entries.some(
+    (e) =>
+      sameKey(e, provider, backend, driver) &&
+      (e.reason === 'GPU_BACKEND_INCOMPATIBLE' || stripBom(e.version) === stripBom(version))
+  )
 }
 
-/** `entries` with `entry` in place of any record of the same key, and without records of an older driver for it. */
+/** Keep failed releases distinct; a GPU incompatibility supersedes them, and a new driver clears them. */
 export function withBadBackend(
   entries: readonly BadBackendEntry[],
   entry: BadBackendEntry
 ): BadBackendEntry[] {
-  const kept = entries.filter(
-    (e) => !(e.provider === entry.provider && e.backend === stripBom(entry.backend))
-  )
+  const kept = entries.filter((e) => {
+    if (e.provider !== entry.provider || e.backend !== stripBom(entry.backend)) return true
+    if (e.driver !== entry.driver || entry.reason === 'GPU_BACKEND_INCOMPATIBLE') return false
+    return e.reason === 'GPU_BACKEND_INCOMPATIBLE' || stripBom(e.version) !== stripBom(entry.version)
+  })
   return [...kept, { ...entry, backend: stripBom(entry.backend) }]
 }
 
@@ -121,7 +127,7 @@ export function backendFallbackRank(backend: string): number | undefined {
 export function nextFallbackBackend(
   failed: { version: string; backend: string },
   candidates: readonly BackendVersion[],
-  skip: (backend: string) => boolean = () => false
+  skip: (backend: string, version: string) => boolean = () => false
 ): BackendVersion | undefined {
   const from = backendFallbackRank(failed.backend)
   if (from === undefined) return undefined
@@ -133,7 +139,7 @@ export function nextFallbackBackend(
         c.rank !== undefined &&
         c.rank > from &&
         stripBom(c.candidate.backend) !== failedBackend &&
-        !skip(c.candidate.backend)
+        !skip(c.candidate.backend, c.candidate.version)
     )
   const sameTag = (c: BackendVersion) => (stripBom(c.version) === stripBom(failed.version) ? 0 : 1)
   ranked.sort((a, b) => a.rank - b.rank || sameTag(a.candidate) - sameTag(b.candidate) || a.index - b.index)

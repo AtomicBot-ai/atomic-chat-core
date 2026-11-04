@@ -1,10 +1,11 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cudaRuntimeZip, storedZipFiles } from '../../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { AtomicCoreError } from '../../contracts/index.js'
+import { DOWNLOAD_CANCELLED } from '../../downloads/index.js'
 import type { DownloadItem } from '../../downloads/index.js'
 import {
   NVIDIA_CUDA_REDIST_BASE,
@@ -145,6 +146,53 @@ describe('deliverWindowsCudaRuntime', () => {
     expect(await deliverWindowsCudaRuntime(target('win-cuda-12.4-x64'), deps)).toBe('host-toolkit')
     // Only the refused attempt above went to the network (the pinned 13.4 companion).
     expect(downloader.download).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps cancellation terminal instead of starting another runtime download', async () => {
+    const cancelled = new Error(DOWNLOAD_CANCELLED)
+    let attempts = 0
+    const { downloader } = fakeDownloader(() => (++attempts === 1 ? cancelled : cudaRuntimeZip(12, '')))
+    await expect(
+      deliverWindowsCudaRuntime(target(), {
+        layout: data.layout,
+        downloader,
+        taskId: 'cancelled-install',
+        releaseCompanion: { url: 'https://mirror.example/runtime.zip' },
+      })
+    ).rejects.toBe(cancelled)
+    expect(downloader.download).toHaveBeenCalledTimes(1)
+  })
+
+  it('replaces the whole DLL set from one donor when an existing runtime is incomplete', async () => {
+    const destination = join(target().packDir, 'build', 'bin')
+    await writeDlls(destination, ['cublas64_12.dll'])
+    await writeFile(join(destination, 'cublas64_12.dll'), 'old-cuBLAS')
+    const donor = join(pack('llamacpp-upstream', 'b11900', 'win-cuda-12.4-x64'), 'build', 'bin')
+    await writeDlls(donor, runtime(12))
+    const { downloader } = offline()
+    expect(
+      await deliverWindowsCudaRuntime(target(), { layout: data.layout, downloader, taskId: 'repair' })
+    ).toBe('installed-pack')
+    for (const name of runtime(12)) expect(await readFile(join(destination, name), 'utf8')).toBe('dll')
+    expect(downloader.download).not.toHaveBeenCalled()
+  })
+
+  it('refuses a failed DLL copy even when directory entries now have every expected name', async () => {
+    const destination = join(target().packDir, 'build', 'bin')
+    const download = vi.fn(async (_task: string, batch: DownloadItem[]) => {
+      // The destination changes after preflight: the final copy must fail on every OS.
+      await mkdir(join(destination, 'cublasLt64_12.dll'), { recursive: true })
+      for (const item of batch) await writeFile(item.save_path, cudaRuntimeZip(12, ''))
+    })
+    await expect(
+      deliverWindowsCudaRuntime(target(), {
+        layout: data.layout,
+        downloader: { download },
+        taskId: 'failed-copy',
+        releaseCompanion: { url: 'https://mirror.example/runtime.zip' },
+      })
+    ).rejects.toMatchObject({ code: 'ENGINE_BINARY_BROKEN' })
+    expect(download).toHaveBeenCalledTimes(2)
   })
 
   it("downloads the pack's own release companion with its checksum", async () => {

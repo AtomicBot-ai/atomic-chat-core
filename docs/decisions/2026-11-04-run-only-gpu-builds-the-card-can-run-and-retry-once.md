@@ -18,13 +18,13 @@ title: "Run only GPU builds the card can run, and retry a failed GPU load once o
   stderr is `GPU_BACKEND_INCOMPATIBLE` (OOM still wins); loader exit codes are `ENGINE_BINARY_BROKEN`, an
   illegal instruction `CPU_INSTRUCTION_UNSUPPORTED`. On those failures, or an empty-stderr crash of a GPU build,
   the load is retried once on the next installed build (CUDA 13 → CUDA 12 / ROCm → Vulkan → CPU) and the build
-  is recorded in `<data>/atomic-core/bad-backends.json`, keyed by provider, backend directory and GPU driver;
+  is recorded in `<data>/atomic-core/bad-backends.json`, keyed by provider, backend directory and GPU driver (binary and unexplained crash failures also match the release tag);
   selection and the advisor's catalog skip recorded builds, and a driver update changes the key. Every
   llama.cpp load failure ends its `details` with one `atomic-core-diag {json}` line (exit code, stage, backend,
   build, fallback, empty stderr) for the app's telemetry. A `--device` the build does not list is dropped, and a
   model's own `fit_ctx` wins over the provider's, with the fitted `--ctx-size` ceiling never below it.
 - **Consequences:** A Turing user on an old driver loads on CUDA 12.4 (or CPU when nothing else is installed)
-  instead of crashing; the advisor stops offering the failed build until the driver changes. A fallback to CPU
+  instead of crashing; the advisor stops offering the failed release; confirmed GPU incompatibility persists until the driver changes. A fallback to CPU
   is slow but answers. The app's Rust backend-select fixture for Turing at CUDA 13 is now a known divergence.
   Not verified on a Windows machine at the time of writing.
 - **Owner:** `team`
