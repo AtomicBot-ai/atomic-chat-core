@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config'
 
-// Six test layers, see AGENTS.md §5. Unit tests live next to the code; the rest under test/.
+// Seven test layers, see AGENTS.md §5. Unit tests live next to the code; the rest under test/.
 export default defineConfig({
   test: {
     projects: [
@@ -29,6 +29,15 @@ export default defineConfig({
           include: ['test/runtime-compat/**/*.test.ts'],
           environment: 'node',
           testTimeout: 60_000,
+        },
+      },
+      {
+        // Real native libraries the core loads in a host mode (LiteRT-LM), skipped without them.
+        test: {
+          name: 'integration',
+          include: ['test/integration/**/*.test.ts'],
+          environment: 'node',
+          testTimeout: 600_000,
         },
       },
       {

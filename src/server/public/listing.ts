@@ -12,12 +12,15 @@ import { answer, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { readBody, sendUpstream } from './wire.js'
 import { EMBEDDING_OWNED_BY } from './embedding.js'
+import { findLocalSession, findSelectedLocalSession, routedRemote, selectedRoute } from './forward.js'
+import { sessionWindow } from './context-window.js'
+import type { LocalTarget } from './types.js'
 import type { LocalProvider } from '../../router/index.js'
 
 /**
- * Advertised to Muse Code, which compacts a conversation as it nears the advertised context. The
- * server does not know a session's real window, so these under-estimate on purpose: guessing low
- * costs an earlier compaction, guessing high costs hard overflow errors mid-run.
+ * Advertised to Muse Code, which compacts a conversation as it nears the advertised context, when the
+ * server does not know a session's real window (`context-window.ts`). These under-estimate on
+ * purpose: guessing low costs an earlier compaction, guessing high costs hard overflow errors mid-run.
  */
 const MUSE_LOCAL_CONTEXT_LIMIT = 32_768
 const MUSE_REMOTE_CONTEXT_LIMIT = 200_000
@@ -33,6 +36,8 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'vllm': 'vllm',
   'sglang': 'sglang',
   'foundry-local': 'foundry-local',
+  'litert-lm': 'litert-lm',
+  'geniex': 'geniex',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */
@@ -42,36 +47,86 @@ interface MuseFacts {
   output?: number
 }
 
-export function servedModels(ex: Exchange): Array<{ id: string; ownedBy: string; muse: MuseFacts }> {
-  const models = ex.deps.listLocal().map((s) => ({
-    id: s.modelId,
-    ownedBy: OWNED_BY[s.provider],
-    muse: s.policy
-      ? {
-          toolCall: s.policy.tools,
-          ...(s.policy.contextLength === undefined ? {} : { context: s.policy.contextLength }),
-          ...(s.policy.maxOutputTokens === undefined ? {} : { output: s.policy.maxOutputTokens }),
-        }
-      : {},
-  }))
-  for (const provider of ex.deps.providers().values()) {
-    for (const id of provider.models) models.push({ id, ownedBy: 'remote', muse: {} })
+/**
+ * Every model a request can reach, each named once by the backend a request for it goes to: a local
+ * session is left out when its id is routed elsewhere (a selected remote provider, a remote provider
+ * that owns an unselected id, the selected or an earlier local engine), and so is a remote provider's
+ * model routed to another provider.
+ */
+export function servedModels(
+  ex: Exchange
+): Array<{ id: string; ownedBy: string; muse: MuseFacts; session?: LocalTarget }> {
+  const routedLocally = (s: { provider: LocalProvider; modelId: string }): boolean => {
+    const selected = selectedRoute(ex, s.modelId)
+    if (routedRemote(ex, s.modelId, selected)) return false
+    const owner =
+      selected?.kind === 'local'
+        ? findSelectedLocalSession(ex, s.modelId, selected.provider)?.provider
+        : findLocalSession(ex, s.modelId)?.provider
+    return owner === s.provider
   }
-  return models
+  const models = ex.deps
+    .listLocal()
+    .filter(routedLocally)
+    .map((s) => ({
+      id: s.modelId,
+      ownedBy: OWNED_BY[s.provider],
+      muse: s.policy
+        ? {
+            toolCall: s.policy.tools,
+            ...(s.policy.contextLength === undefined ? {} : { context: s.policy.contextLength }),
+            ...(s.policy.maxOutputTokens === undefined ? {} : { output: s.policy.maxOutputTokens }),
+          }
+        : {},
+      session: s,
+    }))
+  const remote: Array<{ id: string; ownedBy: string; muse: MuseFacts }> = []
+  for (const provider of ex.deps.providers().values()) {
+    for (const id of provider.models) {
+      if (routedRemote(ex, id, selectedRoute(ex, id))?.provider === provider.provider)
+        remote.push({ id, ownedBy: 'remote', muse: {} })
+    }
+  }
+  return [...models, ...remote]
 }
 
-export function serveModels(ex: Exchange): void {
-  const data = servedModels(ex).map((m) => ({ id: m.id, object: 'model', created: 1, owned_by: m.ownedBy }))
+/** Each served model with the window its session serves, where that is known. */
+async function servedModelsWithWindows(
+  ex: Exchange
+): Promise<Array<{ id: string; ownedBy: string; muse: MuseFacts; window: number | undefined }>> {
+  return Promise.all(
+    servedModels(ex).map(async (m) => ({
+      ...m,
+      window: m.session ? await sessionWindow(ex.deps, m.session) : undefined,
+    }))
+  )
+}
+
+/**
+ * The OpenAI model list. A local model whose window is known says so the way llama-server's own list
+ * does (`meta.n_ctx`) and as `context_length`, which OpenAI-compatible agents read to size their
+ * context and compact before the engine refuses a prompt.
+ */
+export async function serveModels(ex: Exchange): Promise<void> {
+  const data: JsonValue[] = (await servedModelsWithWindows(ex)).map((m) => ({
+    id: m.id,
+    object: 'model',
+    created: 1,
+    owned_by: m.ownedBy,
+    ...(m.window === undefined ? {} : { context_length: m.window, meta: { n_ctx: m.window } }),
+  }))
   // The embedding module's model, while it is turned on: OpenAI clients pick their embedding model from
   // this list. Not in `servedModels`, which also feeds Muse Code's catalogue of chat models.
   const embedding = ex.deps.embedding?.modelId() ?? null
-  if (embedding !== null && !data.some((m) => m.id === embedding))
+  if (embedding !== null && !data.some((m) => (m as { id: string }).id === embedding))
     data.push({ id: embedding, object: 'model', created: 1, owned_by: EMBEDDING_OWNED_BY })
   answer(ex, 200, serdeToString({ object: 'list', data }), [['Content-Type', 'application/json']])
 }
 
-export function serveMuseCatalog(ex: Exchange): void {
-  const data = servedModels(ex).map((m) => museCatalogEntry(m.id, m.ownedBy, m.muse))
+export async function serveMuseCatalog(ex: Exchange): Promise<void> {
+  const data = (await servedModelsWithWindows(ex)).map((m) =>
+    museCatalogEntry(m.id, m.ownedBy, m.window === undefined ? m.muse : { context: m.window, ...m.muse })
+  )
   answer(ex, 200, serdeToString({ object: 'list', data }), [['Content-Type', 'application/json']])
 }
 

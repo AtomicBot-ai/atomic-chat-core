@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../../../contracts/index.js'
 import { fakeCatalog, startControlHarness as start } from '../../../../test/helpers/control-harness.js'
 import type { ControlHarness } from '../../../../test/helpers/control-harness.js'
 
@@ -202,6 +203,46 @@ describe('backend advisor routes', () => {
     expect(seen).toEqual([
       'catalog llamacpp-upstream force=true app=2.0.47',
       'updates llamacpp-upstream current=b1/win-cuda-13.1-x64',
+    ])
+  })
+
+  // Change close-cli-core-gaps, design D2: the file's requirements reach the advisor as sent, and its
+  // "no build meets them" is a 422 with the requirements, not a 500 or an empty recommendation.
+  it('passes requires and min_build to the PrismML catalog and answers 422 when no build meets them', async () => {
+    const seen: unknown[] = []
+    h.backends.catalog = async (provider, request) => {
+      seen.push([provider, request.requires, request.min_build])
+      if ((request.min_build ?? 0) > 20_000)
+        throw new AtomicCoreError(
+          'BACKEND_BUILD_UNAVAILABLE',
+          'No engine build this machine can run meets the model file',
+          JSON.stringify({ requires: request.requires ?? [], min_build: request.min_build ?? null })
+        )
+      return { ...fakeCatalog(provider), recommended: 'prism-b10754-2459f68/win-cpu-x64' }
+    }
+    const post = (body: unknown) =>
+      h.get('/atomic/v1/backends/atomic-prism/catalog', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+
+    const ok = await post({ requires: ['pq2_0'], min_build: 10754 })
+    expect(ok.status).toBe(200)
+    expect(await ok.json()).toMatchObject({ recommended: 'prism-b10754-2459f68/win-cpu-x64' })
+
+    const none = await post({ requires: ['pq2_0'], min_build: 99_999 })
+    expect(none.status).toBe(422)
+    expect(await none.json()).toEqual({
+      error: {
+        code: 'BACKEND_BUILD_UNAVAILABLE',
+        message: 'No engine build this machine can run meets the model file',
+        details: JSON.stringify({ requires: ['pq2_0'], min_build: 99_999 }),
+      },
+    })
+    expect(seen).toEqual([
+      ['atomic-prism', ['pq2_0'], 10754],
+      ['atomic-prism', ['pq2_0'], 99_999],
     ])
   })
 

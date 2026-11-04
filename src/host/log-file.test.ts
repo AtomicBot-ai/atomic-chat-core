@@ -275,6 +275,28 @@ describe('failure isolation', () => {
     )
   })
 
+  it('isolates a non-Error write failure even when closing the broken file also fails', () => {
+    const warnings: string[] = []
+    const log = openLogFile(dir, 'core', {
+      fs: realFsWith({
+        writeSync: () => {
+          throw 'disk disappeared'
+        },
+        closeSync: (fd) => {
+          closeSync(fd)
+          throw new Error('close failed')
+        },
+      }),
+      stderr: (text) => warnings.push(text),
+    })
+    expect(() => log.write('core', 'INFO', 'lost entry')).not.toThrow()
+    log.write('core', 'INFO', 'later entry')
+    log.close()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('log file disabled: disk disappeared')
+    expect(readFileSync(join(dir, 'core.log'), 'utf8')).toBe('')
+  })
+
   it('an unwritable folder disables the log without throwing', () => {
     // A real chmod-restricted directory would also prove this, but POSIX permission bits do not
     // reliably block directory creation on Windows (this suite's CI includes windows-2022 and

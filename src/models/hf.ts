@@ -11,6 +11,8 @@ export interface HfFileInfo {
   filename: string
   size: number
   sha256?: string
+  /** Actual immutable repository commit; populated by fetchHfGgufFiles. */
+  revision?: string
   downloadUrl: string
 }
 
@@ -34,14 +36,14 @@ export function hfToken(env: NodeJS.ProcessEnv = process.env): string | undefine
 /** Fetch and normalize the GGUF siblings, smallest first. */
 export async function fetchHfGgufFiles(
   repoId: string,
-  options: { fetch?: typeof fetch; token?: string } = {}
+  options: { fetch?: typeof fetch; token?: string; revision?: string } = {}
 ): Promise<HfFileInfo[]> {
   if (!looksLikeHfRepo(repoId)) {
     throw new AtomicCoreError('INVALID_ARGUMENT', `Invalid Hugging Face repository id "${repoId}".`)
   }
   const fetchImpl = options.fetch ?? fetch
   const headers = options.token ? { authorization: `Bearer ${options.token}` } : undefined
-  const url = `https://huggingface.co/api/models/${repoId}?blobs=true&files_metadata=true`
+  const url = `https://huggingface.co/api/models/${repoId}/revision/${encodeURIComponent(options.revision ?? 'main')}?blobs=true&files_metadata=true`
   const response = await fetchImpl(url, { ...(headers ? { headers } : {}) })
   if (!response.ok) {
     const details =
@@ -56,12 +58,18 @@ export async function fetchHfGgufFiles(
       details
     )
   }
-  const body = (await response.json()) as { siblings?: unknown }
+  const body = (await response.json()) as { sha?: unknown; siblings?: unknown }
   if (!Array.isArray(body.siblings)) {
     throw new AtomicCoreError('IO_ERROR', 'Unexpected Hugging Face model metadata response.')
   }
+  if (typeof body.sha !== 'string' || !/^[0-9a-f]{40}$/.test(body.sha)) {
+    throw new AtomicCoreError('IO_ERROR', 'Hugging Face did not provide an immutable repository commit.')
+  }
+  if (options.revision && /^[0-9a-f]{40}$/.test(options.revision) && body.sha !== options.revision) {
+    throw new AtomicCoreError('IO_ERROR', 'Hugging Face returned another repository commit.')
+  }
   const files = body.siblings
-    .map(parseSibling(repoId))
+    .map(parseSibling(repoId, body.sha))
     .filter((file): file is HfFileInfo => file !== undefined)
     .sort((a, b) => a.size - b.size || a.filename.localeCompare(b.filename))
   if (files.length === 0) {
@@ -82,7 +90,7 @@ export function chooseDefaultHfFile(files: HfFileInfo[]): HfFileInfo {
   return chosen
 }
 
-function parseSibling(repoId: string): (value: unknown) => HfFileInfo | undefined {
+function parseSibling(repoId: string, revision: string): (value: unknown) => HfFileInfo | undefined {
   return (value) => {
     if (!value || typeof value !== 'object') return undefined
     const sibling = value as Record<string, unknown>
@@ -102,7 +110,8 @@ function parseSibling(repoId: string): (value: unknown) => HfFileInfo | undefine
       filename,
       size,
       ...(sha256 ? { sha256 } : {}),
-      downloadUrl: `https://huggingface.co/${repoId}/resolve/main/${encoded}`,
+      revision,
+      downloadUrl: `https://huggingface.co/${repoId}/resolve/${revision}/${encoded}`,
     }
   }
 }

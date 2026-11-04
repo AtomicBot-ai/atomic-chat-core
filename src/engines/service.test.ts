@@ -1,26 +1,43 @@
 import { describe, expect, it } from 'vitest'
+import { ENGINE_KINDS } from '../contracts/index.js'
 import type { EngineId, EngineKind, EngineVersions } from '../contracts/index.js'
 import { EnginesService, hostEngines } from './service.js'
 import type { EngineHandle } from './service.js'
 
 describe('hostEngines', () => {
-  it('lists the llama.cpp providers, sd.cpp and MLX on macOS, and no managed engine', () => {
+  it('lists the llama.cpp providers, sd.cpp, audio.cpp and MLX on macOS, and no managed engine', () => {
     expect(hostEngines('darwin', [])).toEqual([
       'llamacpp-upstream',
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'mlx',
     ])
   })
 
+  it('lists audio-cpp right after sd-cpp on every desktop platform, as an engine build', () => {
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      const engines = hostEngines(platform, [])
+      expect(engines.indexOf('audio-cpp')).toBe(engines.indexOf('sd-cpp') + 1)
+    }
+    expect(ENGINE_KINDS['audio-cpp']).toBe('engine-build')
+  })
+
   it('has no MLX off macOS, and the managed engines this core offers', () => {
-    expect(hostEngines('win32', [])).toEqual(['llamacpp-upstream', 'llamacpp', 'atomic-prism', 'sd-cpp'])
+    expect(hostEngines('win32', [])).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'audio-cpp',
+    ])
     expect(hostEngines('linux', ['vllm', 'tensorrt-llm'])).toEqual([
       'llamacpp-upstream',
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'tensorrt-llm',
       'vllm',
     ])
@@ -36,9 +53,46 @@ describe('hostEngines', () => {
       const engines = hostEngines(platform, [], { foundryLocal: true })
       expect(engines).toContain('foundry-local')
       expect(engines.indexOf('foundry-local')).toBe(
-        engines.indexOf('sd-cpp') + (platform === 'darwin' ? 2 : 1)
+        engines.indexOf('sd-cpp') + (platform === 'darwin' ? 3 : 2)
       )
     }
+  })
+
+  it('lists litert-lm after foundry-local only where its platform rule holds', () => {
+    expect(hostEngines('darwin', [], { foundryLocal: true, liteRtLm: true }).slice(-2)).toEqual([
+      'foundry-local',
+      'litert-lm',
+    ])
+    expect(hostEngines('linux', ['vllm'], { liteRtLm: true })).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'audio-cpp',
+      'litert-lm',
+      'vllm',
+    ])
+    expect(hostEngines('win32', [], { liteRtLm: false })).not.toContain('litert-lm')
+    expect(hostEngines('darwin', [])).not.toContain('litert-lm')
+    expect(ENGINE_KINDS['litert-lm']).toBe('engine-build')
+  })
+
+  it('lists geniex after litert-lm only on a Snapdragon X host (change add-geniex-runtime, task 4.5)', () => {
+    expect(hostEngines('win32', [], { liteRtLm: true, geniex: true }).slice(-2)).toEqual([
+      'litert-lm',
+      'geniex',
+    ])
+    expect(hostEngines('win32', [], { geniex: true })).toEqual([
+      'llamacpp-upstream',
+      'llamacpp',
+      'atomic-prism',
+      'sd-cpp',
+      'audio-cpp',
+      'geniex',
+    ])
+    expect(hostEngines('win32', [], { geniex: false })).not.toContain('geniex')
+    expect(hostEngines('win32', [])).not.toContain('geniex')
+    expect(ENGINE_KINDS['geniex']).toBe('engine-build')
   })
 
   it('has no foundry-local where the host does not support it, and none by default', () => {

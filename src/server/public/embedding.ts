@@ -6,13 +6,14 @@
  * module's own process; any other goes on to `serveForward` (cloud providers, then the loaded
  * sessions) exactly as before, with the body already read handed over in `ex.body`.
  *
- * A request served here is started for (an enabled module that is idle starts and is waited on), then
- * checked (`checkEmbeddingRequest`: no media links, no inline media the engine would fail to parse, no
- * media the model cannot read, no `dimensions` it does not produce) and passed through byte for byte
- * with the process's own key. The engine's answer, its error envelope included, comes back unchanged,
- * except its 500 for media it could not decode: that is the client's input, so it becomes a 400 naming
- * the field (`undecodableMediaVerdict`). The answers the core writes itself use the OpenAI error shape,
- * with `param` when a field is at fault, like the rest of `/v1`.
+ * A request served here has its `input` checked for a form `/v1/embeddings` takes
+ * (`embeddingInputRefusal`, before an idle module is started), is started for (an enabled module that
+ * is idle starts and is waited on), then checked (`checkEmbeddingRequest`: no media links, no inline
+ * media the engine would fail to parse, no media the model cannot read, no `dimensions` it does not
+ * produce) and passed through byte for byte with the process's own key. The engine's answer, its error
+ * envelope included, comes back unchanged, except its 500 for media it could not decode: that is the
+ * client's input, so it becomes a 400 naming the field (`undecodableMediaVerdict`). The answers the core
+ * writes itself use the OpenAI error shape, with `param` when a field is at fault, like the rest of `/v1`.
  */
 
 import { checkEmbeddingRequest, undecodableMediaVerdict } from '../../embedding/index.js'
@@ -22,6 +23,7 @@ import { structuredErrorJson } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, header } from './exchange.js'
 import type { Exchange } from './exchange.js'
 import { endpointFromPath } from './trace.js'
+import { embeddingInputRefusal } from './validate.js'
 import {
   readUpstreamText,
   relay,
@@ -91,6 +93,12 @@ export async function serveEmbeddingIfOwned(
   trace.endpoint = endpointFromPath(ex.path)
   trace.backend = EMBEDDING_BACKEND_LABEL
   trace.modelId = modelId
+  const malformed = embeddingInputRefusal(parsed.json)
+  if (malformed !== undefined) {
+    trace.errorKind = 'bad_request'
+    answer(ex, 400, malformed, JSON_HEADERS)
+    return true
+  }
   const gone = clientGone(ex)
   const target = await backend.acquire(waitMs, gone)
   if (!target.ok) {

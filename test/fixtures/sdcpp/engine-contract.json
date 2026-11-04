@@ -1,0 +1,405 @@
+{
+  "schema": "atomic-engine-contract",
+  "schema_version": 1,
+  "engine": "sd-cpp",
+  "generated_by": "by hand; test/contract/sdcpp-engine-contract.test.ts holds every part to src/diffusion and src/engine-builds",
+  "invocations": [
+    {
+      "bin": "sd-server",
+      "argv": ["--help"],
+      "source": "src/diffusion/install.ts",
+      "expect": "exit-0",
+      "severity": "warn",
+      "note": "The install probe when the archive has no sd-cli; it reads the output, not the exit code."
+    },
+    {
+      "bin": "sd-server",
+      "argv": ["--version"],
+      "source": "scripts/lib/sdcpp-surface.mjs",
+      "expect": "exit-0",
+      "severity": "warn",
+      "note": "Core never runs it; the check reads the commit the binary was built from."
+    },
+    {
+      "bin": "sd-cli",
+      "argv": ["--help"],
+      "source": "src/diffusion/install.ts",
+      "expect": "exit-0",
+      "severity": "warn",
+      "optional": true,
+      "note": "The install probe (prepareSdcppTree); an archive without sd-cli is probed through sd-server."
+    }
+  ],
+  "probe": {
+    "bins": ["sd-cli", "sd-server"],
+    "argv": ["--help"],
+    "markers": ["stable-diffusion.cpp", "--cfg-scale"],
+    "source": "src/diffusion/install.ts",
+    "note": "probeOutputIsSdcpp: any marker, case-insensitive. Without one the archive installs nowhere."
+  },
+  "version": {
+    "pattern": "stable-diffusion\\.cpp version (\\S+), commit (\\S+)",
+    "source": "examples/common/common.cpp (version_string)",
+    "note": "`version` is `git describe` of the build's checkout: `unknown` when it had no tags, as in the fork's builds."
+  },
+  "flags": [
+    { "flag": "--diffusion-model", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--vae", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--vae-format", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--audio-vae", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--embeddings-connectors", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--clip_l", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--t5xxl", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--llm", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--llm_vision", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--qwen2vl", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--clip-on-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--vae-on-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--vae-tiling", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--offload-to-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--diffusion-fa", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--diffusion-conv-direct", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--listen-ip", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--listen-port", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--lora-model-dir", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--hires-upscalers-dir", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--embd-dir", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--threads", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--backend", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "--verbose", "severity": "break", "source": "src/diffusion/args.ts" },
+    { "flag": "-v", "severity": "break", "source": "src/diffusion/args.ts" },
+    {
+      "flag": "-M",
+      "severity": "warn",
+      "source": "src/diffusion/args.ts",
+      "note": "Emitted only under ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG, until a live run shows sd-server wants it; sd-cli has it."
+    }
+  ],
+  "strings": [
+    {
+      "id": "route.ready",
+      "text": "/v1/models",
+      "channel": "http-route",
+      "source": "src/diffusion/server-process.ts",
+      "upstream_text": "\"/v1/models\"",
+      "severity_if_lost": "break",
+      "note": "GET; a 200 means the model is loaded (sd-server binds after loading)."
+    },
+    {
+      "id": "route.capabilities",
+      "text": "/sdcpp/v1/capabilities",
+      "channel": "http-route",
+      "source": "src/diffusion/server-process.ts",
+      "upstream_text": "\"/sdcpp/v1/capabilities\"",
+      "severity_if_lost": "break",
+      "note": "GET; a 404 means the port belongs to some other server."
+    },
+    {
+      "id": "route.img_gen",
+      "text": "/sdcpp/v1/img_gen",
+      "channel": "http-route",
+      "source": "src/diffusion/jobs.ts",
+      "upstream_text": "\"/sdcpp/v1/img_gen\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "route.vid_gen",
+      "text": "/sdcpp/v1/vid_gen",
+      "channel": "http-route",
+      "source": "src/diffusion/jobs.ts",
+      "upstream_text": "\"/sdcpp/v1/vid_gen\"",
+      "severity_if_lost": "break",
+      "note": "The live run on CI has no video model: only this text search sees the route."
+    },
+    {
+      "id": "route.job",
+      "text": "/sdcpp/v1/jobs/{id}",
+      "channel": "http-route",
+      "source": "src/diffusion/jobs.ts",
+      "upstream_text": "/sdcpp/v1/jobs/(",
+      "severity_if_lost": "break",
+      "note": "GET, polled; upstream registers it (and the cancel route) as a regex."
+    },
+    {
+      "id": "route.cancel",
+      "text": "/sdcpp/v1/jobs/{id}/cancel",
+      "channel": "http-route",
+      "source": "src/diffusion/jobs.ts",
+      "upstream_text": ")/cancel)",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "progress.step",
+      "text": "<step>/<steps> - <rate>",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "%i/%i - %s",
+      "severity_if_lost": "warn",
+      "note": "parseStepLine: the first N/M of a redraw (print_progress_line in src/core/util.cpp)."
+    },
+    {
+      "id": "progress.rate.s-it",
+      "text": "s/it",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "\"s/it\"",
+      "severity_if_lost": "warn",
+      "note": "isProgressRedraw: a redraw ends with a rate."
+    },
+    {
+      "id": "progress.rate.it-s",
+      "text": "it/s",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "\"it/s\"",
+      "severity_if_lost": "warn"
+    },
+    {
+      "id": "progress.rate.bytes",
+      "text": "B/s",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "MB/s",
+      "severity_if_lost": "info",
+      "note": "The tensor loader's redraw; only keeps it out of the step bar."
+    },
+    {
+      "id": "progress.tiles",
+      "text": "processing <N> tiles",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "processing %i tiles",
+      "severity_if_lost": "warn",
+      "note": "parseTileAnnouncement: without it the tiles of a VAE pass read as sampling steps."
+    },
+    {
+      "id": "progress.generating-image",
+      "text": "generating image:",
+      "channel": "log",
+      "source": "src/diffusion/tracker.ts",
+      "upstream_text": "generating image:",
+      "severity_if_lost": "warn"
+    },
+    {
+      "id": "progress.generating-video",
+      "text": "generating video:",
+      "channel": "log",
+      "source": "src/diffusion/tracker.ts",
+      "upstream_text": "generating video:",
+      "severity_if_lost": "warn",
+      "note": "Not printed at master-883 (video.cpp logs `generate_video …`): reported as text in neither tree."
+    },
+    {
+      "id": "oom.model-manager",
+      "text": "cannot make enough memory available",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": "cannot make enough memory available",
+      "severity_if_lost": "warn",
+      "note": "classifyExit: OUT_OF_MEMORY instead of ENGINE_CRASHED, and the offload fallback."
+    },
+    {
+      "id": "oom.out-of-memory",
+      "text": "out of memory",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null,
+      "note": "ggml and the GPU APIs, outside sd.cpp's tree."
+    },
+    {
+      "id": "oom.failed-to-allocate",
+      "text": "failed to allocate",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "oom.cuda-error-memory-allocation",
+      "text": "cudaErrorMemoryAllocation",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "oom.cuda-error-out-of-memory",
+      "text": "CUDA_ERROR_OUT_OF_MEMORY",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "oom.vulkan-out-of-device-memory",
+      "text": "ErrorOutOfDeviceMemory",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "oom.insufficient-memory",
+      "text": "insufficient memory",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "abort.unsupported-op",
+      "text": "unsupported op",
+      "channel": "log",
+      "source": "src/diffusion/args.ts",
+      "upstream_text": null,
+      "note": "With ggml_abort: the one death retried on the CPU backend (isGgmlUnsupportedOpAbort)."
+    },
+    {
+      "id": "abort.ggml-abort",
+      "text": "ggml_abort",
+      "channel": "log",
+      "source": "src/diffusion/args.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "gpu-fault.address",
+      "text": "gpu address fault",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null,
+      "note": "GpuFaultWatch: ggml-metal's words."
+    },
+    {
+      "id": "gpu-fault.error-state",
+      "text": "backend is in error state",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "gpu-fault.command-buffer",
+      "text": "command buffer",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    },
+    {
+      "id": "gpu-fault.pagefault",
+      "text": "pagefault",
+      "channel": "log",
+      "source": "src/diffusion/progress.ts",
+      "upstream_text": null
+    }
+  ],
+  "assets": {
+    "source": "conf .github/workflows/mirror-sdcpp.yml (MATRIX) and src/engine-builds/select.ts (diffusionBackendLadder)",
+    "note": "{sha7} is the upstream commit of the tag. `required`: conf's mirror refuses a release without it. `cpu`: the build every host of the platform falls back to. Mirrored archives core never selects (linux-cuda12-x64, win-cuda13-x64, linux-rocm) are not listed.",
+    "core_backends": [
+      {
+        "platform": "macos-arm64",
+        "backend": "macos-arm64",
+        "cpu": true,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-Darwin-macOS-[\\d.]+-arm64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cuda12-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-win-cuda12-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cudart-cu12",
+        "cpu": false,
+        "required": false,
+        "companion": true,
+        "asset": "cudart-sd-bin-win-cu12-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-vulkan-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-win-vulkan-x64\\.zip"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cpu-x64",
+        "cpu": true,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-win-cpu-x64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cuda13-arm64",
+        "cpu": false,
+        "required": false,
+        "asset": "sd-master-{sha7}-bin-win-cuda13-arm64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cpu-arm64",
+        "cpu": true,
+        "required": false,
+        "asset": "sd-master-{sha7}-bin-win-cpu-arm64\\.zip"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-vulkan-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-Linux-Ubuntu-[\\d.]+-x86_64-vulkan\\.zip"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-cpu-x64",
+        "cpu": true,
+        "required": true,
+        "asset": "sd-master-{sha7}-bin-Linux-Ubuntu-[\\d.]+-x86_64\\.zip"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cuda13-arm64",
+        "cpu": false,
+        "required": false,
+        "asset": "sd-master-{sha7}-bin-Linux-Ubuntu-[\\d.]+-aarch64-cuda13\\.zip"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cpu-arm64",
+        "cpu": true,
+        "required": false,
+        "asset": "sd-master-{sha7}-bin-Linux-Ubuntu-[\\d.]+-aarch64\\.zip"
+      }
+    ]
+  },
+  "upstream": {
+    "repo": "leejet/stable-diffusion.cpp",
+    "branch": "master",
+    "watched_paths": [
+      { "path": "examples/common/common.cpp", "why": "every flag, --help, --version and the request JSON core sends" },
+      { "path": "examples/common/common.h", "why": "the option and request structs behind the flags" },
+      { "path": "examples/server/main.cpp", "why": "sd-server's startup: model load before bind, --version" },
+      { "path": "examples/server/routes_sdcpp.cpp", "why": "/sdcpp/v1/* routes, capabilities, job submit and cancel" },
+      { "path": "examples/server/routes_openai.cpp", "why": "GET /v1/models, core's readiness poll" },
+      { "path": "examples/server/routes.h", "why": "which route families sd-server registers" },
+      { "path": "examples/server/async_jobs.cpp", "why": "job states and result fields core polls for" },
+      { "path": "examples/server/async_jobs.h", "why": "the job record" },
+      { "path": "examples/server/runtime.cpp", "why": "the resident context, outputs and their mime types" },
+      { "path": "examples/server/runtime.h", "why": "the server runtime" },
+      { "path": "examples/cli/main.cpp", "why": "sd-cli --help, the install probe" },
+      { "path": "src/core/util.cpp", "why": "the progress line core parses" },
+      { "path": "src/pipeline/request.cpp", "why": "custom_sigmas and the steps they run" },
+      { "path": "src/pipeline/diffusion_engine.cpp", "why": "how --diffusion-model, --vae and --llm are loaded" },
+      { "path": "src/pipeline/image.cpp", "why": "`generating image:`" },
+      { "path": "src/pipeline/video.cpp", "why": "video generation and its log lines" },
+      { "path": "src/runtime/tiling.cpp", "why": "`processing N tiles`" },
+      { "path": "src/model_manager.cpp", "why": "`cannot make enough memory available`" },
+      { "path": "CMakeLists.txt", "why": "the version and commit --version prints, build options" }
+    ],
+    "release_note_keywords": [
+      { "pattern": "deprecat", "severity": "warn" },
+      { "pattern": "remove", "severity": "warn" },
+      { "pattern": "rename", "severity": "warn" },
+      { "pattern": "breaking", "severity": "warn" },
+      { "pattern": "\\b(server|sd-server|api|cli|args?)\\b", "severity": "info" }
+    ]
+  }
+}

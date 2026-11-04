@@ -6,6 +6,11 @@ import { describe, expect, it } from 'vitest'
 import {
   foundryLocalHostChoice,
   foundryLocalHostPlatform,
+  liteRtLmHostChoice,
+  liteRtLmHostPlatform,
+  geniexHostChoice,
+  audioBackendKindOf,
+  audiocppHostChoice,
   backendKindOf,
   companionFor,
   diffusionBackendLadder,
@@ -404,6 +409,136 @@ describe('sdcppHostChoice', () => {
   })
 })
 
+describe('audioBackendKindOf', () => {
+  it.each([
+    ['macos-arm64', 'metal'],
+    ['win-cuda12-x64', 'cuda'],
+    ['win-cuda13-x64', 'cuda'],
+    ['win-cuda13-arm64', 'cuda'],
+    ['linux-cuda13-arm64', 'cuda'],
+    ['win-vulkan-x64', 'vulkan'],
+    ['linux-vulkan-x64', 'vulkan'],
+    ['win-cpu-x64', 'cpu'],
+    ['linux-cpu-x64', 'cpu'],
+    ['win-cpu-arm64', 'cpu'],
+    ['linux-cpu-arm64', 'cpu'],
+    // audio.cpp has no ROCm build, and the companion is not a build.
+    ['win-rocm-7.14-x64', null],
+    ['linux-rocm-7.14-x64', null],
+    ['win-cudart-cu12', null],
+    ['', null],
+    ['freebsd-x64', null],
+  ] as const)('%s → %s', (id, kind) => {
+    expect(audioBackendKindOf(id)).toBe(kind)
+  })
+})
+
+describe('audiocppHostChoice', () => {
+  /** conf's audio.cpp schema vocabulary, plus ROCm ids a broken manifest might still carry. */
+  const AUDIO_IDS = [
+    'macos-arm64',
+    'win-cuda12-x64',
+    'win-cuda13-x64',
+    'win-vulkan-x64',
+    'win-cpu-x64',
+    'linux-vulkan-x64',
+    'linux-cpu-x64',
+    ...ARM64_IDS,
+  ]
+  const manifest = {
+    tag_name: 'v0.9.3-a1b2c3d4',
+    assets: [...AUDIO_IDS, 'win-rocm-7.14-x64', 'linux-rocm-7.14-x64', 'win-cudart-cu12'].map((backend) => ({
+      backend,
+      ...(backend === 'win-cudart-cu12' ? { companion: true } : {}),
+    })),
+  }
+  const none = new Set<string>()
+  const gpu = (memory: number) => ({ vendor: 'AMD', totalMemoryMib: memory })
+
+  it.each([
+    ['an Apple Silicon Mac', host({ os: 'macos', arch: 'arm64' }), ['macos-arm64']],
+    [
+      'Windows with CUDA',
+      host({ features: { cuda12: true, vulkan: true } }),
+      ['win-cuda12-x64', 'win-vulkan-x64', 'win-cpu-x64'],
+    ],
+    [
+      'Windows with a CUDA 13-only driver',
+      host({ features: { cuda13: true } }),
+      ['win-cuda12-x64', 'win-cpu-x64'],
+    ],
+    // ROCm is never offered: an AMD card runs Vulkan.
+    [
+      'Windows with ROCm',
+      host({ features: { rocm: true, vulkan: true } }),
+      ['win-vulkan-x64', 'win-cpu-x64'],
+    ],
+    ['Windows without an accelerator', host({}), ['win-cpu-x64']],
+    [
+      'Linux with a Vulkan device',
+      host({ os: 'linux', features: { vulkan: true, rocm: true }, gpus: [gpu(8192)] }),
+      ['linux-vulkan-x64', 'linux-cpu-x64'],
+    ],
+    [
+      'Linux with a small Vulkan device',
+      host({ os: 'linux', features: { vulkan: true }, gpus: [gpu(1024)] }),
+      ['linux-cpu-x64'],
+    ],
+    [
+      'a DGX Spark',
+      host({ os: 'linux', arch: 'arm64', features: { cuda13: true } }),
+      ['linux-cuda13-arm64', 'linux-cpu-arm64'],
+    ],
+    ['Windows on Arm', host({ arch: 'arm64' }), ['win-cpu-arm64']],
+  ] as const)('on %s offers %j', (_name, h, ladder) => {
+    expect(audiocppHostChoice(h, manifest, none)).toEqual({ ladder, backend_id: ladder[0], reason: null })
+  })
+
+  it('skips a build that failed its probe on this tag, and offers the last one again once all failed', () => {
+    const vulkan = host({ features: { vulkan: true } })
+    const failed = new Set(['v0.9.3-a1b2c3d4/win-vulkan-x64'])
+    expect(audiocppHostChoice(vulkan, manifest, failed).ladder).toEqual(['win-cpu-x64'])
+    expect(audiocppHostChoice(vulkan, manifest, new Set(['v0.9.3/win-vulkan-x64'])).backend_id).toBe(
+      'win-vulkan-x64'
+    )
+    const all = new Set(['win-vulkan-x64', 'win-cpu-x64'].map((id) => `${manifest.tag_name}/${id}`))
+    expect(audiocppHostChoice(vulkan, manifest, all)).toMatchObject({
+      ladder: ['win-cpu-x64'],
+      backend_id: 'win-cpu-x64',
+    })
+  })
+
+  it('offers nothing on a manifest with only ROCm or companion assets, nor where audio.cpp has no build, saying why', () => {
+    const rocmOnly = {
+      tag_name: 'v0.9.3',
+      assets: [{ backend: 'win-rocm-7.14-x64' }, { backend: 'win-cudart-cu12', companion: true }],
+    }
+    expect(audiocppHostChoice(host({ features: { rocm: true } }), rocmOnly, none)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'The release manifest lists no build for this computer.',
+    })
+    expect(audiocppHostChoice(host({ os: 'macos', arch: 'x64' }), manifest, none).reason).toBe(
+      'Audio generation needs an Apple Silicon Mac; Intel Macs are not supported.'
+    )
+    expect(audiocppHostChoice({ ...host({}), os: 'freebsd' }, manifest, none).reason).toBe(
+      'Audio generation is not supported on freebsd.'
+    )
+    const noArm = { ...manifest, assets: manifest.assets.filter((a) => !a.backend.endsWith('-arm64')) }
+    expect(audiocppHostChoice(host({ os: 'linux', arch: 'arm64' }), noArm, none).reason).toBe(
+      'The release manifest lists no audio.cpp build for arm64 linux yet.'
+    )
+  })
+
+  it('leaves sd.cpp choosing ROCm and naming its own feature', () => {
+    const amd = host({ features: { rocm: true, vulkan: true } })
+    expect(sdcppHostChoice(amd, manifest, none).backend_id).toBe('win-rocm-7.14-x64')
+    expect(sdcppHostChoice(host({ os: 'macos', arch: 'x64' }), manifest, none).reason).toBe(
+      'Image generation needs an Apple Silicon Mac; Intel Macs are not supported.'
+    )
+  })
+})
+
 describe('failed backends on disk', () => {
   it('remembers the last sixteen <tag>/<backend_id> pairs and survives a missing or broken file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'atomic-failed-backends-'))
@@ -527,5 +662,97 @@ describe('foundryLocalHostChoice', () => {
     })
     expect(foundryLocalHostChoice({ platform: 'win-arm64' }, release).reason).toMatch(/win-arm64/)
     expect(foundryLocalHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/manifest/)
+  })
+})
+
+describe('liteRtLmHostPlatform', () => {
+  const host = (over: Partial<Parameters<typeof liteRtLmHostPlatform>[0]>) =>
+    liteRtLmHostPlatform({
+      platform: 'linux',
+      arch: 'x64',
+      osRelease: '6.8.0',
+      glibcVersion: '2.39',
+      ...over,
+    })
+
+  it('takes Windows x64 only: Google publishes no Windows arm64 wheel', () => {
+    expect(host({ platform: 'win32', arch: 'x64', glibcVersion: undefined })).toEqual({ platform: 'win-x64' })
+    expect(host({ platform: 'win32', arch: 'arm64', glibcVersion: undefined })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/Windows x64/),
+    })
+  })
+
+  it('takes macOS 12 and newer on Apple Silicon, by the Darwin release', () => {
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '21.0.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '25.6.0' })).toEqual({
+      platform: 'macos-arm64',
+    })
+    expect(host({ platform: 'darwin', arch: 'arm64', osRelease: '20.6.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/macOS 12/),
+    })
+    expect(host({ platform: 'darwin', arch: 'x64', osRelease: '24.0.0' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/Apple Silicon/),
+    })
+  })
+
+  it('takes Linux x64 and arm64 with glibc 2.27 or newer, and nothing without glibc', () => {
+    expect(host({ arch: 'x64', glibcVersion: '2.27' })).toEqual({ platform: 'linux-x64' })
+    expect(host({ arch: 'arm64', glibcVersion: '2.39' })).toEqual({ platform: 'linux-arm64' })
+    expect(host({ glibcVersion: '2.26' })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.27/),
+    })
+    expect(host({ glibcVersion: undefined })).toEqual({
+      platform: null,
+      reason: expect.stringMatching(/glibc 2\.27/),
+    })
+    expect(host({ arch: 'ia32' })).toEqual({ platform: null, reason: expect.stringMatching(/does not run/) })
+  })
+
+  it('offers the host wheel of the newest release, or says why not', () => {
+    const release = { assets: [{ platform: 'macos-arm64' as const }, { platform: 'win-x64' as const }] }
+    expect(liteRtLmHostChoice({ platform: 'win-x64' }, release)).toEqual({
+      ladder: ['win-x64'],
+      backend_id: 'win-x64',
+      reason: null,
+    })
+    expect(liteRtLmHostChoice({ platform: 'linux-x64' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'The LiteRT-LM manifest lists no wheel for linux-x64.',
+    })
+    expect(liteRtLmHostChoice({ platform: 'linux-x64' }, null).reason).toMatch(/unavailable/)
+    expect(liteRtLmHostChoice({ platform: null, reason: 'no' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'no',
+    })
+  })
+})
+
+describe('geniexHostChoice (change add-geniex-runtime, task 4.4)', () => {
+  it('offers the host zip of the newest release, or says why not', () => {
+    const release = { assets: [{ platform: 'win-arm64' as const }] }
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x-elite' }, release)).toEqual({
+      ladder: ['win-arm64'],
+      backend_id: 'win-arm64',
+      reason: null,
+    })
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x-elite' }, { assets: [] })).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'The GenieX manifest lists no SDK for win-arm64.',
+    })
+    expect(geniexHostChoice({ platform: 'win-arm64', chip: 'x2-elite' }, null).reason).toMatch(/unavailable/)
+    expect(geniexHostChoice({ platform: null, reason: 'no' }, release)).toEqual({
+      ladder: [],
+      backend_id: null,
+      reason: 'no',
+    })
   })
 })

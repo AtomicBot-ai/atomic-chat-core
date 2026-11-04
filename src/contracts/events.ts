@@ -12,9 +12,11 @@ import type {
   DiffusionProgressEvent,
   DiffusionStateEvent,
 } from './diffusion.js'
+import type { AudioErrorEvent, AudioJobEvent, AudioStateEvent } from './audio.js'
 import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EngineChangedEvent } from './engines.js'
 import type { FoundryLocalAcceleratorsEvent } from './foundry-local.js'
+import type { LiteRtLmAcceleratorsEvent } from './litert-lm.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
@@ -177,6 +179,16 @@ export interface CoreEvents {
   'diffusion:video-job': DiffusionVideoJobEvent
 
   /**
+   * Audio generation (`src/contracts/audio.ts`), camelCase like diffusion. `state` on every change of
+   * the engine install, the model or the output folder; `job` on every job transition and phase;
+   * `error` for a failure nobody is awaiting. audio.cpp reports no progress, so there is no
+   * per-step event.
+   */
+  'audio:state': AudioStateEvent
+  'audio:job': AudioJobEvent
+  'audio:error': AudioErrorEvent
+
+  /**
    * Managed text runtimes (`src/contracts/environment.ts`; openspec change `add-tensorrt-llm-linux`).
    * Both carry full state rather than a delta, so a client that reconnects rebuilds from the
    * snapshot and then applies whatever arrives. Both are proposed: no producer exists yet.
@@ -208,6 +220,8 @@ export interface CoreEvents {
    * `failed`. Re-read `GET /runtimes/foundry-local/accelerators` after the last one.
    */
   'foundry-local:accelerators': FoundryLocalAcceleratorsEvent
+  /** One step of a LiteRT-LM accelerator prepare (change `add-litert-lm-runtime`, task 6.4). */
+  'litert-lm:accelerators': LiteRtLmAcceleratorsEvent
 
   /**
    * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). `state` on every
@@ -229,7 +243,9 @@ export interface CoreEvents {
    * One request to the Local API Server, for the app's analytics window and its API screen
    * (PLAN.md §2 decision 15). `started` and `progress` are sent only while the app's inspector is
    * watching, because they carry the prompt preview; `finished` carries the analytics observation
-   * for every request that is product traffic, and the inspector's finish fields when it announced.
+   * for every request that is product traffic, and the finish fields for every request it reports.
+   * A request nobody watched (`seq` -1) has its timings and token counts there, never a
+   * `reply_preview`.
    */
   'api:request': ApiRequestEvent
 
@@ -294,7 +310,10 @@ export interface ApiRequestFinishFields {
   headers_ms: number | null
   ttft_ms: number | null
   duration_ms: number | null
+  /** The whole prompt, its cached part included. */
   prompt_tokens: number | null
+  /** The part of the prompt the engine reused from its cache instead of processing it again. */
+  cached_tokens: number | null
   completion_tokens: number | null
   total_tokens: number | null
   tokens_estimated: boolean
@@ -303,6 +322,11 @@ export interface ApiRequestFinishFields {
   finish_reason: string | null
   reply_preview: string | null
   reply_chars: number | null
+  /**
+   * The context window of the session that served the request, as it was then: the log keeps it
+   * after the model is reloaded with another window or unloaded. `null` when it is not known.
+   */
+  ctx_len: number | null
 }
 
 export type ApiRequestEvent =

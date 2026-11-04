@@ -2,7 +2,7 @@ import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { agentInput, makeAgentHome, type AgentHome } from '../../../test/helpers/agent-config-home.js'
-import { applyDshProvider, configureDsh, dshRouteNode, dshValidateEnvValue } from './dsh.js'
+import { applyDshProvider, configureDsh, dshRouteNode, dshValidateEnvValue, hasYamlTag } from './dsh.js'
 
 let home: AgentHome
 afterEach(async () => {
@@ -62,7 +62,7 @@ describe('configuring dsh', () => {
     home = await makeAgentHome()
   })
 
-  it('rejects the key before settings.yaml exists, so no route points at a stored nothing', async () => {
+  it('rejects the key before anything is written, so no route points at a stored nothing', async () => {
     home = await makeAgentHome()
     await expect(configureDsh(agentInput(home.fs, { apiKey: 'sk bad' }))).rejects.toThrow()
     expect(await home.tree()).toEqual({})
@@ -71,7 +71,11 @@ describe('configuring dsh', () => {
   it('honours $DSH_HOME, expanding a literal ~ that a quoted rc value can carry', async () => {
     home = await makeAgentHome()
     await configureDsh(agentInput(home.fs, { env: { DSH_HOME: ' ~/dev/dsh ' } }))
-    expect(Object.keys(await home.tree())).toEqual(['dev/dsh/.env', 'dev/dsh/settings.yaml'])
+    expect(Object.keys(await home.tree())).toEqual([
+      'dev/dsh/.env',
+      'dev/dsh/profiles/web/cordis.patch.yml',
+      'dev/dsh/profiles/web/cordis.patch.yml.atomic-chat-backup.json',
+    ])
   })
 
   // NTFS has no POSIX modes: chmod there only toggles read-only.
@@ -93,5 +97,135 @@ describe('configuring dsh', () => {
     // Keyless: our block goes, the user's line stays.
     await configureDsh(agentInput(home.fs, { apiKey: '' }))
     expect(await home.read('.dsh/.env')).toBe('OTHER=1\n')
+  })
+
+  it('declares a known window on the model, and leaves dsh its defaults otherwise', () => {
+    expect(dshRouteNode('http://u', 'm', false, 16384)['models']).toEqual([
+      { id: 'm', contextWindow: 16384, maxTokens: 4096 },
+    ])
+    expect(dshRouteNode('http://u', 'm', false)['models']).toEqual([{ id: 'm' }])
+  })
+})
+
+const PATCH = '.dsh/profiles/web/cordis.patch.yml'
+const TEMPLATE =
+  '# Your patch layer for this dsh profile, applied after every bundle layer:\n' +
+  '# a top-level YAML array of loader patch entries (id-targeted config\n' +
+  '# overrides, disables, and insert lists; `!!js` expressions allowed).\n' +
+  '[]\n'
+const ROUTE_ROW =
+  "- id: llm-pi-ai\n  name: '@deepseek-ai/dsh-llm-pi-ai'\n  config:\n    providers:\n      atomic:\n" +
+  '        displayName: Atomic Chat\n        api: openai-completions\n        baseURL: http://127.0.0.1:1337/v1\n' +
+  '        apiKeyEnv: ATOMIC_API_KEY\n        models:\n        - id: AtomicChat/Qwen3.5-9B-GGUF\n' +
+  '          contextWindow: 32768\n          maxTokens: 8192\n'
+const DEFAULT_ROW =
+  "- id: agent-default-model\n  name: '@deepseek-ai/dsh-agent-default-model'\n  config:\n" +
+  '    provider: atomic\n    model: AtomicChat/Qwen3.5-9B-GGUF\n'
+
+describe('the profile patch', () => {
+  it('replaces the empty list of a new profile, keeping its comment', async () => {
+    home = await makeAgentHome()
+    await home.seed(PATCH, TEMPLATE)
+    await configureDsh({ ...agentInput(home.fs), contextLength: 32768 })
+    expect(await home.read(PATCH)).toBe(TEMPLATE.replace('[]\n', '') + ROUTE_ROW + DEFAULT_ROW)
+    expect(JSON.parse((await home.read(`${PATCH}.atomic-chat-backup.json`)) as string)).toEqual({
+      previous: { defaultModel: null },
+      written: { defaultModel: { model: 'AtomicChat/Qwen3.5-9B-GGUF', provider: 'atomic' } },
+    })
+  })
+
+  it('edits only our rows, keeping other rows, comments and !!js expressions byte for byte', async () => {
+    home = await makeAgentHome()
+    const mine =
+      '# mine\n- id: session-persistence-jsonl\n  config:\n    root: !!js dshHomePath("elsewhere")\n\n# my gateway\n'
+    await home.seed(
+      PATCH,
+      mine +
+        '- id: llm-pi-ai\n  config:\n    providers:\n      gw:\n        api: openai-completions\n' +
+        '        baseURL: https://gw.example/v1\n        models:\n          - id: x\n' +
+        '- id: agent-default-model\n  config:\n    provider: gw\n    model: x\n'
+    )
+    await configureDsh(agentInput(home.fs))
+    await configureDsh(agentInput(home.fs, { model: 'other' }))
+    const text = (await home.read(PATCH)) as string
+    expect(text.startsWith(mine)).toBe(true)
+    expect(text).toContain('      gw:\n')
+    expect(text).toContain('    provider: atomic\n    model: other\n')
+    expect(JSON.parse((await home.read(`${PATCH}.atomic-chat-backup.json`)) as string).previous).toEqual({
+      defaultModel: { provider: 'gw', model: 'x' },
+    })
+  })
+
+  it('rewrites a flow list whole, and refuses !!js it would lose', async () => {
+    home = await makeAgentHome()
+    await home.seed(PATCH, '[{id: web-app, config: {port: 4000}}]\n')
+    await configureDsh(agentInput(home.fs, { apiKey: '' }))
+    expect(
+      ((await home.read(PATCH)) as string).startsWith(
+        '- id: web-app\n  config:\n    port: 4000\n- id: llm-pi-ai\n'
+      )
+    ).toBe(true)
+    for (const bad of [
+      '[{id: x, config: {root: !!js f()}}]\n',
+      '- id: llm-pi-ai\n  config:\n    providers:\n      gw:\n        baseURL: !!js env.GW\n',
+    ]) {
+      await home.seed(PATCH, bad)
+      await expect(configureDsh(agentInput(home.fs)), bad).rejects.toThrow('!!js')
+      expect(await home.read(PATCH)).toBe(bad)
+    }
+  })
+
+  it('refuses a patch that is not a list of mappings', async () => {
+    home = await makeAgentHome()
+    for (const bad of ['web-app: {}\n', '- 1\n']) {
+      await home.seed(PATCH, bad)
+      await expect(configureDsh(agentInput(home.fs)), bad).rejects.toThrow()
+      expect(await home.read(PATCH)).toBe(bad)
+    }
+    await home.seed(PATCH, '- id: llm-pi-ai\n  config: [1]\n')
+    await expect(configureDsh(agentInput(home.fs))).rejects.toThrow('is not a mapping')
+  })
+
+  it('refuses a patch that is not YAML, untouched', async () => {
+    home = await makeAgentHome()
+    await home.seed(PATCH, '- id: [\n')
+    await expect(configureDsh(agentInput(home.fs))).rejects.toThrow('Failed to parse')
+    expect(await home.read(PATCH)).toBe('- id: [\n')
+  })
+
+  it('rewrites a patch whole when its rows only parse together', async () => {
+    home = await makeAgentHome()
+    // The alias in the second row needs the anchor in the first.
+    await home.seed(PATCH, '- id: a\n  config: &c {x: 1}\n- id: b\n  config: *c\n')
+    await configureDsh(agentInput(home.fs))
+    const text = (await home.read(PATCH)) as string
+    expect(
+      text.startsWith('- id: a\n  config:\n    x: 1\n- id: b\n  config:\n    x: 1\n- id: llm-pi-ai\n')
+    ).toBe(true)
+  })
+
+  it('tells tags from text', () => {
+    expect(hasYamlTag("  root: !!js dshHomePath('x')")).toBe(true)
+    expect(hasYamlTag("# `!!js` allowed\nname: 'hi!'")).toBe(false)
+  })
+})
+
+describe('a legacy settings.yaml', () => {
+  it('is kept in step while it exists, and settings.yaml.imported is never touched', async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      '.dsh/settings.yaml',
+      'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-flash\n'
+    )
+    await home.seed('.dsh/settings.yaml.imported', 'llm-pi-ai: {}\n')
+    await configureDsh(agentInput(home.fs))
+    await configureDsh(agentInput(home.fs))
+    const settings = (await home.read('.dsh/settings.yaml')) as string
+    expect(settings).toContain('agent-default-model:\n  provider: atomic\n')
+    expect(settings).toContain('baseURL: http://127.0.0.1:1337/v1')
+    expect(await home.read('.dsh/settings.yaml.imported')).toBe('llm-pi-ai: {}\n')
+    expect(JSON.parse((await home.read('.dsh/settings.yaml.atomic-chat-backup.json')) as string)).toEqual({
+      previous: { defaultModel: { provider: 'deepseek-official', model: 'deepseek-flash' } },
+    })
   })
 })

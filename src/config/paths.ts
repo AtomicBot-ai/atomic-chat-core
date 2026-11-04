@@ -11,6 +11,7 @@
  *   <data>/mlx/models/<id>/{model.yml, config.json, *.safetensors}
  *   <data>/diffusion/{backends/<tag>/<backend>/, models/, scratch/}, <data>/images/  (image generation; the app's paths since v2.0.38)
  *   <data>/videos/  (video generation; the folder the app's ADR of 2026-09-10 reserved)
+ *   <data>/audio/{backends/<tag>/<backend>/, models/, run/, tmp/}, <data>/audios/  (audio generation on audio.cpp)
  *   <data>/local-api-server.json, <data>/atomic-chatgpt-auth.json
  *   <data>/remote-access-tunnel.json  (the app's 2.0.40 tunnel journal: reaped once at startup, never written)
  *   <data>/atomic-core/  — the only new folder (settings, credentials, lock, journal, logs)
@@ -57,6 +58,10 @@ export interface ProviderPaths {
   runtimeDir?: string
   /** `foundry-local`: `<root>/logs`, the library's logs. */
   logsDir?: string
+  /** `litert-lm`: `<root>/accelerators`, prepared OpenVINO libraries (`openvino/<version>/`). */
+  acceleratorsDir?: string
+  /** `litert-lm`: `<root>/cache`, the library's `cache_dir`; `geniex`: `<root>/cache`, `inspect` answers and the like. */
+  cacheDir?: string
 }
 
 export interface CoreFiles {
@@ -100,6 +105,26 @@ export interface DiffusionPaths {
   defaultVideoOutputDir: string
   /** Remote video jobs still running at a provider, so a restarted core keeps polling them. */
   remoteJobsFile: string
+}
+
+/** Audio generation on audio.cpp (`src/audio/`). New in core 0.21; the app has no older layout here. */
+export interface AudioPaths {
+  /** `<data>/audio` */
+  root: string
+  /** `<root>/backends/<tag>/<backendId>/`, each holding `audiocpp_server` and its `install.json`. */
+  backendsDir: string
+  /** The models the client downloads; a load names a file here or an absolute path. */
+  modelsDir: string
+  /** The `server.json` the core writes for each server it starts. */
+  runDir: string
+  /** The server's `TMPDIR`: audio.cpp unpacks each GGUF package's configs under it. */
+  tmpDir: string
+  /** The last audio.cpp manifest (conf `backends/audiocpp-manifest.json`) the core accepted. */
+  manifestCache: string
+  /** Builds whose probe failed on this machine, as `<tag>/<backendId>` keys. */
+  failedBackendsFile: string
+  /** `<data>/audios`: the gallery, unless the user chose another folder. */
+  defaultOutputDir: string
 }
 
 /**
@@ -151,6 +176,7 @@ export interface DataLayout {
   legacyRemoteAccessTunnel: string
   core: CoreFiles
   diffusion: DiffusionPaths
+  audio: AudioPaths
   /** This scope's half of the managed text runtimes' layout. */
   managed: ManagedScopePaths
   /**
@@ -193,6 +219,7 @@ function managedScopePaths(coreDir: string): ManagedScopePaths {
 export function dataLayout(root: string): DataLayout {
   const coreDir = join(root, CORE_DIR)
   const diffusionDir = join(root, 'diffusion')
+  const audioDir = join(root, 'audio')
   return {
     root,
     serverStateFile: join(root, LOCAL_API_SERVER_STATE_FILE),
@@ -226,6 +253,16 @@ export function dataLayout(root: string): DataLayout {
       defaultOutputDir: join(root, 'images'),
       defaultVideoOutputDir: join(root, 'videos'),
       remoteJobsFile: join(diffusionDir, 'remote-jobs.json'),
+    },
+    audio: {
+      root: audioDir,
+      backendsDir: join(audioDir, 'backends'),
+      modelsDir: join(audioDir, 'models'),
+      runDir: join(audioDir, 'run'),
+      tmpDir: join(audioDir, 'tmp'),
+      manifestCache: join(audioDir, 'audiocpp-manifest.cache.json'),
+      failedBackendsFile: join(audioDir, 'failed-backends.json'),
+      defaultOutputDir: join(root, 'audios'),
     },
     provider(id) {
       const providerRoot = join(root, id)
@@ -265,6 +302,31 @@ export function dataLayout(root: string): DataLayout {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),
             modelsDir: join(providerRoot, 'models'),
+            runtimeDir: join(providerRoot, 'runtime'),
+            tmpDir: join(providerRoot, 'tmp'),
+            logsDir: join(providerRoot, 'logs'),
+          }
+        case 'litert-lm':
+          // Change `add-litert-lm-runtime`: builds, prepared accelerators, models the clients download,
+          // the library's cache, each host's runtime files, staging and logs.
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
+            acceleratorsDir: join(providerRoot, 'accelerators'),
+            modelsDir: join(providerRoot, 'models'),
+            cacheDir: join(providerRoot, 'cache'),
+            runtimeDir: join(providerRoot, 'runtime'),
+            tmpDir: join(providerRoot, 'tmp'),
+            logsDir: join(providerRoot, 'logs'),
+          }
+        case 'geniex':
+          // Change `add-geniex-runtime` (task 6.1): builds (the SDK's lib/**), models the clients download,
+          // the host's cache, each host's runtime files, temporary images of requests and logs.
+          return {
+            root: providerRoot,
+            backendsDir: join(providerRoot, 'backends'),
+            modelsDir: join(providerRoot, 'models'),
+            cacheDir: join(providerRoot, 'cache'),
             runtimeDir: join(providerRoot, 'runtime'),
             tmpDir: join(providerRoot, 'tmp'),
             logsDir: join(providerRoot, 'logs'),

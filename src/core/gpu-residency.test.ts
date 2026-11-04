@@ -89,6 +89,41 @@ describe('wireGpuResidency', () => {
     )
   })
 
+  it('stops an idle audio model through its service, and refuses a chat load while it generates', async () => {
+    const calls: string[] = []
+    const audio: GpuOccupancy[] = [{ model_id: 'kokoro', cards: 'all', auxiliary: false, state: 'ready' }]
+    const residency = wireGpuResidency({
+      runtimes: new Map<LocalProviderId, LocalRuntime>(),
+      diffusion: () => undefined,
+      audio: () => ({
+        gpuOccupancy: () => audio,
+        unloadModel: async () => {
+          calls.push('audio.unloadModel')
+          audio.splice(0)
+        },
+      }),
+      leftovers: () => [],
+      sessions: () => ({ cancelLoad: () => false, unload: async () => ({ success: true }) }),
+    })
+    await residency.hook('llamacpp')({ model_id: 'chat', cards: 'all', auxiliary: false })
+    expect(calls).toEqual(['audio.unloadModel'])
+
+    audio.push({
+      model_id: 'ace-step',
+      cards: 'all',
+      auxiliary: false,
+      state: 'ready',
+      busy: 'ACE-Step is generating music',
+      remedy: 'Wait for the clip to finish, or stop it, then try again.',
+    })
+    const error = (await residency
+      .hook('llamacpp')({ model_id: 'chat', cards: 'all', auxiliary: false })
+      .catch((e: unknown) => e)) as AtomicCoreError
+    expect(error.code).toBe('GPU_BUSY')
+    expect(error.details).toContain('holder=audio/ace-step')
+    expect(calls).toEqual(['audio.unloadModel'])
+  })
+
   it('names a failed unload by its model when the session gives no reason', async () => {
     const residency = wireGpuResidency({
       runtimes: new Map<LocalProviderId, LocalRuntime>([
@@ -292,5 +327,56 @@ describe('foundry-local in GPU residency (task 6.6, spec gpu-residency)', () => 
     })
     await w.residency.hook('llamacpp-upstream')({ model_id: 'llama', cards: 'all', auxiliary: false })
     expect(w.calls).toEqual(['unload foundry-local/phi-cuda'])
+  })
+})
+
+describe('litert-lm in GPU residency (change add-litert-lm-runtime, task 6.6)', () => {
+  function liteRtWorld(liteRt: GpuOccupancy[], others: Record<string, GpuOccupancy[]>) {
+    const calls: string[] = []
+    const tables: Record<string, GpuOccupancy[]> = { ...others, 'litert-lm': liteRt }
+    const residency = wireGpuResidency({
+      runtimes: new Map<LocalProviderId, LocalRuntime>(
+        Object.entries(tables).map(([provider, list]) => [provider as LocalProviderId, runtime(list)])
+      ),
+      diffusion: () => ({ gpuOccupancy: () => [], unloadModel: async () => {} }),
+      leftovers: () => [],
+      sessions: () => ({
+        cancelLoad: () => false,
+        unload: async (provider, modelId): Promise<UnloadResult> => {
+          calls.push(`unload ${provider}/${modelId}`)
+          const list = tables[provider] ?? []
+          list.splice(
+            list.findIndex((o) => o.model_id === modelId),
+            1
+          )
+          return { success: true }
+        },
+      }),
+    })
+    return { residency, calls }
+  }
+
+  it('a GPU variant loading on a Mac stops the MLX model first', async () => {
+    const w = liteRtWorld([], {
+      mlx: [{ model_id: 'qwen-mlx', cards: 'all', auxiliary: false, state: 'ready' }],
+    })
+    await w.residency.hook('litert-lm')({ model_id: 'gemma-4-e4b-gpu', cards: 'all', auxiliary: false })
+    expect(w.calls).toEqual(['unload mlx/qwen-mlx'])
+  })
+
+  it('an NPU variant holds no card: a llama.cpp GPU load leaves it running', async () => {
+    const w = liteRtWorld([{ model_id: 'gemma-npu', cards: [], auxiliary: false, state: 'ready' }], {
+      'llamacpp-upstream': [],
+    })
+    await w.residency.hook('llamacpp-upstream')({ model_id: 'llama', cards: 'all', auxiliary: false })
+    expect(w.calls).toEqual([])
+  })
+
+  it('a GPU variant is stopped like any GPU session when another engine needs the card', async () => {
+    const w = liteRtWorld([{ model_id: 'gemma-gpu', cards: 'all', auxiliary: false, state: 'ready' }], {
+      'llamacpp-upstream': [],
+    })
+    await w.residency.hook('llamacpp-upstream')({ model_id: 'llama', cards: 'all', auxiliary: false })
+    expect(w.calls).toEqual(['unload litert-lm/gemma-gpu'])
   })
 })

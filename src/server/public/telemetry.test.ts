@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { StreamTelemetry, extractReasoning, promptPreview } from './telemetry.js'
+import type { JsonValue } from '../shims/index.js'
+import { PREVIEW_MAX_CHARS, StreamTelemetry, extractReasoning, promptPreview } from './telemetry.js'
 
 // Parity with the Rust inspector is test/contract/inspector-telemetry.test.ts; these pin what the
 // fixtures do not reach.
@@ -21,6 +22,89 @@ describe('telemetry edges', () => {
     expect(promptPreview({ messages: [{ role: 'user', content: '😀😀😀' }] }, 2)).toMatchObject({
       text: '😀😀',
       chars: 3,
+    })
+  })
+
+  it('counts and times a reply without keeping its text when previews are off', () => {
+    const telemetry = new StreamTelemetry({ previews: false })
+    telemetry.onJson({ choices: [{ delta: { reasoning_content: 'thinking' } }] }, 3)
+    telemetry.onJson({ choices: [{ delta: { content: 'answer' }, finish_reason: 'stop' }] }, 4)
+    telemetry.onJson({ choices: [], usage: { prompt_tokens: 5, completion_tokens: 2 } }, 5)
+
+    expect(telemetry.finishFields(0)).toEqual({
+      ttft_ms: 3,
+      prompt_tokens: 5,
+      cached_tokens: null,
+      completion_tokens: 2,
+      total_tokens: 7,
+      tokens_estimated: false,
+      prompt_per_second: null,
+      predicted_per_second: null,
+      finish_reason: 'stop',
+      reply_preview: null,
+      reply_chars: 14,
+    })
+  })
+
+  it('reports the cached part of the prompt, counted in the prompt, from every engine that says it', () => {
+    const fields = (frames: JsonValue[]) => {
+      const telemetry = new StreamTelemetry()
+      for (const frame of frames) telemetry.onJson(frame, 1)
+      return telemetry.finishFields(0)
+    }
+    // llama.cpp's timings: `prompt_n` is only what it processed.
+    expect(fields([{ choices: [], timings: { prompt_n: 40, cache_n: 9000, predicted_n: 3 } }])).toMatchObject(
+      {
+        prompt_tokens: 9040,
+        cached_tokens: 9000,
+      }
+    )
+    // OpenAI usage wins over the timings that come with it.
+    expect(
+      fields([
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 9040,
+            completion_tokens: 3,
+            prompt_tokens_details: { cached_tokens: 9000 },
+          },
+          timings: { prompt_n: 40, cache_n: 1 },
+        },
+      ])
+    ).toMatchObject({ prompt_tokens: 9040, cached_tokens: 9000 })
+    // Anthropic leaves the cache out of `input_tokens`, streamed or whole.
+    const usage = { input_tokens: 40, cache_read_input_tokens: 9000, cache_creation_input_tokens: 5 }
+    expect(
+      fields([
+        { type: 'message_start', message: { usage: { ...usage, output_tokens: 0 } } },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      ])
+    ).toMatchObject({ prompt_tokens: 9045, cached_tokens: 9000, completion_tokens: 3 })
+    expect(
+      fields([{ type: 'message', stop_reason: 'tool_use', usage: { ...usage, output_tokens: 3 } }])
+    ).toMatchObject({
+      prompt_tokens: 9045,
+      cached_tokens: 9000,
+      completion_tokens: 3,
+      finish_reason: 'tool_use',
+    })
+  })
+
+  it('keeps what an Anthropic stream already said when a later event leaves it out, and caps the preview', () => {
+    const telemetry = new StreamTelemetry()
+    telemetry.onJson({ type: 'message_start', message: { usage: { input_tokens: 7 } } }, 1)
+    telemetry.onJson({ type: 'message_start', message: {} }, 2)
+    telemetry.onJson({ type: 'content_block_delta', delta: { thinking: '' } }, 3)
+    expect(telemetry.ttftMs(0)).toBeNull()
+    telemetry.onJson({ type: 'content_block_delta', delta: { text: 'a'.repeat(PREVIEW_MAX_CHARS) } }, 4)
+    telemetry.onJson({ type: 'content_block_delta', delta: { text: 'past the cap' } }, 5)
+
+    expect(telemetry.finishFields(0)).toMatchObject({
+      ttft_ms: 4,
+      prompt_tokens: 7,
+      reply_preview: 'a'.repeat(PREVIEW_MAX_CHARS),
+      reply_chars: PREVIEW_MAX_CHARS + 'past the cap'.length,
     })
   })
 })

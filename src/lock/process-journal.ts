@@ -22,10 +22,10 @@ export interface ChildProcessRecord {
   process_start_id: string | null
   exe: string
   /**
-   * `diffusion` for the image engine, `decision` and `embedding` for those models, which are not providers
-   * (their processes are reaped all the same).
+   * `diffusion` for the image engine, `audio` for the audio engine, `decision` and `embedding` for those
+   * models, which are not providers (their processes are reaped all the same).
    */
-  provider: LocalProviderId | 'diffusion' | 'decision' | 'embedding'
+  provider: LocalProviderId | 'diffusion' | 'audio' | 'decision' | 'embedding'
   model_id: string
   port: number
   started_at: string

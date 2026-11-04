@@ -203,3 +203,53 @@ real external agents (Codex, Claude Code, OpenCode), tray behaviour — is still
 level. With `fit` on, which is how the app ships, there is no `--ctx-size` and no ladder: the app tells
 the user the context is fitted to the device — and then, a defect in the app's thread route recorded
 there as an expected failure, leaves the thread stuck in "Growing the Mind..." with sending disabled. `test/app-e2e/` in this repo stays empty: the runner lives with the app it launches.
+
+## Regression B02: embedding-only model lookup
+
+With only Nomic or another embedding model configured, start the public server from the app. Confirm `/v1/models` lists the embedding model and a valid embedding request returns 200. Request `qa-missing` at `/v1/embeddings`: require JSON 404 with `error.code = model_not_found`, naming the unknown model. Repeat with a chat model loaded; the error must be identical. Automated binary coverage is in `test/e2e/embedding.test.ts`; the desktop scenario still requires an app built with this core revision.
+
+## Regressions B13 and B14: malformed requests to local models
+
+With a chat model (Qwen2.5 0.5B or LFM2.5 2.6B) loaded and nomic-embed-text-v1.5 configured, start the public server from the app. Send `/v1/chat/completions` with `messages: [{"role": "not-a-real-role", "content": "Reply exactly VALIDATION_TEST."}]`: require JSON 400 with `error.param = messages[0].role` and `error.code = invalid_value`, and no reply from the model. Send `/v1/embeddings` with `input` `["test", 7]`, then `["alpha", 7, "omega"]`: require JSON 400 with `error.param = input`. A string, an array of strings, an array of token ids and an array of token id arrays must still return 200. Repeat both after stopping and starting the server. Automated binary coverage is in `test/e2e/public-server.test.ts` and `test/e2e/embedding.test.ts`; the desktop scenario still requires an app built with this core revision.
+
+## Internal failure diagnostics (2026-11-03)
+
+Target scenario for the core-v1 diagnostic contract: launch the app against the compiled app-core
+with an isolated data folder, fake engines and a local fake Sentry ingest. With consent off, fail a
+load and a background image job: the app must receive the same error code/message/details and no
+report may reach ingest. Enable consent through the app, repeat each operation, and expect one
+report per failure carrying core-v1/category/component/operation. Neither the HTTP error nor SSE
+payloads may contain diagnostic or cause. Disable consent again and repeat; ingest stays unchanged.
+The app's existing Rust live test `the_core_reports_errors_only_under_the_consent_the_app_gives_it`
+checks the consent relay; `test/e2e/telemetry.test.ts` exercises fake ingest and engines from the
+compiled binary. Neither alone proves this complete desktop scenario. Record the actual desktop
+run separately; this scenario is not yet claimed as automated app coverage.
+
+On 2026-11-03, `make test-core-live` in the sibling app passed all 19 tests on macOS arm64 against
+this work's compiled app-core, including the consent relay test above. This is supervisor/relay
+evidence, not a run of the full UI scenario with a failing background image job.
+
+Two stock desktop scenarios initially failed on this macOS checkout. The debug app discovered a
+manually fetched TurboQuant backend through its compile-time source-tree fallback. The image
+scenario also seeded the legacy diffusion catalog, while the app used the unified catalog.
+
+Both selected desktop cases passed in an isolated release-like fixture on 2026-11-03. The harness
+kept the original error, retry and teardown assertions. It hid the unshipped backend from the app
+process, used Skip setup when onboarding was present, and served the same scripted image model
+through the unified catalog on loopback with pinned fixture revisions. The text engine failure
+displayed `LLAMA_CPP_PROCESS_ERROR`, the engine's stderr and Retry, and left no session or child.
+On image-engine death the app observed `OUT_OF_MEMORY`, then generated a picture on a fresh process.
+
+A second, isolated e2e build exercised reporting consent. It had only a loopback desktop DSN at
+build time and sent core envelopes to a separate fake-ingest project on loopback. In each fresh
+profile WebDriver invoked the frontend's `set_telemetry_consent` command, observed the corresponding
+`GET /telemetry` state through the live owner, and drove the same mid-picture engine death and retry.
+The disabled case received zero core events. The enabled case received exactly one diffusion/job
+warning with `diagnostic_version=core-v1` and `failure_reason=out_of_memory`; its envelope contained
+neither the prompt nor the data-folder path. This is a manually exercised reporting build; the
+stock e2e build intentionally compiles without a desktop DSN.
+
+`test/app-e2e/telemetry.test.ts` now repeats the desktop consent and text-load wire checks
+against the isolated Tauri driver. `ATOMIC_APP_E2E=1 npm run test:app-e2e` passed on macOS
+arm64 with the reporting build and the Bun 1.4.4 core. Build and run instructions are in
+`test/app-e2e/README.md`. The image failure/retry case above remains a separate desktop run.

@@ -8,11 +8,11 @@
 
 import { CHATGPT_PROVIDER, serveSubscriptionChat } from '../../cloud/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
-import { resolveRemoteProvider } from '../../router/index.js'
 import { isJsonObject } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
 import { answer, clientGone } from './exchange.js'
 import type { Exchange } from './exchange.js'
+import { routedRemote, selectedRoute } from './forward.js'
 import { pipeBody, readBody } from './wire.js'
 
 /**
@@ -34,7 +34,7 @@ export async function serveSubscriptionIfOwned(ex: Exchange, backend: ChatGptBac
   }
   const model = isJsonObject(json) ? json['model'] : undefined
   if (typeof model !== 'string') return false
-  if (resolveRemoteProvider(model, ex.deps.providers())?.provider !== CHATGPT_PROVIDER) return false
+  if (routedRemote(ex, model, selectedRoute(ex, model))?.provider !== CHATGPT_PROVIDER) return false
 
   const stream = isJsonObject(json) && json['stream'] === true
   // `chat_completions`, not `chat/completions`: the label the app's analytics has always used here.

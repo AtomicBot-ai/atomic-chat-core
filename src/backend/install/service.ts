@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../../contracts/index.js'
 /**
  * Installing and updating llama.cpp backends (PLAN.md §4, stage 3c).
  *
@@ -191,6 +192,8 @@ export function backendExeName(osType: string): string {
 }
 
 export interface BackendServiceDeps {
+  onFailure?: FailureObserver
+
   layout: DataLayout
   provider: LocalProviderId
   downloader: Downloader
@@ -254,7 +257,7 @@ export interface RemoveBackendOptions {
 interface DownloadPlan {
   items: DownloadItem[]
   archives: string[]
-  /** Unpacked into `build/bin` after the layout is normalised. */
+  /** Unpacked into `build/bin` before the layout is normalised, which would sweep them in unopened. */
   companions?: string[]
 }
 
@@ -404,12 +407,14 @@ export class BackendService {
         await extractArchive(archive, staging)
         await rm(archive, { force: true })
       }
-      await normalizeBackendLayout(staging, llamaServerExeName(platform))
-      await mergeCudartIntoBin(staging)
+      // Companions go first: a flat pack (PrismML's Windows CUDA zip) is normalised by moving every
+      // entry at the staging root into `build/bin`, the companion archive still waiting there with them.
       for (const companion of plan.companions ?? []) {
         await mergeCompanionIntoBin(staging, companion)
         await rm(companion, { force: true })
       }
+      await normalizeBackendLayout(staging, llamaServerExeName(platform))
+      await mergeCudartIntoBin(staging)
 
       const verify =
         this.deps.provider === 'atomic-prism'
@@ -431,6 +436,7 @@ export class BackendService {
       await mkdir(join(target, '..'), { recursive: true })
       await rename(staging, target)
     } catch (e) {
+      this.deps.onFailure?.(e, { component: 'backend', operation: 'install' })
       // Nothing half-installed survives: a partial pack would be picked up by backend selection and
       // would fail later as a model that will not load.
       await rm(staging, { recursive: true, force: true })

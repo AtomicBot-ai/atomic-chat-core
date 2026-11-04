@@ -15,6 +15,11 @@ import type {
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
+  LiteRtLmAccelerators,
+  LiteRtLmCheckRequest,
+  LiteRtLmCheckResult,
+  LiteRtLmPrepareRequest,
+  LiteRtLmPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -66,6 +71,18 @@ import type {
   ImageGenerateRequest,
   ImageJob,
   LoadDiffusionModelRequest,
+  AudioCancelResult,
+  AudioCapabilities,
+  AudioConfig,
+  AudioGalleryListOptions,
+  AudioGalleryPage,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
+  AudioModelFile,
+  AudioStatus,
+  LoadAudioModelRequest,
+  LoadedAudioModel,
   VideoCapabilities,
   VideoEstimate,
   VideoGalleryPage,
@@ -77,6 +94,7 @@ import type {
   HardwareOverrideInput,
   LoadedDiffusionModel,
   LocalApiServerState,
+  ServedModelSelection,
   RemoteAccessStatus,
   SessionInfo,
   UnloadResult,
@@ -251,6 +269,29 @@ export class CoreClient {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
     })
+  }
+
+  // --- LiteRT-LM's accelerator and check (change `add-litert-lm-runtime`, tasks 6.4–6.5) ---------
+
+  /** What this machine is offered (OpenVINO on an Intel NPU LiteRT-LM targets), with what is prepared. */
+  liteRtLmAccelerators(): Promise<LiteRtLmAccelerators> {
+    return this.call('/runtimes/litert-lm/accelerators')
+  }
+
+  /**
+   * Download and unpack the accelerators named (none: every one offered); progress arrives as
+   * `litert-lm:accelerators` events. `ENGINE_INSTALL_IN_PROGRESS` while another prepare runs.
+   */
+  prepareLiteRtLmAccelerators(request: LiteRtLmPrepareRequest = {}): Promise<LiteRtLmPrepareResult> {
+    return this.call('/runtimes/litert-lm/accelerators/prepare', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  /** Whether a variant, a downloaded file or an installed model would run here; files come with their facts. */
+  checkLiteRtLmModel(request: LiteRtLmCheckRequest): Promise<LiteRtLmCheckResult> {
+    return this.call('/models/litert-lm/check', { method: 'POST', body: JSON.stringify(request) })
   }
 
   // --- Foundry Local's accelerators (change `add-foundry-local`, task 6.4) ------------------------
@@ -588,6 +629,71 @@ export class CoreClient {
     })
   }
 
+  // --- audio generation on audio.cpp: speech, music and sound effects ---------------------------
+
+  audioStatus(): Promise<AudioStatus> {
+    return this.call('/audio/status')
+  }
+
+  /** Optional settings: the output folder (`null` restores `<data>/audios`) and the idle unload. */
+  configureAudio(config: AudioConfig): Promise<AudioStatus> {
+    return this.call('/audio/config', { method: 'PUT', body: JSON.stringify(config) })
+  }
+
+  /** An empty path restores `<data>/audios`. */
+  setAudioOutputDir(path: string): Promise<AudioStatus> {
+    return this.call('/audio/output-dir', { method: 'PUT', body: JSON.stringify({ path }) })
+  }
+
+  async listAudioModelFiles(): Promise<AudioModelFile[]> {
+    return (await this.call<{ files: AudioModelFile[] }>('/audio/model-files')).files
+  }
+
+  /** A file named relative to `<data>/audio/models`. */
+  async deleteAudioModelFile(relativePath: string): Promise<void> {
+    await this.call('/audio/model-files', { method: 'DELETE', body: JSON.stringify({ relativePath }) })
+  }
+
+  /** Answers once the server serves the model. */
+  loadAudioModel(request: LoadAudioModelRequest): Promise<LoadedAudioModel> {
+    return this.call('/audio/model/load', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  async unloadAudioModel(): Promise<void> {
+    await this.call('/audio/model/unload', { method: 'POST' })
+  }
+
+  /** Reset the idle-unload deadline without generating. */
+  async touchAudioIdle(): Promise<void> {
+    await this.call('/audio/idle/touch', { method: 'POST' })
+  }
+
+  audioCapabilities(): Promise<AudioCapabilities> {
+    return this.call('/audio/capabilities')
+  }
+
+  /** Answers the job at once; its phases and outcome arrive as `audio:job` events. */
+  generateAudio(mode: AudioMode, request: AudioGenerateRequest): Promise<AudioJob> {
+    return this.call('/audio/jobs', { method: 'POST', body: JSON.stringify({ mode, request }) })
+  }
+
+  async audioJob(id: string): Promise<AudioJob | null> {
+    return (await this.call<{ job: AudioJob | null }>(`/audio/jobs/${encodeURIComponent(id)}`)).job
+  }
+
+  cancelAudioJob(id: string): Promise<AudioCancelResult> {
+    return this.call(`/audio/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+  }
+
+  audioGallery(options: AudioGalleryListOptions): Promise<AudioGalleryPage> {
+    const query = new URLSearchParams({ offset: String(options.offset), limit: String(options.limit) })
+    return this.call(`/audio/gallery?${query.toString()}`)
+  }
+
+  async deleteAudioGalleryItem(id: string): Promise<void> {
+    await this.call(`/audio/gallery/${encodeURIComponent(id)}`, { method: 'DELETE' })
+  }
+
   /** Restart a poisoned engine at the context it already has. */
   recreateSession(provider: string, modelId: string): Promise<{ ok: boolean; reason?: string }> {
     return this.call(`/models/${provider}/${modelId}/recreate`, { method: 'POST' })
@@ -664,6 +770,16 @@ export class CoreClient {
     fallback_port?: boolean
   }): Promise<LocalApiServerState> {
     return this.call('/server/start', { method: 'POST', body: JSON.stringify(options) })
+  }
+
+  /** The provider the app selected to serve each model id on the public server. */
+  serverSelection(): Promise<{ models: ServedModelSelection[] }> {
+    return this.call('/server/selection')
+  }
+
+  /** Replace the whole selection: those ids go to their selected provider only. */
+  setServerSelection(models: ServedModelSelection[]): Promise<{ models: ServedModelSelection[] }> {
+    return this.call('/server/selection', { method: 'PUT', body: JSON.stringify({ models }) })
   }
 
   /** Tell the core whether the app's API screen is watching, which gates prompt previews. */

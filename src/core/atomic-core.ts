@@ -25,6 +25,7 @@ import type { DataLayout } from '../config/index.js'
 import type { DecisionService } from '../decision/index.js'
 import type { EmbeddingService } from '../embedding/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
+import type { AudioService } from '../audio/index.js'
 import type { CoreEmitter } from '../events/index.js'
 import type { ManagedRuntimes } from '../runtime/environment/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
@@ -37,11 +38,11 @@ import { managedExternalRoutePolicy } from './managed-engines.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
-import { captureReport, loadFailureReport } from '../telemetry/index.js'
+import { captureReport, failureObserver, loadFailureReport } from '../telemetry/index.js'
 import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
-import { DynamicTrustedHosts } from '../server/index.js'
+import { DynamicTrustedHosts, SessionWindows } from '../server/index.js'
 import type { ClientRegistry, ControlServer, SessionSummary } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
@@ -81,6 +82,8 @@ export interface AtomicCoreParts {
   remoteAccess: Pick<RemoteAccessManagerDeps, 'spawner' | 'prober' | 'timings' | 'journal'>
   /** Image generation (stage 7): its own module, not a runtime. */
   diffusion: DiffusionService
+  /** Audio generation on audio.cpp: its own module, like image generation. */
+  audio: AudioService
   /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
   managed: ManagedRuntimes
   /**
@@ -104,6 +107,11 @@ export class AtomicCore {
   private shutdownPromise: Promise<void> | undefined
   /** Whether the app's API screen is watching; previews are collected only then. */
   inspecting = false
+  /**
+   * The provider the app selected to serve each model id on the public server, read per request;
+   * kept across server restarts, not across core restarts (the app hands it over again).
+   */
+  servedSelection: ReadonlyMap<string, string> = new Map()
   private resolveStopped: (() => void) | undefined
   /** Resolves once this core has stopped, however that was triggered (API, signal, or in-process). */
   readonly stopped: Promise<void> = new Promise<void>((resolve) => {
@@ -141,10 +149,14 @@ export class AtomicCore {
   private readonly publicServer: PublicServerLifecycle
   /** What the public listener trusts beyond its configuration: the tunnel name, the socket's address. */
   private readonly trustedHosts = new DynamicTrustedHosts()
+  /** The window each loaded session serves, for `/v1/models` and the request log. */
+  private readonly sessionWindows = new SessionWindows()
   /** The Cloudflare quick tunnel in front of the public listener. */
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
   readonly diffusion: DiffusionService
+  /** Audio generation on audio.cpp: the resident `audiocpp_server`, its jobs and the gallery. */
+  readonly audio: AudioService
   /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
   readonly managed: ManagedRuntimes
   /**
@@ -172,6 +184,7 @@ export class AtomicCore {
     this.log = parts.log
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
+    this.audio = parts.audio
     this.managed = parts.managed
     this.decision = parts.decision
     this.embedding = parts.embedding
@@ -190,6 +203,7 @@ export class AtomicCore {
       externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
+      onFailure: failureObserver(parts.errors),
       ...parts.remoteAccess,
       server: () => this.publicServer.endpoint(),
       hosts: this.trustedHosts,
@@ -207,7 +221,9 @@ export class AtomicCore {
         ...(parts.publicApiKeys ? { apiKeys: parts.publicApiKeys } : {}),
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
+        contextWindow: (target) => this.sessionWindows.of(target),
         providers: () => this.cloud.routing(),
+        selection: () => this.servedSelection,
         chatgpt: parts.chatgptBackend,
         increaseCtx: (provider, modelId, trigger) =>
           this.localSessions.serverCtxRequest(provider, modelId, trigger),
@@ -216,6 +232,7 @@ export class AtomicCore {
         dynamicTrustedHosts: (localAddress) => this.trustedHosts.groupFor(localAddress),
         images: this.diffusion.imagesBackend(),
         videos: this.diffusion.videosBackend(),
+        speech: this.audio.speechBackend(),
         decision: this.decision.publicBackend(),
         embedding: this.embedding.publicBackend(),
         errors: parts.errors,
@@ -374,8 +391,10 @@ export class AtomicCore {
       // The public server no longer forwards to it; the decision process goes next.
       await this.decision.shutdown()
       await this.embedding.shutdown()
-      // A multi-gigabyte sd-server must not outlive the core; it goes before the chat runtimes.
+      // A multi-gigabyte sd-server or audiocpp_server must not outlive the core; they go before the
+      // chat runtimes.
       await this.diffusion.shutdown()
+      await this.audio.shutdown()
       // Whatever a managed-runtime operation is doing stops here; its intent stays on disk for the
       // next core to resume, so this never races the lock release below.
       await this.managed.shutdown(AbortSignal.timeout(5_000)).catch(() => {})

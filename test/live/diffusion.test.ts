@@ -17,6 +17,9 @@
  *   ATOMIC_LIVE_SD_FAMILY=flux.2-klein            (optional; default flux.2-klein, 4 steps, cfg 1;
  *                                                  qwen-image-2.1-turbo runs its own 8-step schedule)
  *   ATOMIC_LIVE_SD_TAG=master-883-137f740         (optional; the engine's release tag, as the app records it)
+ *   ATOMIC_LIVE_SD_BACKEND=cpu                    (optional; every load on the CPU backend, through
+ *                                                  ATOMIC_DIFFUSION_BACKEND: a macOS CI runner's
+ *                                                  paravirtual GPU crashes ggml's Metal kernels)
  *
  * The video block runs when a video model is named as well (LTX-2.3 distilled by default):
  *   ATOMIC_LIVE_SD_VIDEO_MODEL=/path/to/ltx-2.3-22b-distilled-Q4_K_M.gguf
@@ -32,9 +35,12 @@
  */
 import { spawnSync } from 'node:child_process'
 import { cp, mkdir, readFile, stat } from 'node:fs/promises'
+import { request } from 'node:http'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { prepareSdcppTree, writeInstallRecord } from '../../src/diffusion/install.js'
+import { findSdOption, parseSdHelp } from '../../scripts/lib/sdcpp-surface.mjs'
+import type { SdcppContract } from '../../scripts/lib/sdcpp-surface.mjs'
 import { CoreClient } from '../../src/client/index.js'
 import type { CoreEvents, ImageJob, VideoJob } from '../../src/contracts/index.js'
 import { AtomicCore } from '../../src/core/index.js'
@@ -42,6 +48,35 @@ import { decodePng, isWebm, parseVideoRecipe, readPngHeader } from '../../src/di
 import { isProcessAlive } from '../../src/runtime/shared/index.js'
 import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../helpers/tmp-data-folder.js'
+
+/**
+ * POST a JSON body and wait for the whole answer, however long the engine takes. The images facade
+ * answers once the picture exists, and on a CI runner's CPU that is longer than global `fetch` waits
+ * for a response's headers (undici's `headersTimeout`, 300 s; seen on macOS: `UND_ERR_HEADERS_TIMEOUT`).
+ * `node:http` sets no such limit; the facade's own 30-minute timeout still applies.
+ */
+function postJson(url: string, body: unknown): Promise<{ status: number; text: string }> {
+  const data = JSON.stringify(body)
+  return new Promise((resolve, reject) => {
+    const req = request(
+      url,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) },
+      },
+      (res) => {
+        const chunks: Buffer[] = []
+        res.on('data', (chunk: Buffer) => chunks.push(chunk))
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })
+        )
+        res.on('error', reject)
+      }
+    )
+    req.on('error', reject)
+    req.end(data)
+  })
+}
 
 /** Probe a copied engine tree for real, then mark it installed the way the engine-builds install does. */
 async function ownLiveEngine(dir: string): Promise<void> {
@@ -79,6 +114,9 @@ const ENABLED =
   process.env['ATOMIC_LIVE'] === '1' && ENGINE !== '' && MODEL !== '' && process.platform !== 'win32'
 /** The build app v2.0.42 ships, and the oldest that runs Qwen Image 2.1 and Krea 2 Turbo. */
 const TAG = process.env['ATOMIC_LIVE_SD_TAG'] ?? 'master-883-137f740'
+const BACKEND = process.env['ATOMIC_LIVE_SD_BACKEND'] ?? ''
+/** The env the core runs with: the backend override when one is asked for. */
+const CORE_ENV = BACKEND ? { env: { ...process.env, ATOMIC_DIFFUSION_BACKEND: BACKEND } } : {}
 
 const VIDEO_MODEL = process.env['ATOMIC_LIVE_SD_VIDEO_MODEL'] ?? ''
 const VIDEO_VAE = process.env['ATOMIC_LIVE_SD_VIDEO_VAE'] ?? ''
@@ -113,7 +151,7 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
     engineDir = join(data.layout.diffusion.backendsDir, TAG, 'live')
     await mkdir(engineDir, { recursive: true })
     await cp(ENGINE, engineDir, { recursive: true })
-    core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0 })
+    core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, ...CORE_ENV })
     client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
     for (const name of ['diffusion:state', 'diffusion:job', 'diffusion:progress', 'diffusion:error'] as const)
       core.events.on(name, (payload) => events.push({ name, payload }))
@@ -127,14 +165,13 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
 
   it('answers --help with every flag the core passes', async () => {
     const help = spawnSync(join(engineDir, 'sd-server'), ['--help'], { encoding: 'utf8', timeout: 120_000 })
-    const text = `${help.stdout}${help.stderr}`
-    const required = (
-      await readFile(new URL('../fixtures/sdcpp/required-flags.txt', import.meta.url), 'utf8')
-    )
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== '' && !line.startsWith('#'))
-    const missing = required.filter((flag) => !text.includes(flag))
+    // Options by their exact aliases, as the surface diff reads them: `--vae-format` is not `--vae`.
+    const options = parseSdHelp(`${help.stdout}${help.stderr}`)
+    const contract = JSON.parse(
+      await readFile(new URL('../fixtures/sdcpp/engine-contract.json', import.meta.url), 'utf8')
+    ) as SdcppContract
+    const required = contract.flags.filter((f) => f.severity === 'break').map((f) => f.flag)
+    const missing = required.filter((flag) => !findSdOption(options, flag))
     expect(missing, 'flags the pinned engine no longer knows').toEqual([])
   }, 130_000)
 
@@ -223,19 +260,21 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
         const edited = await untilJob(referenced.jobId, ['completed', 'failed', 'cancelled'], 15 * 60_000)
         expect(edited.state, JSON.stringify(edited.error)).toBe('completed')
         expect(edited.outputs[0]?.recipe.workflow).toBe('reference')
-      } else {
+      } else if (FAMILY === 'qwen-image-2.1' || FAMILY === 'qwen-image-2.1-turbo') {
+        // Without its vision projector Qwen Image 2.1 only creates; FLUX.2 Klein edits without one.
         expect(capabilities.workflows).not.toContain('edit')
       }
 
       // The OpenAI facade runs the same job.
       const served = await core.startPublicServer({ port: 0 })
-      const answer = await fetch(`http://127.0.0.1:${served.port}/v1/images/generations`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ prompt: 'a small blue sphere', size: '256x256', n: 1, seed: 8 }),
+      const answer = await postJson(`http://127.0.0.1:${served.port}/v1/images/generations`, {
+        prompt: 'a small blue sphere',
+        size: '256x256',
+        n: 1,
+        seed: 8,
       })
-      expect(answer.status, await answer.clone().text()).toBe(200)
-      const body = (await answer.json()) as { data: Array<{ b64_json: string }>; atomic: { seed: number } }
+      expect(answer.status, answer.text).toBe(200)
+      const body = JSON.parse(answer.text) as { data: Array<{ b64_json: string }>; atomic: { seed: number } }
       expect(body.atomic.seed).toBe(8)
       const served2 = await decodePng(Buffer.from(body.data[0]?.b64_json ?? '', 'base64'))
       expect([served2.width, served2.height]).toEqual([256, 256])
@@ -318,7 +357,7 @@ describe.skipIf(!VIDEO_ENABLED)('a real stable-diffusion.cpp engine serving vide
     await cp(ENGINE, dir, { recursive: true })
     if (process.env['ATOMIC_LIVE_SD_VIDEO_MODE_FLAG'] === '1')
       process.env['ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG'] = '1'
-    videoCore = await AtomicCore.create({ dataFolder: videoData.root, controlPort: 0 })
+    videoCore = await AtomicCore.create({ dataFolder: videoData.root, controlPort: 0, ...CORE_ENV })
     videoClient = new CoreClient({ baseUrl: videoCore.control.url, token: videoCore.controlToken })
     for (const name of [
       'diffusion:state',

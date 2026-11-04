@@ -1,6 +1,10 @@
 {
   "name": "@atomic-chat/core",
-  "version": "0.18.1",
+  "version": "0.21.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AtomicBot-ai/atomic-chat-core.git"
+  },
   "description": "Inference core of Atomic Chat: local llama.cpp/MLX/Foundation Models runtime, cloud providers, model router and the OpenAI-compatible server on :1337.",
   "license": "MIT",
   "type": "module",
@@ -30,15 +34,30 @@
     "./models": {
       "types": "./dist/models/index.d.ts",
       "import": "./dist/models/index.js"
+    },
+    "./foundry-host": {
+      "types": "./dist/runtime/foundry-local/foundry-host.d.ts",
+      "import": "./dist/runtime/foundry-local/foundry-host.js"
+    },
+    "./litert-host": {
+      "types": "./dist/runtime/litert-lm/litert-host.d.ts",
+      "import": "./dist/runtime/litert-lm/litert-host.js"
+    },
+    "./geniex-host": {
+      "types": "./dist/runtime/geniex/geniex-host.d.ts",
+      "import": "./dist/runtime/geniex/geniex-host.js"
+    },
+    "./settings": {
+      "types": "./dist/settings/public.d.ts",
+      "import": "./dist/settings/public.js"
     }
   },
   "files": [
     "dist",
-    "!dist/bin",
-    "src/settings/schema"
+    "!dist/bin"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/build-geniex-worker.mjs && tsc -p tsconfig.build.json",
     "build:bin": "node scripts/build-binaries.mjs --host",
     "build:bin:all": "node scripts/build-binaries.mjs --all",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -52,6 +71,7 @@
     "test:app-e2e": "vitest run --project app-e2e",
     "test:runtime-compat": "vitest run --project runtime-compat",
     "test:live": "ATOMIC_LIVE=1 vitest run --project live",
+    "test:integration": "vitest run --project integration",
     "engine:check": "node scripts/engine-candidate.mjs local",
     "test:coverage": "vitest run --project unit --project contract --coverage && node scripts/check-coverage-floor.mjs",
     "fixtures:import": "node scripts/import-app-fixtures.mjs",
@@ -62,6 +82,7 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^1.0.28",
     "ai": "^5.0.121",
+    "smol-toml": "^1.9.1",
     "tar": "^7.4.3",
     "yaml": "^2.8.1",
     "yauzl": "^3.2.0"

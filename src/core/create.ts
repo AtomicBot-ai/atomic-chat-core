@@ -5,11 +5,12 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { homedir, release as osRelease } from 'node:os'
-import { join } from 'node:path'
+import { homedir, release as osRelease, totalmem } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
   EngineBuildId,
+  LiteRtLmNpu,
   LlamacppProviderId,
   LocalProviderId,
   ModelCompatibility,
@@ -31,6 +32,25 @@ import {
   parseFoundryLocalCheckRequest,
   runFoundryHostProbe,
 } from '../runtime/foundry-local/index.js'
+import {
+  LiteRtLmAcceleratorService,
+  LiteRtLmCheckService,
+  LiteRtLmRuntime,
+  liteRtHostCommand,
+  liteRtNpuGeneration,
+  parseLiteRtLmCheckRequest,
+  liteRtHostProber,
+} from '../runtime/litert-lm/index.js'
+import {
+  GeniexAcceleratorService,
+  GeniexCheckService,
+  geniexHostCommand,
+  geniexHostPlatform,
+  geniexHostProber,
+  GeniexRuntime,
+  parseGeniexCheckRequest,
+} from '../runtime/geniex/index.js'
+import type { GeniexBuild, GeniexHostPlatform } from '../runtime/geniex/index.js'
 import { SettingsStore } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
@@ -71,6 +91,7 @@ import type { EngineHandle } from '../engines/index.js'
 import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
 import { wireDiffusion } from '../diffusion/index.js'
+import { wireAudio } from '../audio/index.js'
 import { MEDIA_ADAPTERS, MediaCatalogService, MediaService } from '../media/index.js'
 import {
   EngineBuildsService,
@@ -78,6 +99,7 @@ import {
   IDLE_ENGINE_HOST,
   manifestKinds,
   foundryLocalHostPlatform,
+  liteRtLmHostPlatform,
 } from '../engine-builds/index.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { ManagedTextRuntime } from '../runtime/managed-engines/index.js'
@@ -87,6 +109,7 @@ import { lanAddresses, reapTunnelOrphan, wireRemoteAccess } from '../remote-acce
 import { ClientRegistry, CLIENT_EXPIRY_MS, ControlServer } from '../server/index.js'
 import {
   captureReport,
+  failureObserver,
   createCoreReporter,
   processFailureReport,
   reportCoreEvents,
@@ -95,7 +118,8 @@ import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
 import { compatibilityFor, removeLegacyPrismSetups, wirePrismCompatibility } from './prism.js'
-import { DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
+import { APP_LEASE_CHECK_MS, appLeaseDecision, stalledMs, workInProgress } from './app-lease.js'
+import { AUDIO_GPU_PROVIDER, DIFFUSION_GPU_PROVIDER, wireGpuResidency } from './gpu-residency.js'
 import { reapOrphans } from './reap-orphans.js'
 import { sessionsOf, unknownProvider } from './sessions.js'
 import {
@@ -165,7 +189,8 @@ export async function createAtomicCore(
       onListenerError: (event, error) =>
         captureReport(reporter, processFailureReport('event_listener', error, { event })),
     })
-    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform)
+    const onFailure = failureObserver(reporter)
+    if (reporter) reportCoreEvents(emitter, reporter, options.platform ?? process.platform, false)
     const settings = await SettingsStore.open(layout.core.settings, { ownerScope: scope })
     // Settings written through the CLI/control API must reach the attached app immediately so it
     // can refresh the legacy rollback copy before acknowledging the revision. Migration
@@ -222,6 +247,7 @@ export async function createAtomicCore(
     // One downloader per core process: it owns the active-task table that `cancel` works from, so
     // two of them would each know only half of what is running.
     const downloader = new Downloader({
+      onFailure,
       dataFolder: layout.root,
       platform: process.platform,
       fetch: options.fetch ?? fetch,
@@ -285,6 +311,8 @@ export async function createAtomicCore(
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
           ),
+        // Any platform: the host prompt cache (`--cache-ram`) is sized by the machine's RAM.
+        systemMemory: async () => ({ totalMemoryBytes: totalmem() }),
         log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
@@ -305,6 +333,7 @@ export async function createAtomicCore(
     const gpuResidency = wireGpuResidency({
       runtimes,
       diffusion: () => diffusion,
+      audio: () => audio,
       leftovers: () => managedLeftovers(),
       sessions: facade,
     })
@@ -325,6 +354,10 @@ export async function createAtomicCore(
           journal,
           emit: (name, payload) => emitter.emit(name, payload),
           claimGpu: gpuResidency.hook('mlx'),
+          unifiedMemory: async () =>
+            probeUnifiedMemory(
+              nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+            ),
           log: runtimeLog,
           ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
         })
@@ -348,8 +381,10 @@ export async function createAtomicCore(
     // Foundry Local (change `add-foundry-local`, design D7): which archive this host runs. glibc comes
     // from the process report, which Bun's compiled binaries fill in as Node does; musl has none. The
     // report is a whole diagnostic snapshot, so it is built on Linux only, where glibc decides.
+    // LiteRT-LM (change `add-litert-lm-runtime`, design D7) decides on the same facts with its own
+    // thresholds: macOS 12, glibc 2.27, no Windows arm64.
     const foundryLocalArch = options.foundryLocalHost?.arch ?? process.arch
-    const foundryLocalHost = foundryLocalHostPlatform({
+    const nativeHostFacts = {
       platform,
       arch: foundryLocalArch,
       osRelease: options.foundryLocalHost?.osRelease ?? osRelease(),
@@ -359,7 +394,22 @@ export async function createAtomicCore(
           ? (process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined)?.header
               ?.glibcVersionRuntime
           : undefined),
-    })
+    }
+    const foundryLocalHost = foundryLocalHostPlatform(nativeHostFacts)
+    const liteRtLmHost = liteRtLmHostPlatform(nativeHostFacts)
+    const liteRtHost = liteRtHostCommand(env)
+    // GenieX (change `add-geniex-runtime`, design D3): Windows arm64 whose processor is a Snapdragon X
+    // Elite or X2 Elite, by the CPU model string — read from the hardware probe only where the first
+    // two hold, so no other host waits for it. `ATOMIC_GENIEX_TEST_CHIP` stands in for the machine in
+    // the e2e tests, where no Snapdragon is.
+    const geniexHost: GeniexHostPlatform = await (async () => {
+      const standIn = env['ATOMIC_GENIEX_TEST_CHIP']
+      if (standIn === 'x-elite' || standIn === 'x2-elite') return { platform: 'win-arm64', chip: standIn }
+      const facts = { platform, arch: foundryLocalArch, cpuName: '' }
+      if (platform !== 'win32' || foundryLocalArch !== 'arm64') return geniexHostPlatform(facts)
+      return geniexHostPlatform({ ...facts, cpuName: (await hardware.info()).info.cpu.name })
+    })()
+    const geniexHostCmd = geniexHostCommand(env)
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
     // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
@@ -391,6 +441,145 @@ export async function createAtomicCore(
       runtimes.set('foundry-local', foundryLocalRuntime)
     }
 
+    // LiteRT-LM (change `add-litert-lm-runtime`, task 6.6): one litert-host per model, where the
+    // platform rule of design D7 holds. The active build, OpenVINO and the NPU generation are read per
+    // load, from services wired below.
+    const liteRtLmPaths = layout.provider('litert-lm')
+    const liteRtActiveBuild = async (): Promise<{ dir: string; version: string } | undefined> => {
+      const dir = await engineBuilds.activeDir('litert-lm')
+      return dir ? { dir, version: basename(dirname(dir)) } : undefined
+    }
+    // The proxy policy of one request decides that request's fetch; nothing about it is kept.
+    const fetchFor = (proxy?: ProxyConfig | null): typeof fetch =>
+      policyFetchFor({ proxy: proxy ?? null }, options.fetch ?? fetch)
+    const liteRtManifest = new EngineManifestSource(manifestKinds(layout)['litert-lm'], {
+      env,
+      fetchFor,
+      log,
+    })
+
+    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
+    let npuAnswer: ReturnType<typeof probeNpu> | undefined
+    const foundryLocalNpu = () =>
+      (npuAnswer ??= probeNpu(
+        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+      ))
+
+    // LiteRT-LM's NPU generation (change `add-litert-lm-runtime`, design D3): an NPU device on Windows,
+    // then the CPU model string; asked once. `ATOMIC_LITERT_LM_TEST_NPU` stands in for the machine in
+    // the e2e tests, where no Intel NPU is.
+    let liteRtNpuAnswer: Promise<LiteRtLmNpu | null> | undefined
+    const liteRtNpu = (): Promise<LiteRtLmNpu | null> =>
+      (liteRtNpuAnswer ??= (async () => {
+        const standIn = env['ATOMIC_LITERT_LM_TEST_NPU']
+        if (standIn === 'intel-lnl' || standIn === 'intel-ptl') return standIn
+        if (liteRtLmHost.platform !== 'win-x64' || (await foundryLocalNpu()).present === false) return null
+        return liteRtNpuGeneration((await hardware.info()).info.cpu.name)
+      })())
+
+    // LiteRT-LM's OpenVINO (task 6.4): offered on an Intel NPU LiteRT-LM targets, prepared on order.
+    const liteRtLmAccelerators =
+      liteRtLmHost.platform === null
+        ? undefined
+        : new LiteRtLmAcceleratorService({
+            acceleratorsDir: liteRtLmPaths.acceleratorsDir as string,
+            tmpDir: liteRtLmPaths.tmpDir,
+            resolveBuild: liteRtActiveBuild,
+            // The cached manifest first: a published release never changes (conf's rule), and a load
+            // must not wait on the network for it.
+            release: async (version) =>
+              (await liteRtManifest.cached())?.releases.find((release) => release.version === version) ??
+              (await liteRtManifest.read()).manifest?.releases.find(
+                (release) => release.version === version
+              ) ??
+              null,
+            npuGeneration: liteRtNpu,
+            download: async (taskId, item, onFraction) => {
+              const off = emitter.on('download:progress', (progress) => {
+                if (progress.taskId === taskId && progress.total > 0)
+                  onFraction(Math.min(1, progress.transferred / progress.total))
+              })
+              try {
+                await downloader.download(taskId, [{ ...item, model_id: taskId }])
+              } finally {
+                off()
+              }
+            },
+            emit: (name, payload) => emitter.emit(name, payload),
+          })
+
+    const liteRtLmRuntime: LiteRtLmRuntime | undefined =
+      liteRtLmHost.platform === null || !liteRtLmAccelerators
+        ? undefined
+        : new LiteRtLmRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'litert-lm'),
+            instanceId: lock.instanceId,
+            hostPlatform: liteRtLmHost.platform,
+            hostCommand: liteRtHost,
+            resolveBuild: liteRtActiveBuild,
+            openVinoLibs: liteRtLmAccelerators.libsDir.bind(liteRtLmAccelerators),
+            npuGeneration: liteRtNpu,
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('litert-lm'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('litert-lm'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (liteRtLmRuntime) {
+      registries.set('litert-lm', liteRtLmRuntime.registry)
+      runtimes.set('litert-lm', liteRtLmRuntime)
+    }
+
+    // GenieX (change `add-geniex-runtime`, task 6.6): one geniex-host per model, on a Snapdragon X only
+    // (design D3). The active build — its folder, version and the devices its probe found — is read
+    // per load from the engine-builds service wired below.
+    const geniexPaths = layout.provider('geniex')
+    const geniexActiveBuild = async (): Promise<GeniexBuild | undefined> => {
+      const build = await engineBuilds.activeBuild('geniex')
+      return build ? { dir: build.dir, version: build.tag, devices: build.devices ?? [] } : undefined
+    }
+    const geniexRuntime: GeniexRuntime | undefined =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexRuntime({
+            layout,
+            registry: new ModelRegistry(layout, 'geniex'),
+            instanceId: lock.instanceId,
+            chip: geniexHost.chip,
+            hostCommand: geniexHostCmd,
+            resolveBuild: geniexActiveBuild,
+            trustedHosts: managedTrustedHosts,
+            readSettings: async () => settings.get('geniex'),
+            journal,
+            emit: (name, payload) => emitter.emit(name, payload),
+            claimGpu: gpuResidency.hook('geniex'),
+            baseEnv: env,
+            log: runtimeLog,
+            ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+          })
+    if (geniexRuntime) {
+      registries.set('geniex', geniexRuntime.registry)
+      runtimes.set('geniex', geniexRuntime)
+    }
+    const geniexAccelerators =
+      geniexHost.platform === null
+        ? undefined
+        : new GeniexAcceleratorService({ resolveBuild: geniexActiveBuild, chip: geniexHost.chip })
+    const geniexCheck =
+      geniexRuntime && geniexHost.platform !== null
+        ? new GeniexCheckService({
+            chip: geniexHost.chip,
+            modelsDir: geniexPaths.modelsDir,
+            registry: geniexRuntime.registry,
+            resolveBuild: geniexActiveBuild,
+            inspect: (path) => geniexRuntime.inspect(path),
+          })
+        : undefined
+
     const optimalStore = await OptimalBackendStore.open(layout.core.optimalBackend, (provider, state) => {
       emitter.emit('backend:optimal-changed', { provider, ...state })
     })
@@ -406,9 +595,6 @@ export async function createAtomicCore(
       unload: (provider, modelId) => (core as AtomicCore).unload(provider, modelId),
       fetch: options.fetch ?? fetch,
     })
-    // The proxy policy of one request decides that request's fetch; nothing about it is kept.
-    const fetchFor = (proxy?: ProxyConfig | null): typeof fetch =>
-      policyFetchFor({ proxy: proxy ?? null }, options.fetch ?? fetch)
     // One release-index service for the fork: its memory TTL and in-flight coalescing only help
     // when every caller shares them.
     const turboquantCatalog = new TurboquantCatalogService({
@@ -485,6 +671,7 @@ export async function createAtomicCore(
       const existing = backendServices.get(provider)
       if (existing) return existing
       const created = new BackendService({
+        onFailure,
         layout,
         provider,
         downloader,
@@ -544,6 +731,7 @@ export async function createAtomicCore(
     })
 
     const diffusion = wireDiffusion({
+      onFailure,
       layout,
       journal,
       instanceId: lock.instanceId,
@@ -558,9 +746,24 @@ export async function createAtomicCore(
       ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
     })
 
-    // sd.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads conf's
-    // manifests, installs, activates and removes them; image generation and the MLX runtime lend it
-    // their load locks and their sessions.
+    // Audio generation on audio.cpp: one resident `audiocpp_server`, an exclusive GPU occupant like
+    // image generation. Its builds are the engine-builds row `audio-cpp`.
+    const audio = wireAudio({
+      layout,
+      journal,
+      instanceId: lock.instanceId,
+      emit: (name, payload) => emitter.emit(name, payload),
+      log: runtimeLog,
+      platform,
+      env,
+      claimGpu: gpuResidency.hook(AUDIO_GPU_PROVIDER),
+      ...(options.audio ? { overrides: options.audio } : {}),
+      ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
+    })
+
+    // sd.cpp, audio.cpp and MLX builds (change `move-sdcpp-mlx-install-to-core`): the core reads
+    // conf's manifests, installs, activates and removes them; image generation and the MLX runtime
+    // lend it their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
@@ -569,8 +772,14 @@ export async function createAtomicCore(
         'sd-cpp': layout.diffusion.backendsDir,
         'mlx': layout.provider('mlx').backendsDir,
         'foundry-local': foundryLocalPaths.backendsDir,
+        'litert-lm': layout.provider('litert-lm').backendsDir,
+        'geniex': layout.provider('geniex').backendsDir,
+        'audio-cpp': layout.audio.backendsDir,
       },
-      failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+      failedBackendsFiles: {
+        'sd-cpp': join(layout.diffusion.root, 'failed-backends.json'),
+        'audio-cpp': layout.audio.failedBackendsFile,
+      },
       resourcesDir: options.resourcesDir,
       platform,
       downloader,
@@ -582,18 +791,25 @@ export async function createAtomicCore(
           fetchFor,
           log,
         }),
+        'litert-lm': liteRtManifest,
+        'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
+        'audio-cpp': new EngineManifestSource(engineManifestKinds['audio-cpp'], { env, fetchFor, log }),
       },
-      foundryLocalHost,
-      foundryHostProbe: async (libDir) => {
-        await runFoundryHostProbe(
-          foundryHost,
-          {
-            libDir,
-            appDataDir: foundryLocalPaths.runtimeDir as string,
-            logsDir: foundryLocalPaths.logsDir as string,
-          },
-          { env }
-        )
+      hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost, 'geniex': geniexHost },
+      hostProbes: {
+        'foundry-local': async (libDir) => {
+          await runFoundryHostProbe(
+            foundryHost,
+            {
+              libDir,
+              appDataDir: foundryLocalPaths.runtimeDir as string,
+              logsDir: foundryLocalPaths.logsDir as string,
+            },
+            { env }
+          )
+        },
+        'litert-lm': liteRtHostProber(liteRtHost, env),
+        'geniex': geniexHostProber(geniexHostCmd, env),
       },
       hardware: () => hardware.facts(),
       hosts: {
@@ -602,18 +818,27 @@ export async function createAtomicCore(
         'mlx': mlxRuntime instanceof MlxRuntime ? mlxRuntime.engineHost() : IDLE_ENGINE_HOST,
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'audio-cpp': audio.engineHost(),
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
       log,
     })
 
-    // Whether this machine has an NPU (task 6.5): asked once, on the first check that needs it.
-    let npuAnswer: ReturnType<typeof probeNpu> | undefined
-    const foundryLocalNpu = () =>
-      (npuAnswer ??= probeNpu(
-        nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
-      ))
+    const liteRtLmCheck =
+      liteRtLmRuntime && liteRtLmAccelerators && liteRtLmHost.platform !== null
+        ? new LiteRtLmCheckService({
+            platform: liteRtLmHost.platform,
+            modelsDir: liteRtLmPaths.modelsDir,
+            registry: liteRtLmRuntime.registry,
+            resolveBuild: liteRtActiveBuild,
+            npuGeneration: liteRtNpu,
+            openVinoLibs: liteRtLmAccelerators.libsDir.bind(liteRtLmAccelerators),
+            inspect: (buildDir, file) => liteRtLmRuntime.inspect(buildDir, file),
+          })
+        : undefined
 
     // Foundry Local's accelerators (task 6.4, design D3): probed from the active build when a client
     // asks, prepared only when one orders it. Only where the platform rule registers the provider.
@@ -646,6 +871,7 @@ export async function createAtomicCore(
       arch: managedArch,
       windows: managedWindows,
     } = wireManagedEnvironment({
+      onFailure,
       env,
       platform,
       layout,
@@ -754,6 +980,7 @@ export async function createAtomicCore(
     // Both start on the user's own llama.cpp build first when it is new enough: it runs on this machine.
     const upstreamBackend = () => String(settings.get('llamacpp-upstream')['version_backend'] ?? '')
     const decision = wireDecision({
+      onFailure,
       layout,
       settings,
       upstreamBackend,
@@ -771,6 +998,7 @@ export async function createAtomicCore(
     // The embedding model the public `/v1/embeddings` serves by name: its own process too, started
     // with the decision model below.
     const embedding = wireEmbedding({
+      onFailure,
       layout,
       settings,
       upstreamBackend,
@@ -790,6 +1018,8 @@ export async function createAtomicCore(
     const engineHandles: EngineHandle[] = []
     for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
       foundryLocal: foundryLocalHost.platform !== null,
+      liteRtLm: liteRtLmHost.platform !== null,
+      geniex: geniexHost.platform !== null,
     })) {
       const kind = ENGINE_KINDS[engine]
       if (kind === 'llamacpp') {
@@ -866,9 +1096,9 @@ export async function createAtomicCore(
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
         hardware,
-        ...(foundryLocalAccelerators
-          ? {
-              nativeModelChecks: {
+        nativeModelChecks: {
+          ...(foundryLocalAccelerators
+            ? {
                 // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
                 'foundry-local': async (body: unknown) => {
                   const request = parseFoundryLocalCheckRequest(body)
@@ -884,10 +1114,38 @@ export async function createAtomicCore(
                     request
                   )
                 },
-              },
+              }
+            : {}),
+          // LiteRT-LM (task 6.5): the variant without the network, a file with its own facts.
+          ...(liteRtLmCheck
+            ? { 'litert-lm': async (body: unknown) => liteRtLmCheck.check(parseLiteRtLmCheckRequest(body)) }
+            : {}),
+          // GenieX (change `add-geniex-runtime`, task 6.5): the same, a bundle judged by this machine's chip.
+          ...(geniexCheck
+            ? { geniex: async (body: unknown) => geniexCheck.check(parseGeniexCheckRequest(body)) }
+            : {}),
+        },
+        ...(foundryLocalAccelerators
+          ? {
               foundryLocal: {
                 accelerators: (force: boolean) => foundryLocalAccelerators.list({ force }),
                 prepare: (request) => foundryLocalAccelerators.prepare(request),
+              },
+            }
+          : {}),
+        ...(liteRtLmAccelerators
+          ? {
+              liteRtLm: {
+                accelerators: () => liteRtLmAccelerators.list(),
+                prepare: (request) => liteRtLmAccelerators.prepare(request),
+              },
+            }
+          : {}),
+        ...(geniexAccelerators
+          ? {
+              geniex: {
+                accelerators: () => geniexAccelerators.list(),
+                prepare: (request) => geniexAccelerators.prepare(request),
               },
             }
           : {}),
@@ -971,6 +1229,7 @@ export async function createAtomicCore(
           stop: () => (core as AtomicCore).stopRemoteAccess(),
         },
         diffusion,
+        audio,
         engineBuilds,
         engines,
         decision: {
@@ -1037,6 +1296,11 @@ export async function createAtomicCore(
           setInspecting: (enabled) => {
             ;(core as AtomicCore).inspecting = enabled
           },
+          selection: () =>
+            [...(core as AtomicCore).servedSelection].map(([model, provider]) => ({ model, provider })),
+          setSelection: (models) => {
+            ;(core as AtomicCore).servedSelection = new Map(models.map((m) => [m.model, m.provider]))
+          },
           status: () => (core as AtomicCore).publicState(),
           start: (opts) => (core as AtomicCore).startPublicServer(opts),
           stop: () => (core as AtomicCore).stopPublicServer(),
@@ -1056,12 +1320,45 @@ export async function createAtomicCore(
     if (scope === 'app') {
       const startupDeadline = Date.now() + CLIENT_EXPIRY_MS
       let appEverRegistered = false
+      let lastCheckAt = Date.now()
+      let waitingFor: string | undefined
+      // What a retirement would throw away, as every engine reports it (`app-lease.ts`).
+      const work = (): string[] =>
+        workInProgress([
+          ...[...runtimes].flatMap(([provider, runtime]) =>
+            (runtime.gpuOccupancy?.() ?? []).map((occupant) => ({ ...occupant, provider }))
+          ),
+          ...diffusion.gpuOccupancy().map((occupant) => ({ ...occupant, provider: DIFFUSION_GPU_PROVIDER })),
+          ...audio.gpuOccupancy().map((occupant) => ({ ...occupant, provider: AUDIO_GPU_PROVIDER })),
+        ])
       // An app that crashes cannot detach. Its registration expires after missed heartbeats;
-      // unlike the CLI daemon, this owner then unloads models and releases its lock.
+      // unlike the CLI daemon, this owner then unloads models and releases its lock — but not for
+      // time it was not running itself, and not in the middle of work (`app-lease.ts`).
       appLeaseTimer = setInterval(() => {
-        if (clients.count() > 0) appEverRegistered = true
-        else if (appEverRegistered || Date.now() > startupDeadline) void core!.shutdown()
-      }, 5_000)
+        const now = Date.now()
+        clients.extendLeases(stalledMs(lastCheckAt, now, APP_LEASE_CHECK_MS))
+        lastCheckAt = now
+        const count = clients.count()
+        if (count > 0) appEverRegistered = true
+        const decision = appLeaseDecision({
+          clients: count,
+          everRegistered: appEverRegistered,
+          now,
+          startupDeadline,
+          work: count > 0 ? [] : work(),
+        })
+        if (decision.action === 'wait') {
+          const said = decision.work.join('; ')
+          if (said !== waitingFor) log('info', `no app is attached; staying up while ${said}`)
+          waitingFor = said
+          return
+        }
+        waitingFor = undefined
+        // Closing admission in the same step: an app that registers right now is refused and starts
+        // over, rather than attaching to a core that is already on its way out.
+        if (decision.action === 'retire' && clients.acceptShutdown(undefined, false).length === 0)
+          void core!.shutdown()
+      }, APP_LEASE_CHECK_MS)
       appLeaseTimer.unref()
     }
     core = construct({
@@ -1083,6 +1380,7 @@ export async function createAtomicCore(
       externalSessions,
       appLeaseTimer,
       diffusion,
+      audio,
       managed,
       managedTrustedHosts,
       decision,

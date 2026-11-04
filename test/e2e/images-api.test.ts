@@ -236,7 +236,8 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('the images fa
     expect(watched.status, watched.body).toBe(200)
     await waitFor(
       () =>
-        apiEvents().filter((e) => e.data['phase'] === 'finished' && e.data['finish'] !== null).length >= 1,
+        // Announced, unlike the first: every finished request carries finish fields, a watched one a seq.
+        apiEvents().filter((e) => e.data['phase'] === 'finished' && e.data['seq'] !== -1).length >= 1,
       'the watched request to finish'
     )
     const started = apiEvents().filter((e) => e.data['phase'] === 'started')

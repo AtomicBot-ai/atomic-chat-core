@@ -7,7 +7,8 @@
  * Contract: test/fixtures/app/inspector-telemetry.
  *
  * PRIVACY (ATO-113): previews are user content. They leave the core only in `api:request` events,
- * and only while the app's API screen is open; they are never logged or written to disk.
+ * and only while the app's API screen is open; they are never logged or written to disk. The numbers
+ * (timings, token counts, rates, finish reason) carry no content and are reported for every request.
  */
 
 import { isJsonObject, serdeToString } from '../shims/index.js'
@@ -124,7 +125,10 @@ export function extractReasoning(choice: JsonValue): string | undefined {
 
 export interface TelemetryFields {
   ttft_ms: number | null
+  /** The whole prompt, its cached part included. */
   prompt_tokens: number | null
+  /** The part of the prompt the engine took from its cache instead of processing it again. */
+  cached_tokens: number | null
   completion_tokens: number | null
   total_tokens: number | null
   tokens_estimated: boolean
@@ -139,6 +143,7 @@ export interface TelemetryFields {
 export class StreamTelemetry {
   firstContentAt: number | undefined
   promptTokens: number | undefined
+  cachedTokens: number | undefined
   completionTokens: number | undefined
   totalTokens: number | undefined
   promptPerSecond: number | undefined
@@ -150,6 +155,12 @@ export class StreamTelemetry {
   private reply = ''
   /** Apart from `reply`, so a model that answered previews the answer, not its thinking. */
   private reasoning = ''
+  /** Without previews no reply text is kept at all, not even in memory: only the numbers. */
+  private readonly previews: boolean
+
+  constructor(options: { previews?: boolean } = {}) {
+    this.previews = options.previews ?? true
+  }
 
   onJson(v: JsonValue, now: number): void {
     switch (asStr(get(v, 'type'))) {
@@ -161,12 +172,19 @@ export class StreamTelemetry {
         return
       }
       case 'message_start':
-        this.promptTokens = asU64(pointer(v, ['message', 'usage', 'input_tokens'])) ?? this.promptTokens
+        // Its `output_tokens` is a placeholder (0 or 1); the count comes with `message_delta`.
+        this.onAnthropicUsage(pointer(v, ['message', 'usage']), false)
         return
       case 'message_delta': {
-        const n = asU64(pointer(v, ['usage', 'output_tokens']))
-        if (n !== undefined) this.completionTokens = n
+        this.onAnthropicUsage(get(v, 'usage'), true)
         const reason = asStr(pointer(v, ['delta', 'stop_reason']))
+        if (reason !== undefined) this.finishReason = reason
+        return
+      }
+      case 'message': {
+        // A whole (non-streamed) Anthropic reply.
+        this.onAnthropicUsage(get(v, 'usage'), true)
+        const reason = asStr(get(v, 'stop_reason'))
         if (reason !== undefined) this.finishReason = reason
         return
       }
@@ -193,14 +211,22 @@ export class StreamTelemetry {
       const prompt = asU64(get(usage, 'prompt_tokens'))
       const completion = asU64(get(usage, 'completion_tokens'))
       const total = asU64(get(usage, 'total_tokens'))
+      const cached = asU64(pointer(usage, ['prompt_tokens_details', 'cached_tokens']))
       if (prompt !== undefined) this.promptTokens = prompt
       if (completion !== undefined) this.completionTokens = completion
       if (total !== undefined) this.totalTokens = total
+      if (cached !== undefined) this.cachedTokens = cached
     }
 
     const timings = get(v, 'timings')
     if (isJsonObject(timings)) {
-      if (this.promptTokens === undefined) this.promptTokens = asU64(timings['prompt_n'])
+      // llama.cpp: `prompt_n` is what it processed, `cache_n` what it reused; the prompt is both.
+      const reused = asU64(timings['cache_n'])
+      if (this.cachedTokens === undefined) this.cachedTokens = reused
+      if (this.promptTokens === undefined) {
+        const processed = asU64(timings['prompt_n'])
+        this.promptTokens = processed === undefined ? undefined : processed + (reused ?? 0)
+      }
       if (this.completionTokens === undefined) this.completionTokens = asU64(timings['predicted_n'])
       // The upstream's own rates win: they see queue time a proxy-side clock cannot.
       const pps = timings['prompt_per_second']
@@ -210,18 +236,33 @@ export class StreamTelemetry {
     }
   }
 
+  /**
+   * Anthropic `usage`: `input_tokens` leaves out what was read from or written to the prompt cache,
+   * so the prompt is the three together and the cached part is what was read.
+   */
+  private onAnthropicUsage(usage: JsonValue | undefined, withOutput: boolean): void {
+    if (!isJsonObject(usage)) return
+    const input = asU64(usage['input_tokens'])
+    const read = asU64(usage['cache_read_input_tokens'])
+    const written = asU64(usage['cache_creation_input_tokens'])
+    if (input !== undefined) this.promptTokens = input + (read ?? 0) + (written ?? 0)
+    if (read !== undefined) this.cachedTokens = read
+    const output = withOutput ? asU64(usage['output_tokens']) : undefined
+    if (output !== undefined) this.completionTokens = output
+  }
+
   private onContent(text: string, now: number): void {
     if (text === '') return
     this.markToken(now)
     this.replyChars += charCount(text)
-    this.reply = appendCapped(this.reply, text)
+    if (this.previews) this.reply = appendCapped(this.reply, text)
   }
 
   private onReasoning(text: string, now: number): void {
     if (text === '') return
     this.markToken(now)
     this.replyChars += charCount(text)
-    this.reasoning = appendCapped(this.reasoning, text)
+    if (this.previews) this.reasoning = appendCapped(this.reasoning, text)
   }
 
   private markToken(now: number): void {
@@ -249,6 +290,7 @@ export class StreamTelemetry {
     return {
       ttft_ms: this.ttftMs(start),
       prompt_tokens: this.promptTokens ?? null,
+      cached_tokens: this.cachedTokens ?? null,
       completion_tokens: completion,
       total_tokens: total,
       tokens_estimated: estimated,

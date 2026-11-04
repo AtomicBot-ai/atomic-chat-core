@@ -77,6 +77,7 @@ export function decisionReplyFields(body: Buffer): TelemetryFields {
   const fields: TelemetryFields = {
     ttft_ms: null,
     prompt_tokens: null,
+    cached_tokens: null,
     completion_tokens: null,
     total_tokens: null,
     tokens_estimated: false,

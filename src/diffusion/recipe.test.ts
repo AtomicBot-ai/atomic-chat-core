@@ -12,6 +12,8 @@ import { decodePng, makeChunk, parseHeader, PNG_SIGNATURE } from './png.js'
 import {
   a1111Parameters,
   fmtFloat,
+  knob,
+  knobOk,
   orderedEngine,
   PARAMETERS_KEYWORD,
   parseRecipe,
@@ -214,6 +216,56 @@ describe('remote recipes', () => {
     })
     expect(parseRecipe(text)).toEqual(remote())
     expect(a1111Parameters(remote())).toContain('Model: gpt-image-2')
+  })
+
+  it('leave out the knobs a provider was not sent, and read them back absent', () => {
+    const { steps: _steps, cfgScale: _cfg, seed: _seed, batchSeed: _batchSeed, ...rest } = remote()
+    const bare: ImageRecipe = rest
+    const text = serializeRecipe(bare)
+    const keys = Object.keys(JSON.parse(text) as object)
+    for (const key of ['steps', 'cfgScale', 'seed', 'batchSeed']) expect(keys).not.toContain(key)
+    expect(keys.slice(0, 7)).toEqual([
+      'jobId',
+      'index',
+      'prompt',
+      'negativePrompt',
+      'width',
+      'height',
+      'guidance',
+    ])
+    expect(parseRecipe(text)).toEqual(bare)
+    expect(a1111Parameters(bare)).toBe(
+      'a cat, photo\nNegative prompt: blurry\nSampler: euler, Distilled Guidance: 3.5, Size: 64x48, Model: gpt-image-2'
+    )
+  })
+
+  it('still read a remote recipe written with the old 0 / 0 / -1 placeholders', () => {
+    const old = { ...remote(), steps: 0, cfgScale: 0, seed: -1, batchSeed: -1 }
+    expect(parseRecipe(serializeRecipe(old))).toEqual(old)
+  })
+
+  it('take a knob that passes, or no key only from a provider', () => {
+    const whole = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v)
+    for (const [value, remote, ok] of [
+      [8, false, true],
+      [8, true, true],
+      [undefined, true, true],
+      [undefined, false, false],
+      [null, true, false],
+      [1.5, true, false],
+    ] as const) {
+      expect(knobOk(value, remote, whole)).toBe(ok)
+    }
+    expect(knob('seed', 0)).toEqual({ seed: 0 })
+    expect(knob('seed', undefined)).toEqual({})
+  })
+
+  it('still require every knob of a local recipe', () => {
+    for (const key of ['steps', 'cfgScale', 'seed', 'batchSeed']) {
+      const raw = JSON.parse(serializeRecipe(recipe())) as Record<string, unknown>
+      delete raw[key]
+      expect(parseRecipe(JSON.stringify(raw))).toBeUndefined()
+    }
   })
 
   it('keep a local recipe without a remote key', () => {

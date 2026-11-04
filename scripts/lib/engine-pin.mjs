@@ -1,7 +1,8 @@
-// Which upstream llama.cpp release a core version runs today: its "pin". A plain-JS mirror of
-// src/backend/catalog/upstream-releases.ts (`parseUpstreamReleases`, `upstreamRemoteBackends`) and
-// manifest.ts (`parseManifestForPlatform`), for the scripts that cannot import TypeScript;
-// test/contract/engine-pin.test.ts holds the two to the same answers.
+// Which llama.cpp release a core version runs today: its "pin". A plain-JS mirror of
+// src/backend/catalog/upstream-releases.ts (`parseUpstreamReleases`, `upstreamRemoteBackends`),
+// manifest.ts (`parseManifestForPlatform`) and, for the PrismML fork (`atomic-prism`),
+// prism-manifest.ts (`parsePrismManifest`, `prismCatalogToBackends`), for the scripts that cannot
+// import TypeScript; test/contract/engine-pin.test.ts holds the two to the same answers.
 //
 // The pin of a platform is the release its CPU backend comes from: the newest release conf's
 // `backends/llamacpp-upstream-releases.json` lists that is not withdrawn, that this core version
@@ -207,4 +208,267 @@ export function resolvePins({ releases, manifest, coreVersion }) {
     list: { readable: list !== null, per_platform: listPins },
     legacy: { tag: legacy?.releases[0]?.tag ?? null },
   }
+}
+
+// --- PrismML (atomic-prism) -------------------------------------------------------------------------
+//
+// conf's `backends/atomic-prism-manifest.json` lists PrismML-Eng/llama.cpp builds with a backend id on
+// every asset; core downloads them from PrismML itself. The pin of a platform is the newest offered
+// release whose CPU pack for it is approved, as `prismCatalogToBackends` offers them.
+
+export const PRISM_MANIFEST_SCHEMA_VERSION = 1
+
+/** Where PrismML publishes a build core installs (src/backend/select/prism.ts), with its CPU pack. */
+export const PRISM_PIN_PLATFORMS = [
+  { platform: 'linux-x64', os: 'linux', arch: 'x64', backend: 'linux-cpu-x64' },
+  { platform: 'macos-arm64', os: 'macos', arch: 'arm64', backend: 'macos-arm64' },
+  { platform: 'macos-x64', os: 'macos', arch: 'x64', backend: 'macos-x64' },
+  { platform: 'windows-x64', os: 'windows', arch: 'x64', backend: 'win-cpu-x64' },
+]
+
+const PRISM_TAG_RE = /^prism-b(\d+)-[0-9a-f]{7}$/
+
+/** Build number of a PrismML tag (`prism-b10787-73bfe6c` → 10787), `null` for any other shape. */
+export function prismTagBuild(tag) {
+  const match = PRISM_TAG_RE.exec(tag)
+  return match ? Number(match[1]) : null
+}
+
+/**
+ * Build number of a tag of any engine the check knows: `b11617`, `prism-b10787-73bfe6c` or
+ * `master-883-137f740`. PrismML's number is the upstream build the fork is cut from, which is what
+ * `--version` prints; sd.cpp's is the commit count of upstream's master.
+ */
+export function engineTagBuild(tag) {
+  return upstreamTagBuild(tag) ?? prismTagBuild(tag) ?? sdcppTagBuild(tag)
+}
+
+function parsePrismAsset(raw) {
+  if (!isRecord(raw)) return null
+  const { backend, name, size, sha256, validation } = raw
+  if (!isString(backend) || !isString(name)) return null
+  if (typeof size !== 'number' || !Number.isInteger(size) || size <= 0) return null
+  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return null
+  if (validation !== 'candidate' && validation !== 'approved') return null
+  const asset = { backend, name, size, sha256, validation }
+  if (raw.companion === true) asset.companion = true
+  if (isString(raw.companion_backend)) asset.companion_backend = raw.companion_backend
+  return asset
+}
+
+function parsePrismRelease(raw) {
+  if (!isRecord(raw)) return null
+  const { tag, commit, published_at, min_core_version, notes_url } = raw
+  if (!isString(tag) || prismTagBuild(tag) === null) return null
+  if (typeof commit !== 'string' || !/^[0-9a-f]{40}$/.test(commit)) return null
+  if (!isString(published_at) || !isString(min_core_version) || !isString(notes_url)) return null
+  const assets = Array.isArray(raw.assets) ? raw.assets.map(parsePrismAsset) : []
+  const release = { tag, commit, min_core_version, assets: assets.filter((a) => a !== null) }
+  if (isRecord(raw.withdrawn) && isString(raw.withdrawn.reason))
+    release.withdrawn = { reason: raw.withdrawn.reason }
+  return release
+}
+
+/** A parsed PrismML manifest, or `null` for anything that is not one this core reads. */
+export function parsePrismManifest(value) {
+  if (!isRecord(value)) return null
+  if (value.schema_version !== PRISM_MANIFEST_SCHEMA_VERSION) return null
+  if (!Array.isArray(value.releases)) return null
+  return { schema_version: 1, releases: value.releases.map(parsePrismRelease).filter((r) => r !== null) }
+}
+
+/** Offered assets of offered releases, newest build first, as `{ version, backend }` (`prismCatalogToBackends`). */
+export function prismCatalogToBackends(manifest, options) {
+  const validated = (a) => a.validation === 'approved' || options.allowCandidates
+  const offered = (release, asset) => {
+    if (asset.companion || !validated(asset)) return false
+    if (!asset.companion_backend) return true
+    const companion = release.assets.find((a) => a.backend === asset.companion_backend)
+    return !!companion && validated(companion)
+  }
+  const out = []
+  const newestFirst = [...manifest.releases].sort((a, b) => prismTagBuild(b.tag) - prismTagBuild(a.tag))
+  for (const release of newestFirst) {
+    if (!upstreamReleaseOffered(release, options)) continue
+    for (const asset of release.assets)
+      if (offered(release, asset)) out.push({ version: release.tag, backend: asset.backend })
+  }
+  return out
+}
+
+/**
+ * The PrismML pin of `coreVersion` on every platform PrismML builds for, from conf's manifest (raw
+ * JSON, may be `undefined`). The same shape as `resolvePins`; there is no legacy file.
+ */
+export function resolvePrismPins({ manifest, coreVersion }) {
+  const parsed = manifest === undefined ? null : parsePrismManifest(manifest)
+  const offered = parsed ? prismCatalogToBackends(parsed, { coreVersion, allowCandidates: false }) : []
+  const pins = Object.fromEntries(
+    PRISM_PIN_PLATFORMS.map((p) => [
+      p.platform,
+      offered.find((e) => e.backend === p.backend)?.version ?? null,
+    ])
+  )
+  return {
+    source: parsed ? 'prism-manifest' : 'none',
+    core_version: coreVersion,
+    per_platform: Object.fromEntries(
+      PRISM_PIN_PLATFORMS.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
+    ),
+    list: { readable: parsed !== null, per_platform: parsed ? pins : null },
+    legacy: { tag: null },
+  }
+}
+
+// --- stable-diffusion.cpp (sd-cpp) and audio.cpp (audio-cpp) ------------------------------------------
+//
+// conf's `backends/sdcpp-manifest.json` and `backends/audiocpp-manifest.json` each name one build,
+// `tag_name`, for every core (no `min_core_version`): a "ggml release manifest", one archive per
+// backend id. The pin of a platform is that tag when the manifest pins the platform's CPU archive
+// with a sha256 and a size (`assetInstallable`); `parseSdcppPinManifest` and
+// `parseAudiocppPinManifest` mirror `parseSdcppManifest` and `parseAudiocppManifest`
+// (`parseGgmlReleaseManifest`) in src/engine-builds/manifest.ts, which differ only by the tag.
+
+/** Where sd.cpp ships a build core installs (src/engine-builds/select.ts), with its CPU archive. */
+export const SDCPP_PIN_PLATFORMS = [
+  { platform: 'linux-x64', os: 'linux', arch: 'x64', backend: 'linux-cpu-x64' },
+  { platform: 'linux-arm64', os: 'linux', arch: 'arm64', backend: 'linux-cpu-arm64' },
+  { platform: 'macos-arm64', os: 'macos', arch: 'arm64', backend: 'macos-arm64' },
+  { platform: 'windows-x64', os: 'windows', arch: 'x64', backend: 'win-cpu-x64' },
+  { platform: 'windows-arm64', os: 'windows', arch: 'arm64', backend: 'win-cpu-arm64' },
+]
+
+/** audio.cpp's are sd.cpp's: the same ladder (`audiocppHostChoice`) over the same backend ids. */
+export const AUDIOCPP_PIN_PLATFORMS = SDCPP_PIN_PLATFORMS
+
+const SDCPP_TAG_RE = /^master-(\d+)-([0-9a-f]{7})(?:-a([0-9a-f]{7}))?$/
+/** Upstream's release tags only: side tags such as `v0.9.2-drama3-base-small` are not engine releases. */
+const AUDIOCPP_TAG_RE = /^v(\d+)\.(\d+)\.(\d+)(?:-a([0-9a-f]{7}))?$/
+
+/**
+ * `master-883-137f740-a36f1b1a` → its build (883), upstream commit (`137f740`), the upstream tag
+ * (`master-883-137f740`) and the Atomic fork's rev (`36f1b1a`, `null` on a bare upstream tag).
+ * `null` for any other shape.
+ */
+export function sdcppTagParts(tag) {
+  const match = SDCPP_TAG_RE.exec(tag)
+  if (!match) return null
+  const [, build, sha7, rev] = match
+  return { build: Number(build), sha7, upstream_tag: `master-${build}-${sha7}`, atomic_rev: rev ?? null }
+}
+
+/** Build number of an sd.cpp tag (`master-883-137f740` → 883), `null` for any other shape. */
+export function sdcppTagBuild(tag) {
+  return sdcppTagParts(tag)?.build ?? null
+}
+
+/**
+ * `v0.9.3-a1b2c3d4` → the version `--version` prints (`0.9.3`), the upstream tag the build is cut from
+ * (`v0.9.3`, also what the archives are named by) and the Atomic fork's rev (`1b2c3d4`, `null` on a
+ * bare tag). `null` for any other shape, an upstream side tag included.
+ */
+export function audiocppTagParts(tag) {
+  const match = AUDIOCPP_TAG_RE.exec(tag)
+  if (!match) return null
+  const [, major, minor, patch, rev] = match
+  const version = `${major}.${minor}.${patch}`
+  return { version, upstream_tag: `v${version}`, atomic_rev: rev ?? null }
+}
+
+const GGML_BACKEND_RE = /^[a-z0-9.-]+$/
+const GGML_ASSET_NAME_RE = /^[A-Za-z0-9._-]+\.(zip|tar\.gz|tgz)$/
+
+/** A ggml release manifest whose tag matches `tagRe`, as the core reads it, or `null` for anything it would refuse. */
+function parseGgmlPinManifest(value, tagRe) {
+  if (!isRecord(value)) return null
+  const tag = value.tag_name
+  if (typeof tag !== 'string' || !tagRe.test(tag)) return null
+  if (!Array.isArray(value.assets)) return null
+  const assets = []
+  const seen = new Set()
+  for (const raw of value.assets) {
+    if (!isRecord(raw)) continue
+    const { backend, name, sha256, size } = raw
+    if (typeof backend !== 'string' || !GGML_BACKEND_RE.test(backend)) continue
+    if (typeof name !== 'string' || !GGML_ASSET_NAME_RE.test(name)) continue
+    if (seen.has(backend)) continue
+    seen.add(backend)
+    assets.push({
+      backend,
+      name,
+      ...(typeof sha256 === 'string' && /^[0-9a-f]{64}$/.test(sha256) ? { sha256 } : {}),
+      ...(typeof size === 'number' && Number.isSafeInteger(size) && size > 0 ? { size } : {}),
+      ...(raw.companion === true ? { companion: true } : {}),
+    })
+  }
+  if (assets.length === 0) return null
+  const manifest = { tag_name: tag, assets }
+  if (typeof value.updated_at === 'string') manifest.updated_at = value.updated_at
+  if (
+    typeof value.upstream_repo === 'string' &&
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.upstream_repo)
+  )
+    manifest.upstream_repo = value.upstream_repo
+  if (typeof value.download_base === 'string' && /^https:\/\/\S+$/.test(value.download_base))
+    manifest.download_base = value.download_base.replace(/\/+$/, '')
+  return manifest
+}
+
+/** conf's sd.cpp manifest as the core reads it, or `null` for anything it would refuse. */
+export function parseSdcppPinManifest(value) {
+  return parseGgmlPinManifest(value, SDCPP_TAG_RE)
+}
+
+/** conf's audio.cpp manifest as the core reads it, or `null` for anything it would refuse. */
+export function parseAudiocppPinManifest(value) {
+  return parseGgmlPinManifest(value, AUDIOCPP_TAG_RE)
+}
+
+/**
+ * The pin of a ggml release manifest on each of `platforms`, from conf's manifest (raw JSON, may be
+ * `undefined`) read by `parse`. The same shape as `resolvePins`; there is no release list and no
+ * legacy file, and `coreVersion` decides nothing: every core gets the manifest's build.
+ */
+function resolveGgmlPins({ manifest, coreVersion, parse, platforms, source }) {
+  const parsed = manifest === undefined ? null : parse(manifest)
+  const pins = Object.fromEntries(
+    platforms.map((p) => {
+      const asset = parsed?.assets.find((a) => a.backend === p.backend)
+      return [p.platform, asset?.sha256 && asset.size ? parsed.tag_name : null]
+    })
+  )
+  return {
+    source: parsed ? source : 'none',
+    core_version: coreVersion,
+    per_platform: Object.fromEntries(
+      platforms.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
+    ),
+    list: { readable: parsed !== null, per_platform: parsed ? pins : null },
+    legacy: { tag: null },
+  }
+}
+
+/** The sd.cpp pin on every platform core ships it for, from conf's `backends/sdcpp-manifest.json`. */
+export function resolveSdcppPins({ manifest, coreVersion }) {
+  return resolveGgmlPins({
+    manifest,
+    coreVersion,
+    parse: parseSdcppPinManifest,
+    platforms: SDCPP_PIN_PLATFORMS,
+    source: 'sdcpp-manifest',
+  })
+}
+
+/**
+ * The audio.cpp pin on every platform core ships it for, from conf's `backends/audiocpp-manifest.json`
+ * (absent until conf approves its first build: then every platform has none).
+ */
+export function resolveAudiocppPins({ manifest, coreVersion }) {
+  return resolveGgmlPins({
+    manifest,
+    coreVersion,
+    parse: parseAudiocppPinManifest,
+    platforms: AUDIOCPP_PIN_PLATFORMS,
+    source: 'audiocpp-manifest',
+  })
 }

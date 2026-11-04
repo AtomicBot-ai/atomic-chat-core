@@ -1,3 +1,4 @@
+// models/atomic-prism-models.json is a deprecated editable catalog, generated from catalog.json. Its compatibility-export contract remains a supported core input.
 /**
  * PrismML model compatibility rules, pure half: `atomic-chat-conf/models/atomic-prism-models.json`
  * (schema `schema.atomic-prism-models.json` next to it). Which Bonsai files need `atomic-prism`,

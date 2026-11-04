@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * Composition of the managed container environment (task 2.6): the pieces `wireManagedRuntimes`
  * needs from outside its own module — the Linux machine, the privileged recipe from `src/host`,
@@ -66,6 +67,8 @@ import type { ManagedStoreMigration } from '../contracts/index.js'
 import type { WindowsManagedContext } from './managed-engines.js'
 
 export interface WireManagedEnvironmentOptions {
+  onFailure?: FailureObserver
+
   env: NodeJS.ProcessEnv
   platform: NodeJS.Platform
   layout: DataLayout
@@ -254,6 +257,7 @@ function wireWindowsEnvironment(
     test: testDir !== null,
   })
   const managed = wireManagedRuntimes({
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     env: nodeDataFolderEnv(options.env),
     instanceId: options.instanceId,
     platform: 'win32',
@@ -303,6 +307,7 @@ export function wireManagedEnvironment(options: WireManagedEnvironmentOptions): 
   })
 
   const managed = wireManagedRuntimes({
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     env: nodeDataFolderEnv(options.env),
     instanceId: options.instanceId,
     platform,

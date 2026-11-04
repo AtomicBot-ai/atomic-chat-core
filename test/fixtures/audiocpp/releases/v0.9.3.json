@@ -1,0 +1,178 @@
+{
+  "repo": "0xShug0/audio.cpp",
+  "tag": "v0.9.3",
+  "published_at": "2026-10-26T20:46:25Z",
+  "target_commitish": "main",
+  "assets": [
+    {
+      "name": "audio-v0.9.3-bin-macos-arm64-metal.tar.gz",
+      "size": 34847832,
+      "digest": "sha256:70a84c2b61ce5ef99547a12affab9b0d40daf08666baf7da4f940d5c7b722819"
+    },
+    {
+      "name": "audio-v0.9.3-bin-macos-x64-metal.tar.gz",
+      "size": 36812821,
+      "digest": "sha256:81238e3957bbf840d15094c34262fa93609caa0233c3dccc1e0f64fb47f5e51b"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-cpu-portable.tar.gz",
+      "size": 63289061,
+      "digest": "sha256:02156f7a7bd9924902cec26be35087d3806c7e348be344b1ec28cac0c1af3929"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-cpu.tar.gz",
+      "size": 57691455,
+      "digest": "sha256:98d06ba2a5e522f06aec7397c926691c4698137e7649c2436f16f3232320d79b"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-cuda12.8-colab.tar.gz",
+      "size": 228182886,
+      "digest": "sha256:5be3e8d515fb244387de87958668ebb729d9442de6a53df12e4c718ea918419d"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-rocm10.0.0-test.tar.gz",
+      "size": 698655206,
+      "digest": "sha256:4d0688267b2b8c421238994031c720d52316cacc24150ea613ee6bb2e5b13dfc"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-vulkan-portable.tar.gz",
+      "size": 77051422,
+      "digest": "sha256:10ac6b5cb72bc9266e5a600407dbcc2a3eaf87139a3e01c064bf3035d11f81b8"
+    },
+    {
+      "name": "audio-v0.9.3-bin-ubuntu-x64-vulkan.tar.gz",
+      "size": 99054053,
+      "digest": "sha256:cc824c5446d3dc26f582f6abe94f699812893991503e758110c579d6fe0d93d8"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-cpu-portable.zip",
+      "size": 30409504,
+      "digest": "sha256:f5fa4662b7ec323dbe31d37e224e46159b064836a9005da384551a5248771eeb"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-cpu.zip",
+      "size": 30547092,
+      "digest": "sha256:3ac66f46395b4e92e4f3bb68b200f0032310bd9922f12d97f10ccdadb02dee4b"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-cuda12.4.zip",
+      "size": 465913709,
+      "digest": "sha256:976b1fe4329407be45b272fc656d91006f081d22706f453f8879bc69dbb4a9b3"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-cuda13.3.zip",
+      "size": 277336614,
+      "digest": "sha256:0bd3988be10c31ec078c40df2bd0d4266e660804f6d5083aeb05d1309d091e43"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-rocm10.0.0-test.zip",
+      "size": 281830660,
+      "digest": "sha256:ca07ba49b7e63d9fc37eb911b451fc3d97956f09441cb08cac3ad6b16f7627df"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-vulkan-portable.zip",
+      "size": 82088153,
+      "digest": "sha256:51f8d8ce6cc7789bc9dc3d15f35e05f143aaf2ce1cbecc525a4104bcdde82a42"
+    },
+    {
+      "name": "audio-v0.9.3-bin-windows-x64-vulkan.zip",
+      "size": 82301824,
+      "digest": "sha256:d1741e16154f99ef96382a36d5e89ccf12fd4fda6ec7dcdcdbd122d82f525c11"
+    },
+    {
+      "name": "audio-v0.9.3-cudart-ubuntu-x64-cuda12.8.tar.gz",
+      "size": 787020239,
+      "digest": "sha256:2fcbaff8078b9eaed47a4a8e879c10dcf1f12fd31f2d52b29214fc9d45cfa198"
+    },
+    {
+      "name": "audio-v0.9.3-cudart-ubuntu-x64-cuda13.3.tar.gz",
+      "size": 591797780,
+      "digest": "sha256:fb4f995d760e60e159ea479379a1bf46f4844495f95913790d1b5d59427dbe44"
+    },
+    {
+      "name": "audio-v0.9.3-cudart-windows-x64-cuda12.4.zip",
+      "size": 607273675,
+      "digest": "sha256:866a2bc12c4d887eb3b1b62f82f7a8fdd93391cb77ea02b63b0f360cfb3bb4d8"
+    },
+    {
+      "name": "audio-v0.9.3-cudart-windows-x64-cuda13.3.zip",
+      "size": 575457454,
+      "digest": "sha256:839eb20f684a8aab64895b1e466b32ce9b29dfc19dc1ce15b2ef35218512ac0a"
+    },
+    {
+      "name": "audio-v0.9.3-lib-macos-arm64-metal.tar.gz",
+      "size": 13469329,
+      "digest": "sha256:871d5e981be33abfc45aebd3cfe4858997ee298fd022a606fdb250ae1854495d"
+    },
+    {
+      "name": "audio-v0.9.3-lib-macos-x64-metal.tar.gz",
+      "size": 14349788,
+      "digest": "sha256:7328284cd69b4e1953eca811b906850320e6001beb4eea28e69b54cfd5c07106"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-cpu-portable.tar.gz",
+      "size": 26336991,
+      "digest": "sha256:38c7b7875ebd748b4ece5c865812c7ad9c83ded37ef21172abc1c2b506d3fbb0"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-cpu.tar.gz",
+      "size": 19928884,
+      "digest": "sha256:c21204a8839d596500b2338acd1c69e73a5e1737720e54b77f039c3239588fa8"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-cuda12.8.tar.gz",
+      "size": 222769949,
+      "digest": "sha256:204d813c39318f592ba5fd33d7cd83b0b2c6fa6e32c5659d02e863b6449f7851"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-cuda13.3.tar.gz",
+      "size": 261796341,
+      "digest": "sha256:3fcb8e25c95af27c888434c3e76f2a8d637efac2e0c898a87c7808fba59eb016"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-vulkan-portable.tar.gz",
+      "size": 40098851,
+      "digest": "sha256:e3aa9043cec0065da4f89997f68f9867e23c88f8c38be06dff1e4dd75170a7be"
+    },
+    {
+      "name": "audio-v0.9.3-lib-ubuntu-x64-vulkan.tar.gz",
+      "size": 33717376,
+      "digest": "sha256:b551153844eefba21dc9f72c81ab92df261a5d0aa4dd4c5138443631398f947c"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-cpu-portable.zip",
+      "size": 12666242,
+      "digest": "sha256:dcf2fe0090b9eae862bfe1fba5233b6c0049cbfc0ff26f296c4991d0faed2bf9"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-cpu.zip",
+      "size": 12712481,
+      "digest": "sha256:c7092b7cc4a82cf4625cadfdb31eff9d16d1d456bf6cc0b61588cfc14d505a6b"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-cuda12.4.zip",
+      "size": 455516494,
+      "digest": "sha256:cedfdd9e28a6720a16514118d6674a562a830066b483f89d60051e6cf1eb5bd2"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-cuda13.3.zip",
+      "size": 260710984,
+      "digest": "sha256:84c4c0d8c044b08a3d8bee2c35fe275e6ec95a3e9cc1a3cd81e0c77c43b39b80"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-vulkan-portable.zip",
+      "size": 29850039,
+      "digest": "sha256:b4e5a66e0bda38daabfd00c0b0273a23f9789766a777b5247203f1d1ba2c1572"
+    },
+    {
+      "name": "audio-v0.9.3-lib-windows-x64-vulkan.zip",
+      "size": 29922578,
+      "digest": "sha256:350e2f372a3911d7b21a617dd375b3479ecf13417e824d0004eb00565dd8e95c"
+    },
+    {
+      "name": "audio-v0.9.3-server-config-examples.zip",
+      "size": 13491,
+      "digest": "sha256:5e7f3c7c6ed028e7ad7e4eb5b4c3a82332425d4ee2b54626ce68971c91482f4c"
+    }
+  ]
+}

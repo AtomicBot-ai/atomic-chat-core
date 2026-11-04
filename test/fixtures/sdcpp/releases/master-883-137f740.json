@@ -1,0 +1,103 @@
+{
+  "repo": "AtomicBot-ai/stable-diffusion.cpp",
+  "tag": "master-883-137f740",
+  "published_at": "2026-10-06T13:11:28Z",
+  "target_commitish": "atomic",
+  "assets": [
+    {
+      "name": "SHA256SUMS",
+      "size": 1710,
+      "digest": "sha256:5e46b5b783d19676755cdbe0e5c2d614f73ec3c2771eed58a1627c035d59c3bd"
+    },
+    {
+      "name": "cudart-sd-bin-win-cu12-x64.zip",
+      "size": 563452046,
+      "digest": "sha256:fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d"
+    },
+    {
+      "name": "sd-master-137f740-bin-Darwin-macOS-26.6.2-arm64.zip",
+      "size": 33966114,
+      "digest": "sha256:e55bd434c6c2032ac29cffc7ea7c716a94dccc7e888f57b21a84a92526829b17"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-aarch64-cuda13.zip",
+      "size": 603693280,
+      "digest": "sha256:1314b7154b5ffa12add7a5ddf9aa8e928f185109040eebf5060f73c75d83a940"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-aarch64.zip",
+      "size": 20947364,
+      "digest": "sha256:2fbfb1ef7c758ceedcf1ac51cd8f80107c076c8a13160603fd7a65ac2f215efe"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-x86_64-cuda12.zip",
+      "size": 718645269,
+      "digest": "sha256:d3dbc188ebab9e46485d3eec878612d2b62b49e799386124cddf5ad2be3b8fdd"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-x86_64-rocm-7.14.0.zip",
+      "size": 256666973,
+      "digest": "sha256:c8940e3c0416199b24626b76fd2273a87ac4030b14080af8f23d87783a80e4e6"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip",
+      "size": 37401766,
+      "digest": "sha256:0972d8e978462c38f38371cd8f2376ebb5183fd869c22234a79bed6cc0e0c1bf"
+    },
+    {
+      "name": "sd-master-137f740-bin-Linux-Ubuntu-24.04-x86_64.zip",
+      "size": 24520937,
+      "digest": "sha256:dc1af0b244302cd083d69d974424ba5f2dbe8f1b7f3b04be3db8103477dae47c"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-cpu-arm64.zip",
+      "size": 15901594,
+      "digest": "sha256:9caae9257a861fd591c409d597b54395b73d1e3fbf80065adce9c59867e4c9aa"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-cpu-x64.zip",
+      "size": 17372415,
+      "digest": "sha256:36e84e42d790b22c9b178b5310af1f531f00a12f00dc1d8a940a6394780bfc20"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-cuda12-x64.zip",
+      "size": 330580342,
+      "digest": "sha256:e703c5e5f083474fa8773dd180a93796ddeee3172d1ca5c2c21e0ecb7eb489ec"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-cuda13-arm64.zip",
+      "size": 207636824,
+      "digest": "sha256:e360efe22804fe13e55cfb39a8b15cd07a7d055ec1b9d9ca79e1240daf9ad82d"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-cuda13-x64.zip",
+      "size": 528997393,
+      "digest": "sha256:cb82a19a142b3d0226a2ef561a276295e82ae2b66577fc9f27b933cdc7418a8c"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-rocm-7.14.0-x64.zip",
+      "size": 185430115,
+      "digest": "sha256:8bff9761671f9970de4ed219ca666fa0a1f6b039c0e0d18107a4b4453bf87be7"
+    },
+    {
+      "name": "sd-master-137f740-bin-win-vulkan-x64.zip",
+      "size": 31794911,
+      "digest": "sha256:f0aa3d0d03c08289d549b3f37a1d52c38295e1af4d56021aa7969047bec7bdbc"
+    },
+    {
+      "name": "verify-spark.cmd",
+      "size": 785,
+      "digest": "sha256:28266739fa7babf874a0e872bd2b64527cea7597af3d5ac4611c2f3b927738b3"
+    },
+    {
+      "name": "verify-spark.ps1",
+      "size": 11668,
+      "digest": "sha256:eaabd6450fa64651b326c29aab46822b799a6e7ce48673051c2e8d3c5dd9c261"
+    },
+    {
+      "name": "verify-spark.sh",
+      "size": 9834,
+      "digest": "sha256:522f78fe0d336f25b99952a511e47f75fa040e8892794fd58e68b42b8695d0b0"
+    }
+  ]
+}

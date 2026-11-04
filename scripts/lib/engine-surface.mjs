@@ -5,7 +5,7 @@
 // gathers the inputs, `buildReport` turns them into `report.json`, `renderMarkdown` into `report.md`.
 // Findings carry stable ids (`check/subject`) so runs can be compared; `now` is a parameter.
 import { checkHelp, diffHelp, MIN_HELP_OPTIONS, parseLlamaHelp } from './llama-help.mjs'
-import { upstreamTagBuild } from './engine-pin.mjs'
+import { engineTagBuild } from './engine-pin.mjs'
 
 export const SURFACE_REPORT_SCHEMA = 'atomic-engine-surface-report'
 export const SURFACE_INPUTS_SCHEMA = 'atomic-engine-surface-inputs'
@@ -116,7 +116,8 @@ export function versionCommit(output) {
   )
 }
 
-const finding = (check, subject, severity, message, evidence) => ({
+/** One finding: `id` is `check/subject`, stable between runs. */
+export const finding = (check, subject, severity, message, evidence) => ({
   id: subject === undefined ? check : `${check}/${subject}`,
   check,
   severity,
@@ -137,7 +138,8 @@ const CORE_PLATFORM = /^(win|ubuntu|macos)-.*-(x64|arm64)\.(zip|tar\.gz)$/
 /**
  * The release's archives against what core installs (`assets.core_backends` of the contract) and
  * what conf's mirror requires (its whitelist). `pin` is the pin's archive list from the same repo:
- * an archive the pin had and the candidate lacks is a loss; one neither had is not.
+ * an archive the pin had and the candidate lacks is a loss; one neither had is not. A `null`
+ * whitelist is an engine conf does not mirror (PrismML: core downloads from the fork itself).
  */
 export function checkAssets(contract, { candidate, pin, whitelist }) {
   const findings = []
@@ -210,6 +212,7 @@ export function checkAssets(contract, { candidate, pin, whitelist }) {
       )
     )
 
+  if (whitelist === null) return findings
   if (!whitelist || whitelist.length === 0)
     findings.push(finding('assets.mirror', undefined, 'error', "conf's mirror whitelist is unknown"))
   for (const entry of whitelist ?? []) {
@@ -240,13 +243,13 @@ export function checkAssets(contract, { candidate, pin, whitelist }) {
 
 /**
  * Whether a release can be tested yet: ggml-org publishes a tag before all of its archives are up.
- * Complete = every archive the mirror requires and the CPU archive of each of `platforms` (default:
- * every platform core ships for; the mirror carries no macos-x64, so a check of the mirror names the
- * platforms it runs on).
+ * Complete = every archive the mirror requires (none for a `null` whitelist: an engine conf does not
+ * mirror) and the CPU archive of each of `platforms` (default: every platform core ships for; the
+ * mirror carries no macos-x64, so a check of the mirror names the platforms it runs on).
  */
 export function candidateCompleteness(contract, whitelist, tag, assets, platforms) {
   const missing = []
-  for (const entry of whitelist)
+  for (const entry of whitelist ?? [])
     if (entry.required && !assets.some((n) => mirrorRe(entry.pattern, tag).test(n)))
       missing.push({ kind: 'mirror', pattern: entry.pattern })
   for (const b of contract.assets?.core_backends ?? [])
@@ -272,7 +275,7 @@ export function checkVersion({ tag, output }) {
         { output: output.trim().slice(0, 400) }
       ),
     ]
-  const expected = tag ? upstreamTagBuild(tag) : null
+  const expected = tag ? engineTagBuild(tag) : null
   if (expected !== null && build !== expected)
     return [
       finding(
@@ -286,12 +289,15 @@ export function checkVersion({ tag, output }) {
   return []
 }
 
+/** What names an invocation in findings: its argv, after the executable when it names one (`sd-cli --help`). */
+export const invocationKey = ({ bin, argv }) => [...(bin ? [bin] : []), ...argv].join(' ')
+
 /** Every invocation the contract lists (`-h`, `--version`, `--list-devices`) has to exit 0. */
 export function checkInvocations(contract, invocations) {
   const findings = []
-  for (const { argv, source } of contract.invocations ?? []) {
-    const key = argv.join(' ')
-    const ran = invocations.find((i) => i.argv.join(' ') === key)
+  for (const { bin, argv, source } of contract.invocations ?? []) {
+    const key = invocationKey({ bin, argv })
+    const ran = invocations.find((i) => invocationKey(i) === key)
     if (!ran) findings.push(finding('invocations.exit', key, 'error', `${key} was not run`))
     else if (ran.status !== 0)
       findings.push(
@@ -483,21 +489,21 @@ export function checkStrings(contract, upstream) {
 const RANK = { break: 0, error: 1, warn: 2, info: 3 }
 
 /** The worst severity decides: break, then error (incomplete), then warn; info alone is a pass. */
-function statusOf(findings) {
+export function statusOf(findings) {
   if (findings.some((f) => f.severity === 'break')) return 'break'
   if (findings.some((f) => f.severity === 'error')) return 'error'
   if (findings.some((f) => f.severity === 'warn')) return 'warn'
   return 'pass'
 }
 
-const countsOf = (findings) => ({
+export const countsOf = (findings) => ({
   break: findings.filter((f) => f.severity === 'break').length,
   warn: findings.filter((f) => f.severity === 'warn').length,
   info: findings.filter((f) => f.severity === 'info').length,
   error: findings.filter((f) => f.severity === 'error').length,
 })
 
-function sideSummary(side) {
+export function sideSummary(side) {
   if (!side) return null
   return {
     tag: side.tag ?? null,
@@ -521,7 +527,7 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
   const skipped = {}
   const candidate = inputs.candidate
   const pin = inputs.pin ?? null
-  const build = candidate.build ?? (candidate.tag ? upstreamTagBuild(candidate.tag) : null)
+  const build = candidate.build ?? (candidate.tag ? engineTagBuild(candidate.tag) : null)
 
   if (candidate.capture_error) {
     for (const check of ['help.parse', 'invocations.exit', 'version.output'])
@@ -553,6 +559,7 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
         findings.push(finding(check, undefined, 'error', `no archive list: ${why}`))
     else skipped['assets.core_backends'] = skipped['assets.mirror'] = why
   } else {
+    if (inputs.whitelist?.entries === null) skipped['assets.mirror'] = 'conf does not mirror this engine'
     findings.push(
       ...checkAssets(contract, {
         candidate: { tag: candidate.tag, assets: candidate.assets },
@@ -635,12 +642,23 @@ export function buildReport(contract, inputs, { now, contractSha256 } = {}) {
 const cell = (v) => (v === null || v === undefined || v === '' ? '—' : String(v).replace(/\|/g, '\\|'))
 const code = (v) => (v === null || v === undefined || v === '' ? '—' : `\`${v}\``)
 
+/** The engine as report.md names it: upstream llama.cpp and PrismML's fork both run llama.cpp. */
+const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp', 'audio-cpp': 'audio.cpp' }
+
+/** Where the pin came from, as report.md says it. */
+const PIN_SOURCES = {
+  'list': 'the release list',
+  'legacy': 'the legacy manifest',
+  'sdcpp-manifest': "conf's sd.cpp manifest",
+  'audiocpp-manifest': "conf's audio.cpp manifest",
+}
+
 /** `report.md`: the same report for a human, rendered from the JSON alone. */
 export function renderMarkdown(report) {
   const { candidate, pin, pin_resolution: res, upstream, core, conf } = report.inputs
   const lines = []
   lines.push(
-    `# llama.cpp surface: ${candidate?.tag ?? 'local build'} against ${pin?.tag ?? 'no pin'} — ${report.status.toUpperCase()}`,
+    `# ${ENGINE_TITLES[report.engine] ?? 'llama.cpp'} surface: ${candidate?.tag ?? 'local build'} against ${pin?.tag ?? 'no pin'} — ${report.status.toUpperCase()}`,
     ''
   )
   const c = report.counts
@@ -656,7 +674,7 @@ export function renderMarkdown(report) {
   const facts = []
   if (res)
     facts.push(
-      `Pin: ${res.source === 'override' ? 'given' : `${res.source === 'list' ? 'the release list' : res.source === 'legacy' ? 'the legacy manifest' : res.source}`}` +
+      `Pin: ${res.source === 'override' ? 'given' : (PIN_SOURCES[res.source] ?? res.source)}` +
         (res.legacy?.tag ? `; legacy manifest names \`${res.legacy.tag}\`` : '') +
         (conf?.sha ? ` (conf \`${conf.sha.slice(0, 10)}\`)` : '')
     )
@@ -681,7 +699,7 @@ export function renderMarkdown(report) {
     if (list.length === 0) continue
     lines.push(`## ${severity} (${list.length})`, '')
     for (const f of list) {
-      const names = f.evidence?.flags ?? f.evidence?.archives
+      const names = f.evidence?.flags ?? f.evidence?.routes ?? f.evidence?.archives
       lines.push(`- \`${f.id}\` — ${f.message}${Array.isArray(names) ? `: ${names.join(', ')}` : ''}`)
       if (f.hint) lines.push(`  - ${f.hint}`)
       const commits = f.evidence?.commits

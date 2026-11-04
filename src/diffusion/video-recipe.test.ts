@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { VideoRecipe } from '../contracts/index.js'
 import { sampleVideoRecipe } from '../../test/helpers/diffusion-fixtures.js'
 import { parseVideoRecipe, RECIPE_SIDECAR_SUFFIX, serializeVideoRecipe } from './video-recipe.js'
 
@@ -118,6 +119,39 @@ describe('remote clips', () => {
     const text = serializeVideoRecipe(recipe)
     expect(Object.keys(JSON.parse(text) as object).slice(-2)).toEqual(['durationSecs', 'remote'])
     expect(parseVideoRecipe(text)).toEqual(recipe)
+  })
+
+  it('leave out the steps, CFG and seed a provider was not sent, and read them back absent', () => {
+    const {
+      steps: _steps,
+      cfgScale: _cfg,
+      seed: _seed,
+      ...rest
+    } = sampleVideoRecipe({
+      outputFormat: 'mp4',
+      fps: 0,
+      frameCount: 0,
+      frames: 0,
+      model: { modelId: 'veo-3.1-fast', family: 'gemini', displayName: 'Veo 3.1 Fast', filename: '' },
+      engine: { kind: 'remote', provider: 'gemini', api: 'gemini-veo' },
+      durationSecs: 8,
+    })
+    const bare: VideoRecipe = rest
+    const text = serializeVideoRecipe(bare)
+    const keys = Object.keys(JSON.parse(text) as object)
+    for (const key of ['steps', 'cfgScale', 'seed']) expect(keys).not.toContain(key)
+    expect(parseVideoRecipe(text)).toEqual(bare)
+    // A clip written with the old placeholders still reads, values and all.
+    const old = { ...bare, steps: 8, cfgScale: 1, seed: -1 }
+    expect(parseVideoRecipe(serializeVideoRecipe(old))).toEqual(old)
+  })
+
+  it('still require the steps, CFG and seed of a local clip', () => {
+    for (const key of ['steps', 'cfgScale', 'seed']) {
+      const raw = JSON.parse(serializeVideoRecipe(sampleVideoRecipe())) as Record<string, unknown>
+      delete raw[key]
+      expect(parseVideoRecipe(JSON.stringify(raw))).toBeUndefined()
+    }
   })
 
   it('drops a malformed remote block with the clip, and a negative length alone', () => {

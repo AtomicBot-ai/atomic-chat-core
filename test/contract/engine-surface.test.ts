@@ -17,6 +17,7 @@ import {
   checkStrings,
   checkVersion,
   countStrings,
+  invocationKey,
   MIRROR_WHITELIST,
   parseBinaryVersion,
   parseGitLog,
@@ -140,6 +141,29 @@ describe('H4: the release archives', () => {
     ])
     expect(candidateCompleteness(contract, MIRROR_WHITELIST, 'b11463', mirrored, ci).complete).toBe(true)
   })
+
+  it('checks no mirror for an engine conf does not mirror (PrismML), and its tags read as they are', () => {
+    const tag = 'prism-b10787-73bfe6c'
+    const prism = (t: string) => release('b11617').assets.map((n) => n.replace('b11617', t))
+    const findings = checkAssets(contract, {
+      candidate: { tag, assets: prism(tag) },
+      pin: { tag: 'prism-b10754-2459f68', assets: prism('prism-b10754-2459f68') },
+      whitelist: null,
+    })
+    expect(findings.filter((f) => f.check === 'assets.mirror')).toEqual([])
+    expect(findings.filter((f) => f.severity !== 'info')).toEqual([])
+    const ci = ['linux-x64', 'macos-arm64', 'windows-x64']
+    expect(candidateCompleteness(contract, null, tag, prism(tag), ci)).toEqual({
+      complete: true,
+      missing: [],
+    })
+    expect(
+      candidateCompleteness(contract, null, tag, [`llama-${tag}-bin-macos-arm64.tar.gz`], ci).missing
+    ).toEqual([
+      { kind: 'core', platform: 'linux-x64', backend: 'linux-cpu-x64' },
+      { kind: 'core', platform: 'windows-x64', backend: 'win-cpu-x64' },
+    ])
+  })
 })
 
 describe("conf's mirror whitelist", () => {
@@ -183,6 +207,12 @@ describe('--version and the invocations', () => {
     expect(versionCommit('version: 1.2.3\n')).toBeUndefined()
   })
 
+  it('reads the build of a PrismML tag: the upstream build the fork is cut from', () => {
+    const output = 'version: 10787 (73bfe6c)\nbuilt with Apple clang for arm64-apple-darwin\n'
+    expect(checkVersion({ tag: 'prism-b10787-73bfe6c', output })).toEqual([])
+    expect(ids(checkVersion({ tag: 'prism-b10788-73bfe6c', output }), 'break')).toEqual(['version.output'])
+  })
+
   it('breaks on a build it cannot read, or one that is not the tag’s', () => {
     expect(parseBinaryVersion('llama-server 1.2.3\n')).toBe(parseBinaryVersionTs('llama-server 1.2.3\n'))
     expect(ids(checkVersion({ tag: 'b11617', output: 'llama-server 1.2.3\n' }), 'break')).toEqual([
@@ -200,6 +230,15 @@ describe('--version and the invocations', () => {
     ])
     expect(ids(findings, 'break')).toEqual(['invocations.exit/--version'])
     expect(ids(findings, 'error')).toEqual(['invocations.exit/--list-devices'])
+  })
+
+  it('names an invocation by its executable only when it runs another than the server', () => {
+    expect(invocationKey({ argv: ['-h'] })).toBe('-h')
+    expect(invocationKey({ bin: 'sd-cli', argv: ['--help'] })).toBe('sd-cli --help')
+    // An sd-cli run never stands in for the server's own -h.
+    expect(ids(checkInvocations(contract, [{ bin: 'sd-cli', argv: ['-h'], status: 0 }]), 'error')).toContain(
+      'invocations.exit/-h'
+    )
   })
 })
 
@@ -442,5 +481,36 @@ describe('golden: b11463 → b11617', () => {
     await expect(renderMarkdown(report)).toMatchFileSnapshot(
       '../fixtures/llamacpp/surface/b11463-b11617.report.md'
     )
+  })
+})
+
+describe('report.md for each engine the check knows', () => {
+  const report = buildReport(contract, goldenInputs(), { now: '2026-10-15T00:00:00.000Z' })
+  const heading = (engine: string | undefined, source: string) =>
+    renderMarkdown({
+      ...report,
+      engine,
+      inputs: { ...report.inputs, pin_resolution: { source, tag: 'x' } },
+    })
+      .split('\n')
+      .filter((line) => line.startsWith('# ') || line.startsWith('- Pin: '))
+      .map((line) => line.replace(/ \(conf `[0-9a-f]+`\)$/, ''))
+
+  it('names the engine and where its pin came from', () => {
+    expect(heading('llamacpp-upstream', 'list')).toEqual([
+      '# llama.cpp surface: b11617 against b11463 — PASS',
+      '- Pin: the release list',
+    ])
+    expect(heading('atomic-prism', 'prism-manifest')[1]).toBe('- Pin: prism-manifest')
+    expect(heading('sd-cpp', 'sdcpp-manifest')).toEqual([
+      '# stable-diffusion.cpp surface: b11617 against b11463 — PASS',
+      "- Pin: conf's sd.cpp manifest",
+    ])
+    expect(heading('audio-cpp', 'audiocpp-manifest')).toEqual([
+      '# audio.cpp surface: b11617 against b11463 — PASS',
+      "- Pin: conf's audio.cpp manifest",
+    ])
+    expect(heading(undefined, 'override')[1]).toBe('- Pin: given')
+    expect(heading(undefined, 'legacy')[1]).toBe('- Pin: the legacy manifest')
   })
 })

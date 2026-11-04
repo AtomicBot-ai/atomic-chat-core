@@ -7,7 +7,7 @@ import { defaultDescriptorUrl } from '../environment/index.js'
 import type { ManagedEngineSpec } from '../managed-engines/spec.js'
 import type { ManagedTextCapabilities } from '../managed-text/index.js'
 import type { SessionRoutePolicy } from '../shared/index.js'
-import { VLLM_ROUTES, mapVllmContextLengthError, vllmAdapter } from './adapter.js'
+import { VLLM_ROUTES, mapVllmContextLengthError, vllmAdapter, type VllmLaunchPlan } from './adapter.js'
 import { vllmCheckEngine, vllmLaunchPlan } from './memory.js'
 import { vllmSettings, type VllmSettings } from './settings.js'
 
@@ -41,5 +41,6 @@ export const VLLM_ENGINE: ManagedEngineSpec<VllmSettings> = {
   settings: vllmSettings,
   check: vllmCheckEngine,
   launchPlan: vllmLaunchPlan,
+  planContextLength: (plan) => (plan as Partial<VllmLaunchPlan> | undefined)?.maxModelLen,
   routePolicy: vllmRoutePolicy,
 }

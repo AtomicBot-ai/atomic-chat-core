@@ -33,6 +33,7 @@ import type {
   BackendUpdateCheckResponse,
   CoreEvents,
   DeviceInfo,
+  EngineCapability,
   LlamacppProviderId,
   ProxyConfig,
 } from '../../contracts/index.js'
@@ -42,6 +43,7 @@ import {
   findPrismRelease,
   prismArchiveSources,
   prismAssetOffered,
+  PRISM_CAPABILITIES,
   PrismCatalogService,
   prismCatalogToBackends,
   prismTagBuild,
@@ -117,6 +119,73 @@ interface RemoteCatalog {
   remote: BackendVersion[]
   source: BackendCatalogSource
   releases?: BackendCatalogRelease[]
+  /** PrismML: every manifest release's capabilities by tag, offered or not. */
+  capabilitiesByTag?: ReadonlyMap<string, readonly EngineCapability[]>
+}
+
+/** What one model file needs from a PrismML build (`requires`/`min_build` of a catalog request). */
+interface BuildRequirements {
+  requires: EngineCapability[]
+  minBuild: number | undefined
+}
+
+/**
+ * The catalog request's `requires`/`min_build`, checked: `null` when the caller sent neither (the
+ * catalog answers as it always did, as it does for another provider given an empty `requires`). They
+ * describe a PrismML build, so another provider refuses a non-empty `requires` or a `min_build`.
+ */
+function buildRequirements(
+  provider: LlamacppProviderId,
+  request: BackendCatalogRequest
+): BuildRequirements | null {
+  const rawRequires: unknown = request.requires ?? undefined
+  const rawMinBuild: unknown = request.min_build ?? undefined
+  if (rawRequires === undefined && rawMinBuild === undefined) return null
+  if (
+    rawRequires !== undefined &&
+    !(
+      Array.isArray(rawRequires) &&
+      rawRequires.every((c) => typeof c === 'string' && PRISM_CAPABILITIES.has(c))
+    )
+  )
+    throw new AtomicCoreError(
+      'INVALID_ARGUMENT',
+      `requires must be a list of engine capabilities (${[...PRISM_CAPABILITIES].join(', ')})`
+    )
+  if (rawMinBuild !== undefined && !(Number.isInteger(rawMinBuild) && (rawMinBuild as number) >= 0))
+    throw new AtomicCoreError('INVALID_ARGUMENT', 'min_build must be a non-negative integer build number')
+  const requires = (rawRequires ?? []) as EngineCapability[]
+  const minBuild = rawMinBuild as number | undefined
+  if (provider !== 'atomic-prism') {
+    if (requires.length > 0 || minBuild !== undefined)
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `requires and min_build choose a PrismML build (atomic-prism), not a ${provider} one`
+      )
+    // An empty `requires` asks nothing of a llama.cpp build: the answer stays what it always was.
+    return null
+  }
+  return { requires, minBuild }
+}
+
+/**
+ * Whether a build meets a file's requirements: its tag's build number reaches `minBuild`, and its
+ * manifest release lists every capability in `requires`. A build whose release the manifest does not
+ * list (installed from a release since removed) covers no capability.
+ */
+function buildMeets(
+  build: BackendVersion,
+  requirements: BuildRequirements,
+  capabilitiesByTag: ReadonlyMap<string, readonly EngineCapability[]>
+): boolean {
+  const tag = stripBom(build.version)
+  if (requirements.minBuild !== undefined) {
+    const number = prismTagBuild(tag)
+    if (number === null || number < requirements.minBuild) return false
+  }
+  if (requirements.requires.length === 0) return true
+  const capabilities = capabilitiesByTag.get(tag)
+  return capabilities !== undefined && requirements.requires.every((c) => capabilities.includes(c))
 }
 
 interface FetchOptions {
@@ -172,22 +241,34 @@ export class BackendAdvisor {
    * merged, gated, sorted list the dropdown shows; `recommended` its best entry;
    * `recommended_installed` the best entry already on disk (the disk-recovery pick);
    * `latest_by_type` the newest tag per type (what `find_latest_version_for_backend` answered one
-   * round trip at a time). Throws `INVALID_ARGUMENT` only for an unsupported OS/arch.
+   * round trip at a time). Throws `INVALID_ARGUMENT` for an unsupported OS/arch or requirements it
+   * cannot read.
+   *
+   * PrismML with `requires`/`min_build` (change close-cli-core-gaps, design D2): `recommended` and
+   * `recommended_installed` come from the builds that meet them, by the same category priority;
+   * every other field stays what it is without them. None in `available` → `BACKEND_BUILD_UNAVAILABLE`.
    */
   async catalog(request: BackendCatalogRequest = {}): Promise<BackendCatalogResponse> {
+    const requirements = buildRequirements(this.provider, request)
     const facts = await this.deps.hardware()
     const current = stripBom(request.current_backend ?? (await this.currentVersionBackend()))
-    return this.catalogFor(facts, current, {
-      force: request.force ?? false,
-      appVersion: request.app_version ?? null,
-      proxy: request.proxy ?? null,
-    })
+    return this.catalogFor(
+      facts,
+      current,
+      {
+        force: request.force ?? false,
+        appVersion: request.app_version ?? null,
+        proxy: request.proxy ?? null,
+      },
+      requirements
+    )
   }
 
   private async catalogFor(
     facts: HardwareFacts,
     current: string,
-    options: FetchOptions
+    options: FetchOptions,
+    requirements: BuildRequirements | null = null
   ): Promise<BackendCatalogResponse> {
     const { osType, arch, gpus } = facts
     const cpuExtensions = facts.cpuExtensions ?? []
@@ -195,7 +276,7 @@ export class BackendAdvisor {
     const features = this.policy.features(osType, cpuExtensions, gpus, rocm)
     const supported = this.policy.supportedBackends(osType, arch, features)
 
-    const [{ remote, source, releases }, installed] = await Promise.all([
+    const [{ remote, source, releases, capabilitiesByTag }, installed] = await Promise.all([
       this.remoteCatalog(osType, arch, supported, options),
       this.installed(),
     ])
@@ -212,6 +293,22 @@ export class BackendAdvisor {
       if (latest) latestByType[type] = latest
     }
 
+    let recommendFrom = available
+    let recommendInstalledFrom = installedAvailable
+    if (requirements) {
+      const meets = (b: BackendVersion) => buildMeets(b, requirements, capabilitiesByTag ?? new Map())
+      recommendFrom = available.filter(meets)
+      if (recommendFrom.length === 0)
+        throw new AtomicCoreError(
+          'BACKEND_BUILD_UNAVAILABLE',
+          'No engine build this machine can run meets the model file: ' +
+            `capabilities [${requirements.requires.join(', ')}]` +
+            (requirements.minBuild !== undefined ? `, build ${requirements.minBuild} or newer` : ''),
+          JSON.stringify({ requires: requirements.requires, min_build: requirements.minBuild ?? null })
+        )
+      recommendInstalledFrom = installedAvailable.filter(meets)
+    }
+
     return {
       provider: this.provider,
       os_type: osType,
@@ -222,8 +319,8 @@ export class BackendAdvisor {
       remote,
       installed,
       available,
-      recommended: this.policy.determineBest(available, gpus) || null,
-      recommended_installed: this.policy.determineBest(installedAvailable, gpus) || null,
+      recommended: this.policy.determineBest(recommendFrom, gpus) || null,
+      recommended_installed: this.policy.determineBest(recommendInstalledFrom, gpus) || null,
       latest_by_type: latestByType,
       static_variants: this.policy.staticVariants(osType, current, arch),
       source,
@@ -257,6 +354,7 @@ export class BackendAdvisor {
         remote: prismCatalogToBackends(manifest, offer),
         source,
         releases: prismCatalogReleases(manifest, offer),
+        capabilitiesByTag: new Map(manifest.releases.map((r) => [r.tag, r.capabilities])),
       }
     }
 
@@ -626,6 +724,7 @@ export function prismCatalogReleases(
       notes_url: r.notes_url,
       ...(r.notes !== undefined ? { notes: r.notes } : {}),
       ...(r.withdrawn ? { withdrawn: r.withdrawn } : {}),
+      capabilities: r.capabilities,
       variants: r.withdrawn
         ? []
         : r.assets

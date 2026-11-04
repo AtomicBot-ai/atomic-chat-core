@@ -36,6 +36,24 @@ describe('checkEngineCompatibility', () => {
     }
   })
 
+  it('holds FLUX.3 Klein to build 968, the one that added it upstream', () => {
+    for (const tag of ['unknown', 'master-883-137f740', 'master-883-137f740-a36f1b1a', 'master-967-e47426c'])
+      expect(
+        codeOf(() => checkEngineCompatibility('flux.3-klein', tag)),
+        tag
+      ).toBe('ENGINE_UPDATE_REQUIRED')
+    for (const tag of ['master-968-8cd731e', 'master-975-95b3090', 'master-975-95b3090-a1234567'])
+      expect(() => checkEngineCompatibility('flux.3-klein', tag), tag).not.toThrow()
+    try {
+      checkEngineCompatibility('flux.3-klein', 'master-883-137f740-a36f1b1a')
+      expect.unreachable()
+    } catch (error) {
+      expect((error as { details?: string }).details).toBe(
+        'installed=master-883-137f740-a36f1b1a; required=master-968-8cd731e or newer'
+      )
+    }
+  })
+
   it('leaves the older families on any engine', () => {
     for (const family of ['qwen-image', 'z-image', 'flux.1', 'flux.2-klein'])
       expect(() => checkEngineCompatibility(family, 'unknown'), family).not.toThrow()
@@ -78,5 +96,14 @@ describe('selectModelInstall', () => {
       expect(selectModelInstall(records, 'sd-cpp', family).tag, family).toBe('master-883-137f740')
     for (const family of ['qwen-image', 'z-image', 'flux.1', 'flux.2-klein'])
       expect(selectModelInstall(records, 'sd-cpp', family).tag, family).toBe('master-849-d04e895')
+  })
+
+  it('serves FLUX.3 Klein only from a build of 968 or newer', () => {
+    const flux3 = record('master-975-95b3090', 'macos-arm64')
+    expect(codeOf(() => selectModelInstall([current, old], 'sd-cpp', 'flux.3-klein'))).toBe(
+      'ENGINE_UPDATE_REQUIRED'
+    )
+    expect(selectModelInstall([current, flux3], 'sd-cpp', 'flux.3-klein').tag).toBe('master-975-95b3090')
+    expect(selectModelInstall([current, flux3], 'sd-cpp', 'qwen-image-2.1').tag).toBe('master-883-137f740')
   })
 })

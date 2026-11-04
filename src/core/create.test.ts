@@ -109,6 +109,54 @@ describe('taking ownership', () => {
       vi.useRealTimers()
     }
   })
+  it('keeps an app owner whose app went quiet while an image job runs, and retires it after', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const app = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+      cores.push(app)
+      const client = new CoreClient({ baseUrl: app.control.url, token: app.controlToken })
+      await client.register()
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The app stops heartbeating (it is swapping, or it crashed) while the image renders.
+      const job = {
+        model_id: 'z-image:q3_k_m',
+        cards: 'all' as const,
+        auxiliary: false,
+        state: 'ready' as const,
+      }
+      const occupancy = vi
+        .spyOn(app.diffusion, 'gpuOccupancy')
+        .mockReturnValue([{ ...job, busy: 'Z-Image is generating an image' }])
+      await vi.advanceTimersByTimeAsync(120_000)
+      expect((await inspectLock(data.layout)).kind).toBe('owned')
+      expect((await client.health()).instance_id).toBe(app.instanceId)
+
+      // The image is done and still nobody is attached: now it retires.
+      occupancy.mockReturnValue([job])
+      await vi.advanceTimersByTimeAsync(5_000)
+      await app.stopped
+      expect((await inspectLock(data.layout)).kind).toBe('free')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('does not count time the app owner was not running against its app', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
+    try {
+      const app = await AtomicCore.create({ dataFolder: data.root, ownerScope: 'app' })
+      cores.push(app)
+      const client = new CoreClient({ baseUrl: app.control.url, token: app.controlToken })
+      const registration = await client.register()
+      await vi.advanceTimersByTimeAsync(5_000)
+      // The whole process stops for two minutes (swap, sleep): no check runs, no heartbeat lands.
+      vi.setSystemTime(Date.now() + 120_000)
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(await client.heartbeat(registration.client.id)).toEqual({ ok: true })
+      expect((await inspectLock(data.layout)).kind).toBe('owned')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('disposes a CLI owner explicitly without an application lease', async () => {
     const core = await createCore()
     await core.dispose()
@@ -250,7 +298,7 @@ describe('taking ownership', () => {
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
         details:
-          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, tensorrt-llm, vllm, sglang',
+          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, tensorrt-llm, vllm, sglang',
       })
     )
   })
@@ -1344,6 +1392,48 @@ describe('remote media through the owner', () => {
   })
 })
 
+describe('the served model selection through the owner', () => {
+  it('keeps what the app selected and routes the public server by it', async () => {
+    const core = await createCore()
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    // A cloud provider that lists `demo` at an address nothing answers.
+    await client.setCloudProvider('custom', {
+      base_url: 'http://127.0.0.1:9/v1',
+      custom_headers: [],
+      models: ['demo'],
+    })
+    const { port } = await client.startServer({ port: 0 })
+    const chat = () =>
+      fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'demo', messages: [{ role: 'user', content: 'hi' }] }),
+      })
+
+    // Unselected: the cloud provider that lists the id gets it, and cannot be reached.
+    expect((await chat()).status).toBe(502)
+
+    const selected = [{ model: 'demo', provider: 'llamacpp-upstream' }]
+    expect(await client.setServerSelection(selected)).toEqual({ models: selected })
+    expect(await client.serverSelection()).toEqual({ models: selected })
+    // Selected on a local engine and loaded nowhere: refused, never sent to the cloud provider.
+    const refused = await chat()
+    expect(refused.status).toBe(503)
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe(
+      'selected_provider_unavailable'
+    )
+
+    // The selection outlives a restart of the public server.
+    await client.stopServer()
+    const restarted = await client.startServer({ port })
+    expect(restarted.port).toBe(port)
+    expect((await chat()).status).toBe(503)
+
+    expect(await client.setServerSelection([])).toEqual({ models: [] })
+    expect((await chat()).status).toBe(502)
+  })
+})
+
 describe('error reporting', () => {
   it('wires the reporter to the emitter, the engine events and the telemetry route', async () => {
     const captured: ErrorReport[] = []
@@ -2154,6 +2244,291 @@ describe.skipIf(process.platform === 'win32')(
         expect.objectContaining({ version: 'v2.1.0', in_use: true }),
       ])
       expect(await core.unload('foundry-local', 'fl-gpu')).toMatchObject({ success: true })
+    })
+  }
+)
+
+// The same macOS 15 Apple Silicon seam for LiteRT-LM (macOS 12+), with an Intel NPU by its test seam
+// so the accelerator's wiring runs too.
+describe.skipIf(process.platform === 'win32')(
+  'litert-lm on the owner (change add-litert-lm-runtime, task 6.6)',
+  () => {
+    it('wires the runtime, the accelerator, the check and the engine host where the platform rule holds', async () => {
+      const fakeHost = new URL('../../test/helpers/fake-litert-host.mjs', import.meta.url).pathname
+      const launcher = join(data.root, 'fake-litert-host')
+      await writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeHost)} "$@"\n`
+      )
+      await chmod(launcher, 0o755)
+      const manifest = join(data.root, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets: [
+                {
+                  platform: 'macos-arm64',
+                  url: 'https://files.pythonhosted.org/packages/a/litert_lm_api-0.18.1-py3-none-macosx_12_0_arm64.whl',
+                  name: 'litert_lm_api-0.18.1-py3-none-macosx_12_0_arm64.whl',
+                  size: 1,
+                  sha256: 'e'.repeat(64),
+                },
+              ],
+              accelerators: [
+                {
+                  id: 'openvino',
+                  platform: 'win-x64',
+                  version: '2026.4.1',
+                  url: 'https://files.pythonhosted.org/packages/o/openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl',
+                  name: 'openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl',
+                  size: 1,
+                  sha256: 'f'.repeat(64),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: 'darwin',
+        foundryLocalHost: { arch: 'arm64', osRelease: '24.0.0' },
+        env: {
+          ...process.env,
+          ATOMIC_LITERT_HOST_TEST_COMMAND: launcher,
+          ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+          ATOMIC_LITERT_LM_TEST_NPU: 'intel-lnl',
+        },
+      })
+      cores.push(core)
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        }).then((r) => r.json() as Promise<Record<string, unknown>>)
+
+      expect(await call('/runtimes/litert-lm/accelerators')).toMatchObject({
+        installed: false,
+        accelerators: [],
+      })
+      expect(
+        await call('/models/litert-lm/check', { method: 'POST', body: JSON.stringify({ backend: 'cpu' }) })
+      ).toMatchObject({ verdict: 'engine-not-installed' })
+
+      // A build as the engine-builds install leaves it, and a CPU variant as a client does.
+      const build = join(data.root, 'litert-lm', 'backends', '0.18.1', 'macos-arm64')
+      await mkdir(join(build, 'lib'), { recursive: true })
+      await writeFile(join(build, 'lib', 'liblitert-lm.dylib'), 'dylib')
+      await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(build, 'install.json'),
+        JSON.stringify({
+          tag: '0.18.1',
+          backendId: 'macos-arm64',
+          installedAtMs: 1,
+          publishedAt: '2026-10-19T22:44:33Z',
+          abi: 1,
+        })
+      )
+      const model = join(data.root, 'litert-lm', 'models', 'lr-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.litertlm'), 'litertlm')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: litert-lm/models/lr-cpu/m.litertlm\nname: lr-cpu\nsize_bytes: 8\nlitert_lm:\n  model_id: m\n  variant_id: lr-cpu\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.litertlm\n  tools: true\n  reasoning: false\n  vision: false\n  source: curated\n`
+      )
+
+      expect(await call('/runtimes/litert-lm/accelerators')).toMatchObject({
+        installed: true,
+        npu: 'intel-lnl',
+        accelerators: [{ name: 'openvino', version: '2026.4.1', prepared: false }],
+      })
+      // A proxy the downloader refuses before any network: the prepare fails, and says why.
+      const prepared = await call('/runtimes/litert-lm/accelerators/prepare', {
+        method: 'POST',
+        body: JSON.stringify({ proxy: { url: 'ftp://127.0.0.1:9' } }),
+      })
+      expect(prepared).toMatchObject({
+        accelerators: [{ name: 'openvino', prepared: false, reason: expect.any(String) }],
+      })
+      expect(
+        await call('/models/litert-lm/check', {
+          method: 'POST',
+          body: JSON.stringify({ model_id: 'lr-cpu' }),
+        })
+      ).toMatchObject({ verdict: 'ok', metadata: { backends: ['cpu', 'gpu'] } })
+
+      const session = await core.load('litert-lm', 'lr-cpu')
+      expect(session.api_key.length).toBeGreaterThan(20)
+      expect(core.registry('litert-lm').modelsDir).toBe(join(data.root, 'litert-lm', 'models'))
+      const versions = (await call('/engines/versions', {
+        method: 'POST',
+        body: '{}',
+      })) as unknown as EngineVersionsResponse
+      expect(versions.engines.find((entry) => entry.engine === 'litert-lm')?.builds).toEqual([
+        expect.objectContaining({ version: '0.18.1', in_use: true }),
+      ])
+      expect(await core.unload('litert-lm', 'lr-cpu')).toMatchObject({ success: true })
+    })
+  }
+)
+
+// GenieX (change add-geniex-runtime, task 6.6): the Snapdragon X seam, with the fake host in place of
+// `geniex-host`, so the runtime, the devices, the check and the engine host are wired and run.
+describe.skipIf(process.platform === 'win32')(
+  'geniex on the owner (change add-geniex-runtime, task 6.6)',
+  () => {
+    it('wires the runtime, the devices, the check and the engine host where the chip rule holds', async () => {
+      const fakeHost = new URL('../../test/helpers/fake-geniex-host.mjs', import.meta.url).pathname
+      const launcher = join(data.root, 'fake-geniex-host')
+      await writeFile(
+        launcher,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeHost)} "$@"\n`
+      )
+      await chmod(launcher, 0o755)
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: 'darwin',
+        env: {
+          ...process.env,
+          ATOMIC_GENIEX_HOST_TEST_COMMAND: launcher,
+          ATOMIC_GENIEX_TEST_CHIP: 'x-elite',
+        },
+      })
+      cores.push(core)
+      const call = (path: string, init: RequestInit = {}) =>
+        fetch(`${core.control.url}/atomic/v1${path}`, {
+          ...init,
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+        }).then((r) => r.json() as Promise<Record<string, unknown>>)
+
+      expect(await call('/runtimes/geniex/accelerators')).toEqual({
+        installed: false,
+        build: null,
+        chip: 'x-elite',
+        accelerators: [],
+        error: null,
+      })
+      expect(
+        await call('/models/geniex/check', {
+          method: 'POST',
+          body: JSON.stringify({ plugin: 'llama_cpp', device: 'npu' }),
+        })
+      ).toMatchObject({
+        verdict: 'engine-not-installed',
+      })
+      expect(
+        await call('/models/geniex/check', {
+          method: 'POST',
+          body: JSON.stringify({ plugin: 'qairt', device: 'npu', chip: 'x2-elite' }),
+        })
+      ).toMatchObject({
+        verdict: 'platform-unsupported',
+      })
+
+      // A build as the engine-builds install leaves it (its probe found the NPU and the GPU), and a GGUF model as a client does.
+      const build = join(data.root, 'geniex', 'backends', '0.9.3', 'win-arm64')
+      await mkdir(join(build, 'lib'), { recursive: true })
+      await writeFile(join(build, 'lib', 'geniex.dll'), 'dll')
+      await writeFile(join(build, '.atomic-owned'), 'atomic-chat\n')
+      await writeFile(
+        join(build, 'install.json'),
+        JSON.stringify({
+          tag: '0.9.3',
+          backendId: 'win-arm64',
+          installedAtMs: 1,
+          publishedAt: '2026-10-19T23:09:06Z',
+          abi: 1,
+          libraryVersion: '0.9.3',
+          devices: ['HTP0', 'GPUOpenCL', 'CPU'],
+        })
+      )
+      const model = join(data.root, 'geniex', 'models', 'qwen3-4b')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'Qwen3-4B-Q4_0.gguf'), 'gguf')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: geniex/models/qwen3-4b/Qwen3-4B-Q4_0.gguf\nname: qwen3-4b\nsize_bytes: 4\ngeniex:\n  model_id: qwen3-4b\n  variant_id: qwen3-4b\n  plugin: llama_cpp\n  backend: npu\n  repo: unsloth/Qwen3-4B-GGUF\n  revision: ${'a'.repeat(40)}\n  file: Qwen3-4B-Q4_0.gguf\n  context_length: 40960\n  tools: true\n  reasoning: true\n  vision: false\n  source: curated\n`
+      )
+
+      expect(await call('/runtimes/geniex/accelerators')).toMatchObject({
+        installed: true,
+        build: '0.9.3/win-arm64',
+        accelerators: [
+          { name: 'npu', device: 'npu', prepared: true },
+          { name: 'gpu', device: 'gpu', prepared: true },
+        ],
+      })
+      expect(
+        await call('/runtimes/geniex/accelerators/prepare', { method: 'POST', body: '{}' })
+      ).toMatchObject({
+        accelerators: [
+          { name: 'npu', prepared: true },
+          { name: 'gpu', prepared: true },
+        ],
+      })
+      expect(
+        await call('/models/geniex/check', { method: 'POST', body: JSON.stringify({ model_id: 'qwen3-4b' }) })
+      ).toMatchObject({
+        verdict: 'ok',
+        metadata: { kind: 'gguf', quantization: 'Q4_0' },
+      })
+      expect(
+        await call('/models/geniex/check', {
+          method: 'POST',
+          body: JSON.stringify({
+            path: join(data.root, 'elsewhere.gguf'),
+            plugin: 'llama_cpp',
+            device: 'cpu',
+          }),
+        })
+      ).toMatchObject({
+        error: { code: 'INVALID_ARGUMENT' },
+      })
+
+      const session = await core.load('geniex', 'qwen3-4b')
+      expect(session.api_key.length).toBeGreaterThan(20)
+      expect(core.registry('geniex').modelsDir).toBe(join(data.root, 'geniex', 'models'))
+      const versions = (await call('/engines/versions', {
+        method: 'POST',
+        body: '{}',
+      })) as unknown as EngineVersionsResponse
+      expect(versions.engines.find((entry) => entry.engine === 'geniex')?.builds).toEqual([
+        expect.objectContaining({ version: '0.9.3', in_use: true }),
+      ])
+      expect(await core.unload('geniex', 'qwen3-4b')).toMatchObject({ success: true })
+    })
+
+    it('registers nothing without the chip: no runtime, no engine, routes answer PROVIDER_NOT_FOUND', async () => {
+      const core = await AtomicCore.create({
+        dataFolder: data.root,
+        controlPort: 0,
+        platform: 'darwin',
+        env: { ...process.env },
+      })
+      cores.push(core)
+      expect(() => core.runtime('geniex')).toThrow(/Unknown provider/)
+      const response = await fetch(`${core.control.url}/atomic/v1/runtimes/geniex/accelerators`, {
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+      expect(response.status).toBe(404)
+      const versions = (await (
+        await fetch(`${core.control.url}/atomic/v1/engines/versions`, {
+          method: 'POST',
+          headers: { 'authorization': `Bearer ${core.controlToken}`, 'content-type': 'application/json' },
+          body: '{}',
+        })
+      ).json()) as EngineVersionsResponse
+      expect(versions.engines.map((entry) => entry.engine)).not.toContain('geniex')
     })
   }
 )

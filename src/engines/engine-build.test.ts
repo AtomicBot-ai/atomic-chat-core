@@ -31,6 +31,7 @@ function builds(result: EngineBuildInstallResult | Error, seen: EngineBuildInsta
       manifest_error: null,
       host_backend_id: 'macos-arm64',
       host_reason: null,
+      host_download_bytes: null,
       installed: [installed('v1', 'bundled', true)],
       active: installed('v1', 'bundled', true),
     }),

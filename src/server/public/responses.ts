@@ -11,24 +11,38 @@
 import {
   ResponsesStreamConverter,
   chatResponseToResponses,
+  namespacedToolNames,
   newResponseId,
   responsesRequestToChat,
   serdeToString,
 } from '../shims/index.js'
-import type { JsonValue } from '../shims/index.js'
+import type { JsonValue, NamespacedToolNames } from '../shims/index.js'
 import { MANAGED_PROVIDER_IDS } from '../../contracts/index.js'
-import { resolveRemoteProvider } from '../../router/index.js'
+import type { LocalProvider } from '../../router/index.js'
 import { answer, clientGone, connectTimeoutMs } from './exchange.js'
 import type { Exchange } from './exchange.js'
-import { outboundHeaders, readModelRequest, sseEvent } from './forward.js'
+import {
+  answerSelectedUnavailable,
+  findSelectedLocalSession,
+  outboundHeaders,
+  readModelRequest,
+  routedRemote,
+  selectedRoute,
+  sseEvent,
+} from './forward.js'
 import { policyRefusal } from './policy.js'
+import { sessionWindow } from './context-window.js'
+import { responsesRolesRefusal } from './validate.js'
 import type { Backend } from './forward.js'
 import type { LocalTarget } from './types.js'
 import { SseLineReader } from './sse.js'
-import { bodyIndicatesOom, isContextLimitError } from './errors.js'
+import { bodyIndicatesOom, isContextLimitError, modelNotFoundJson } from './errors.js'
 import type { RequestTrace } from './trace.js'
 import { pipeBody, readBody, readUpstreamText, relay, sendUpstream } from './wire.js'
 import type { UpstreamResponse } from './wire.js'
+
+/** The engines `/responses` serves, in the order they are asked. */
+const RESPONSES_PROVIDERS: readonly LocalProvider[] = ['llamacpp', 'llamacpp-upstream', 'atomic-prism', 'mlx']
 
 export async function serveResponses(ex: Exchange): Promise<void> {
   const parsed = await readModelRequest(ex)
@@ -36,7 +50,8 @@ export async function serveResponses(ex: Exchange): Promise<void> {
   const { raw, json, modelId, stream } = parsed
 
   const trace = ex.trace
-  const remote = resolveRemoteProvider(modelId, ex.deps.providers())
+  const selected = selectedRoute(ex, modelId)
+  const remote = routedRemote(ex, modelId, selected)
   if (remote) {
     trace.backend = 'remote'
     trace.provider = remote.provider
@@ -50,16 +65,28 @@ export async function serveResponses(ex: Exchange): Promise<void> {
     return
   }
 
+  // A model selected on a local engine stays local: that engine is asked first, then the others;
+  // with no local session at all the answer is a 503, never a remote provider.
+  if (selected?.kind === 'local' && !findSelectedLocalSession(ex, modelId, selected.provider)) {
+    answerSelectedUnavailable(ex, modelId, selected.provider)
+    return
+  }
+  const order = <P extends LocalProvider>(providers: readonly P[]): P[] =>
+    selected?.kind === 'local'
+      ? [
+          ...providers.filter((p) => p === selected.provider),
+          ...providers.filter((p) => p !== selected.provider),
+        ]
+      : [...providers]
   // Unlike the chat routes, MLX is the passthrough here and llama.cpp is translated.
-  const session =
-    ex.deps.findLocal('llamacpp', modelId) ??
-    ex.deps.findLocal('llamacpp-upstream', modelId) ??
-    ex.deps.findLocal('atomic-prism', modelId) ??
-    ex.deps.findLocal('mlx', modelId)
+  const session = order(RESPONSES_PROVIDERS).reduce<LocalTarget | undefined>(
+    (found, provider) => found ?? ex.deps.findLocal(provider, modelId),
+    undefined
+  )
   if (!session) {
     // A session that declares its routes and has no Responses API says so, rather than "not found":
     // every managed provider's, whichever loaded the model (change add-sglang-runtime, D1).
-    const declared = MANAGED_PROVIDER_IDS.reduce<LocalTarget | undefined>(
+    const declared = order(MANAGED_PROVIDER_IDS).reduce<LocalTarget | undefined>(
       (found, provider) => found ?? ex.deps.findLocal(provider, modelId),
       undefined
     )
@@ -70,10 +97,19 @@ export async function serveResponses(ex: Exchange): Promise<void> {
       return
     }
     trace.errorKind = 'not_found'
-    answer(ex, 404, `No running session found for model '${modelId}'`)
+    answer(ex, 404, modelNotFoundJson(modelId), [['Content-Type', 'application/json']])
     return
   }
   trace.backend = session.provider
+  trace.recordWindow(() => sessionWindow(ex.deps, session))
+  // The translation copies a message item's role into the chat messages, where a chat template drops
+  // one it does not know; MLX gets the same answer.
+  const malformed = responsesRolesRefusal(json)
+  if (malformed !== undefined) {
+    trace.errorKind = 'bad_request'
+    answer(ex, 400, malformed, [['Content-Type', 'application/json']])
+    return
+  }
   const backend: Backend = { kind: 'local', session }
   if (session.provider === 'mlx') {
     await passthrough(ex, backend, `http://127.0.0.1:${session.port}/v1/responses`, session.apiKey, raw)
@@ -160,6 +196,8 @@ async function translate(
   }
 
   const responseId = newResponseId()
+  // Codex runs a call to one of its MCP tools only in the namespace it offered the tool in.
+  const names = namespacedToolNames(json)
   if (!stream) {
     const bytes = await readBody(response.body).catch(() => Buffer.alloc(0))
     let chat: JsonValue = null
@@ -168,7 +206,7 @@ async function translate(
     } catch {
       chat = null
     }
-    answer(ex, 200, serdeToString(chatResponseToResponses(chat, responseId, modelId)), [
+    answer(ex, 200, serdeToString(chatResponseToResponses(chat, responseId, modelId, names)), [
       ['Content-Type', 'application/json'],
     ])
     return
@@ -178,7 +216,7 @@ async function translate(
     200,
     [['Content-Type', 'text/event-stream'], ['Cache-Control', 'no-cache'], ...ex.cors].flat()
   )
-  await pipeBody(ex.res, responsesEvents(response, responseId, modelId, ex.trace), () =>
+  await pipeBody(ex.res, responsesEvents(response, responseId, modelId, names, ex.trace), () =>
     response.body.destroy()
   )
 }
@@ -187,10 +225,11 @@ async function* responsesEvents(
   upstream: UpstreamResponse,
   responseId: string,
   modelId: string,
+  names: NamespacedToolNames,
   trace: RequestTrace
 ): AsyncGenerator<string> {
   const telemetry = trace.startTelemetry()
-  const conv = new ResponsesStreamConverter(responseId, modelId)
+  const conv = new ResponsesStreamConverter(responseId, modelId, names)
   yield sseEvent(conv.createdEvent())
   const reader = new SseLineReader()
   let usage: JsonValue | undefined

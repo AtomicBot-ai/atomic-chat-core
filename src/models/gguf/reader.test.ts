@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { GgufNeedMoreData, GgufParseError, readGgufMetadata, readGgufMetadataChunked } from './reader.js'
+import {
+  GgufNeedMoreData,
+  GgufParseError,
+  MAX_PER_LAYER_ARRAY_LEN,
+  readGgufMetadata,
+  readGgufMetadataChunked,
+} from './reader.js'
 
 // ── tiny GGUF writer for tests ───────────────────────────────────────────────
 type V =
@@ -173,6 +179,59 @@ describe('readGgufMetadata', () => {
     expect(meta.metadata['long']).toBe('<Array of type String with 25 elements, data skipped>')
     expect(meta.metadata['after']).toBe('still-readable')
     expect(meta.metadata['nested']).toBe('[[1, 2, 3], [1, 2, 3]]')
+  })
+
+  it('inlines an integer head_count_kv at any length, one entry per block, and nothing else past 24', () => {
+    const perLayer = (n: number) => ({
+      t: 'arr' as const,
+      elem: 5,
+      items: Array.from({ length: n }, (_, i) => ({ t: 'i32' as const, v: i % 3 === 2 ? 8 : 0 })),
+    })
+    const strings = {
+      t: 'arr' as const,
+      elem: 8,
+      items: Array.from({ length: 30 }, (_, i) => ({ t: 'str' as const, v: `t${i}` })),
+    }
+    const meta = readGgufMetadata(
+      gguf([
+        ['lfm2.attention.head_count_kv', perLayer(30)],
+        ['lfm2.attention.head_count', perLayer(30)],
+        ['odd.attention.head_count_kv', strings],
+        ['huge.attention.head_count_kv', perLayer(MAX_PER_LAYER_ARRAY_LEN + 1)],
+        ['after', { t: 'str', v: 'still-readable' }],
+      ])
+    )
+    const thirty = Array.from({ length: 30 }, (_, i) => (i % 3 === 2 ? 8 : 0)).join(', ')
+    expect(meta.metadata['lfm2.attention.head_count_kv']).toBe(`[${thirty}]`)
+    expect(meta.metadata['lfm2.attention.head_count']).toBe(
+      '<Array of type Int32 with 30 elements, data skipped>'
+    )
+    expect(meta.metadata['odd.attention.head_count_kv']).toBe(
+      '<Array of type String with 30 elements, data skipped>'
+    )
+    expect(meta.metadata['huge.attention.head_count_kv']).toBe(
+      `<Array of type Int32 with ${MAX_PER_LAYER_ARRAY_LEN + 1} elements, data skipped>`
+    )
+    expect(meta.metadata['after']).toBe('still-readable')
+  })
+
+  it('inlines a boolean sliding_window_pattern at any length, one flag per block (Gemma 4 31B: 60)', () => {
+    const flags = (n: number) => ({
+      t: 'arr' as const,
+      elem: 7,
+      items: Array.from({ length: n }, (_, i) => ({ t: 'bool' as const, v: i % 6 !== 5 })),
+    })
+    const meta = readGgufMetadata(
+      gguf([
+        ['gemma4.attention.sliding_window_pattern', flags(60)],
+        ['gemma4.other_flags', flags(60)],
+        ['after', { t: 'str', v: 'still-readable' }],
+      ])
+    )
+    const sixty = Array.from({ length: 60 }, (_, i) => String(i % 6 !== 5)).join(', ')
+    expect(meta.metadata['gemma4.attention.sliding_window_pattern']).toBe(`[${sixty}]`)
+    expect(meta.metadata['gemma4.other_flags']).toBe('<Array of type Bool with 60 elements, data skipped>')
+    expect(meta.metadata['after']).toBe('still-readable')
   })
 
   it('rejects a wrong magic, unknown types and oversized strings with the Rust messages', () => {

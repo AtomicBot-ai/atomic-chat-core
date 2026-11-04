@@ -7,9 +7,10 @@ describe('sglangSettings', () => {
   it('reads the shipped defaults as the adapter wants them: "not set" is null', () => {
     expect(sglangSettings(defaultSettingValues('sglang'))).toEqual({
       gpu_id: null,
-      context_length: 8192,
+      // Automatic: picked by the memory rule at load (auto-limits.ts).
+      context_length: 0,
       max_output_tokens: 4096,
-      max_running_requests: 1,
+      max_running_requests: 0,
       mem_fraction_static: null,
       max_total_tokens: null,
       cuda_graphs: 'auto',
@@ -21,8 +22,8 @@ describe('sglangSettings', () => {
       seed: null,
       generation: {},
     })
-    // Nothing stored at all: one request at a time.
-    expect(sglangSettings({}).max_running_requests).toBe(1)
+    // Nothing stored at all: automatic too.
+    expect(sglangSettings({})).toMatchObject({ context_length: 0, max_running_requests: 0 })
   })
 
   it('reads every further option and the generation defaults, "" and 0 as not set', () => {
@@ -46,7 +47,7 @@ describe('sglangSettings', () => {
       })
     ).toEqual({
       gpu_id: 'GPU-2',
-      context_length: 8192,
+      context_length: 0,
       max_output_tokens: 4096,
       max_running_requests: 2,
       mem_fraction_static: 0.7,
@@ -74,8 +75,9 @@ describe('sglangSettings', () => {
   })
 
   // Scenario "Невалидная настройка": refused with INVALID_ARGUMENT before a container exists.
-  it('Невалидная настройка: refuses zero parallel requests with INVALID_ARGUMENT', () => {
-    expect(() => sglangSettings({ max_running_requests: 0 })).toThrow(
+  it('Невалидная настройка: refuses negative parallel requests with INVALID_ARGUMENT', () => {
+    expect(sglangSettings({ max_running_requests: 0 }).max_running_requests).toBe(0) // automatic
+    expect(() => sglangSettings({ max_running_requests: -1 })).toThrow(
       expect.objectContaining({
         code: 'INVALID_ARGUMENT',
         message: 'sglang setting max_running_requests must be a whole number from 1 to 256.',
@@ -99,8 +101,13 @@ describe('sglangSettings', () => {
     ],
     [
       'an output limit as long as the context',
-      { max_output_tokens: 8192 },
+      { context_length: 8192, max_output_tokens: 8192 },
       /must be less than the context length/,
+    ],
+    [
+      'an output limit as long as the widest automatic context',
+      { max_output_tokens: 65_536 },
+      /must be less than the context length \(65536\)/,
     ],
     ['a default temperature out of range', { default_temperature: 3 }, /default_temperature must be/],
   ])('refuses %s', (_case, stored, message) => {

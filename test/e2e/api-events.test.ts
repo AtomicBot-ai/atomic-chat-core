@@ -67,9 +67,12 @@ async function events(ready: ReadyLine): Promise<Array<{ event: string; data: Re
 }
 
 describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', () => {
-  it('reports each API request on the event stream, with previews only while the API screen watches', async () => {
+  it('reports each API request on the event stream with its numbers, and previews only while the API screen watches', async () => {
     const engine = await startStub((_req, res) =>
-      json(res, 200, { choices: [{ message: { content: 'engine says hi' } }] })
+      json(res, 200, {
+        choices: [{ message: { content: 'engine says hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 9, completion_tokens: 3, total_tokens: 12 },
+      })
     )
     stubs.push(engine)
     const { ready } = await core.startDaemon(dataFolder, daemons)
@@ -96,9 +99,18 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
     await chat()
     await expect.poll(() => seen.filter((e) => e.event === 'api:request').length).toBe(1)
     const quiet = seen.find((e) => e.event === 'api:request')?.data
+    // Nobody watches: the numbers, never the text.
     expect(quiet).toMatchObject({
       phase: 'finished',
-      finish: null,
+      seq: -1,
+      finish: {
+        status: 200,
+        prompt_tokens: 9,
+        completion_tokens: 3,
+        total_tokens: 12,
+        finish_reason: 'stop',
+        reply_preview: null,
+      },
       observation: {
         endpoint: 'chat/completions',
         backend: 'mlx',
@@ -107,7 +119,9 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
         error_kind: null,
       },
     })
+    expect((quiet?.finish as { duration_ms?: unknown } | undefined)?.duration_ms).toEqual(expect.any(Number))
     expect(JSON.stringify(seen)).not.toContain('private words')
+    expect(JSON.stringify(seen)).not.toContain('engine says hi')
 
     await control(ready, '/server/inspector', { method: 'PUT', body: '{"enabled":true}' })
     await chat()
@@ -126,7 +140,9 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
 
   it('routes to an engine another process owns and asks that owner to grow its context', async () => {
     let engineCalls = 0
-    const engine = await startStub((_req, res) => {
+    const engine = await startStub((req, res) => {
+      // The server reads the session's window from `/props` once per generation; only chat counts.
+      if (req.path === '/props') return json(res, 200, { default_generation_settings: { n_ctx: 8192 } })
       engineCalls++
       if (engineCalls === 1)
         return json(res, 500, { error: { message: 'the request exceeds the available context size' } })
@@ -170,12 +186,13 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core reports and routes', (
     const answer = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'turbo_q4', messages: [] }),
+      body: JSON.stringify({ model: 'turbo_q4', messages: [{ role: 'user', content: 'hi' }] }),
     })
     await answering
 
     expect(await answer.json()).toEqual({ choices: [{ message: { content: 'after the owner reloaded' } }] })
-    expect(engine.requests[0]?.headers.authorization).toBe('Bearer owner-key')
+    const chats = engine.requests.filter((request) => request.path !== '/props')
+    expect(chats[0]?.headers.authorization).toBe('Bearer owner-key')
     expect(engineCalls).toBe(2)
   })
 })

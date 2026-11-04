@@ -7,7 +7,8 @@ afterEach(async () => {
   await home?.cleanup()
 })
 
-const GOOSE = { agentId: 'goose', marker: '# Atomic Chat - Goose Config', prefix: 'GOOSE_' }
+// Goose no longer persists anything; OpenHands still goes through this machinery.
+const OPENHANDS = { agentId: 'openhands', marker: '# Atomic Chat - OpenHands Config', prefix: 'LLM_' }
 
 describe('the env-var agents', () => {
   it('picks the rc file from $SHELL and the platform', async () => {
@@ -20,7 +21,7 @@ describe('the env-var agents', () => {
     ]
     for (const [platform, shell, expected] of cases) {
       home = await makeAgentHome()
-      await configureEnvAgent(agentInput(home.fs, { platform, shell }), GOOSE)
+      await configureEnvAgent(agentInput(home.fs, { platform, shell }), OPENHANDS)
       expect(Object.keys(await home.tree()), `${platform} ${String(shell)}`).toEqual([expected])
       await home.cleanup()
     }
@@ -38,15 +39,13 @@ describe('the env-var agents', () => {
           return { code: 0, stdout: '', stderr: '' }
         },
       }),
-      GOOSE
+      OPENHANDS
     )
     expect(await home.tree()).toEqual({})
     expect(spawned).toEqual([
-      ['setx', 'GOOSE_PROVIDER', 'openai'],
-      ['setx', 'GOOSE_MODEL', 'AtomicChat/Qwen3.5-9B-GGUF'],
-      ['setx', 'OPENAI_HOST', 'http://127.0.0.1:1337/v1'],
-      ['setx', 'OPENAI_BASE_PATH', 'v1/chat/completions'],
-      ['setx', 'OPENAI_API_KEY', 'sk-atomic-fixture-key'],
+      ['setx', 'LLM_MODEL', 'openai/AtomicChat/Qwen3.5-9B-GGUF'],
+      ['setx', 'LLM_BASE_URL', 'http://127.0.0.1:1337/v1'],
+      ['setx', 'LLM_API_KEY', 'sk-atomic-fixture-key'],
     ])
   })
 
@@ -61,15 +60,15 @@ describe('the env-var agents', () => {
           return { code: 1, stdout: '', stderr: 'ACCESS DENIED' }
         },
       }),
-      GOOSE
+      OPENHANDS
     )
-    await expect(run).rejects.toThrow('Failed to set env var GOOSE_PROVIDER: ACCESS DENIED')
+    await expect(run).rejects.toThrow('Failed to set env var LLM_MODEL: ACCESS DENIED')
     expect(calls).toBe(1)
   })
 
   it('needs a command runner on Windows, and says so', async () => {
     home = await makeAgentHome()
-    await expect(configureEnvAgent(agentInput(home.fs, { platform: 'win32' }), GOOSE)).rejects.toThrow(
+    await expect(configureEnvAgent(agentInput(home.fs, { platform: 'win32' }), OPENHANDS)).rejects.toThrow(
       /command runner/
     )
   })

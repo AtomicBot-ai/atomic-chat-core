@@ -22,8 +22,9 @@ import {
   detectAgents,
   findAgent,
   MUSE_CLI_REFUSAL,
+  runArgsFor,
 } from '../integrations/index.js'
-import type { Agent, AgentDetection } from '../integrations/index.js'
+import type { Agent, AgentDetection, ChildEnvOptions } from '../integrations/index.js'
 import { ModelRegistry } from '../models/index.js'
 import { layoutFor, printFirstRunNotice, sessionProcess } from './commands/index.js'
 import type { CliIo } from './io.js'
@@ -35,7 +36,9 @@ export const DEFAULT_LAUNCH_API_KEY = 'atomic'
 
 export interface LaunchDeps {
   /** Write the agent's config files. Injected so tests never touch a real home directory. */
-  configure?: ((agent: Agent, apiUrl: string, model: string, apiKey: string) => Promise<void>) | undefined
+  configure?:
+    | ((agent: Agent, apiUrl: string, model: string, apiKey: string, contextLength?: number) => Promise<void>)
+    | undefined
   /** Run the agent; resolves with its exit code. Injected in tests. */
   run?: ((spec: RunSpec) => Promise<number>) | undefined
   detect?: typeof detectAgents | undefined
@@ -167,13 +170,19 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
 
       const configure =
         deps.configure ??
-        ((a, u, m, k) =>
+        ((a, u, m, k, ctx) =>
           configureAgent(a, u, m, k, {
             env: io.env,
             spawn: runCommand,
+            // Codex asks the launcher we are about to run for its version.
+            program: detection.program,
+            ...(ctx ? { contextLength: ctx } : {}),
           }))
+      // Fit may have chosen another window than the one asked for: the session says which.
+      const contextLength =
+        (await sessionContextLength(session)) ?? (fit ? undefined : Number(overrides['ctx_size']))
       try {
-        await configure(agent, apiUrl, modelId, apiKey)
+        await configure(agent, apiUrl, modelId, apiKey, contextLength)
       } catch (e) {
         throw new AtomicCoreError(
           'IO_ERROR',
@@ -187,8 +196,11 @@ export async function launchCommand(argv: string[], io: CliIo, deps: LaunchDeps 
       io.stderr(`  Model     ${modelId}\n`)
       io.stderr(`  Session   ${sessionProcess(session)}, port ${session.port}\n\n`)
 
-      const args = [...agent.runArgs, ...agentArgs]
-      const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey)
+      const args = [...runArgsFor(agent, modelId), ...agentArgs]
+      const env = agentEnvironment(io.env, agent, apiUrl, modelId, apiKey, {
+        contextLength,
+        apiPrefix: server.prefix,
+      })
       const run = deps.run ?? runAgent
 
       if (agent.runMode === 'gui') {
@@ -354,20 +366,58 @@ export function agentEnvironment(
   agent: Agent,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  options: ChildEnvOptions = {}
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base }
   for (const name of CONFLICTING_PROVIDER_ENV) delete env[name]
-  return { ...env, ...childEnv(agent, apiUrl, model, apiKey) }
+  return { ...env, ...childEnv(agent, apiUrl, model, apiKey, options) }
+}
+
+export interface SpawnTarget {
+  file: string
+  args: string[]
+  /** Hand `args` to the process as written: the cmd.exe line below is quoted for cmd, not for MSVC. */
+  windowsVerbatimArguments: boolean
+}
+
+/**
+ * What to spawn for an agent launcher. On Windows an npm-installed agent is a `.cmd` shim
+ * (`codex.cmd`): Node refuses to spawn a batch file without a shell (EINVAL) and does not look a bare
+ * name up through PATHEXT (ENOENT). A shim, or a bare name that may resolve to one, therefore runs
+ * through `cmd.exe /d /s /c "<line>"` — the route `configure/codex.ts` takes for `codex --version`,
+ * with each token quoted so a launcher path or an argument with spaces survives. `/s` makes cmd strip
+ * exactly the outer quotes. An `.exe`, or an absolute path without an extension, spawns directly.
+ */
+export function spawnTarget(
+  program: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform
+): SpawnTarget {
+  const shim = /\.(cmd|bat)$/i.test(program)
+  const bareName = !/[\\/]/.test(program) && !/\.[^.\\/]+$/.test(program)
+  if (platform !== 'win32' || !(shim || bareName)) {
+    return { file: program, args, windowsVerbatimArguments: false }
+  }
+  const line = [program, ...args].map(quoteForCmd).join(' ')
+  return { file: 'cmd.exe', args: ['/d', '/s', '/c', `"${line}"`], windowsVerbatimArguments: true }
+}
+
+/** A token as cmd.exe and the MSVC argument parser both read it back. `%VAR%` still expands. */
+function quoteForCmd(token: string): string {
+  if (/^[\w\-.:\\/=@+,]+$/.test(token)) return token
+  return `"${token.replace(/"/g, '""')}"`
 }
 
 export function runAgent(spec: RunSpec): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(spec.program, spec.args, {
+    const target = spawnTarget(spec.program, spec.args)
+    const child = spawn(target.file, target.args, {
       env: spec.env,
       stdio: spec.detached ? 'ignore' : 'inherit',
       detached: spec.detached,
       windowsHide: true,
+      windowsVerbatimArguments: target.windowsVerbatimArguments,
     })
     let settled = false
     child.once('error', (e) => {
@@ -412,4 +462,28 @@ export function runCommand(
       else resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })
     })
   })
+}
+
+/** The window a llama.cpp session was loaded with, from its `/props`; `undefined` when it cannot say. */
+export async function sessionContextLength(session: {
+  port: number
+  api_key: string
+}): Promise<number | undefined> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${session.port}/props`, {
+      headers: session.api_key ? { Authorization: `Bearer ${session.api_key}` } : {},
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!response.ok) return undefined
+    const body = (await response.json()) as {
+      n_ctx?: unknown
+      default_generation_settings?: { n_ctx?: unknown }
+    }
+    for (const value of [body.default_generation_settings?.n_ctx, body.n_ctx]) {
+      if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+    }
+    return undefined
+  } catch {
+    return undefined
+  }
 }

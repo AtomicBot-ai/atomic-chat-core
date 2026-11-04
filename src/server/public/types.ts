@@ -7,6 +7,11 @@
  */
 
 import type {
+  AudioErrorBody,
+  AudioGalleryItem,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
   CoreEvents,
   DiffusionErrorBody,
   DiffusionFamilyDefaults,
@@ -52,6 +57,8 @@ export interface LocalTarget {
   isEmbedding: boolean
   /** Absent for an engine that takes every route (llama.cpp, MLX): the server's own defaults apply. */
   policy?: LocalTargetPolicy
+  /** Changes each time the model is loaded again (`SessionInfo.generation`), when the session has one. */
+  generation?: string
 }
 
 /** What asking the owning runtime for a larger context produced. */
@@ -76,6 +83,22 @@ export interface ImagesBackend {
   cancel: (jobId: string) => Promise<unknown>
   /** The provider and model a `model` names among the enabled remote image models. */
   find?: (model: string) => MediaTarget | undefined
+}
+
+/** The resident audio model as `POST /audio/speech` needs it: who it is, what it makes, and how a job runs. */
+export interface AudioSpeechBackend {
+  /** The loaded audio model, whatever it makes, or `undefined` when there is none. */
+  loaded: () => { modelId: string; displayName: string; mode: AudioMode } | undefined
+  /** Start a speech job on it; `done` settles with the outcome and never rejects. */
+  start: (request: AudioGenerateRequest) => Promise<{
+    id: string
+    done: Promise<
+      | { ok: true; outcome: { job: AudioJob; item: AudioGalleryItem; wav: Buffer } }
+      | { ok: false; error: AudioErrorBody }
+    >
+  }>
+  /** Give up on a job the client no longer waits for. */
+  cancel: (jobId: string) => Promise<unknown>
 }
 
 /** The resident video model as `/videos` needs it, plus the two places a video lives: the runner and the gallery. */
@@ -179,10 +202,21 @@ export interface PublicServerDeps {
   /** Registered cloud providers, keyed by provider id. */
   providers: () => ReadonlyMap<string, RemoteProvider>
   /**
+   * The provider the app selected to serve each model id (`PUT /atomic/v1/server/selection`), read
+   * for every request. Absent or empty: every id follows the rules without a selection.
+   */
+  selection?: () => ReadonlyMap<string, string>
+  /**
    * Reload a local model with a larger context because a request overflowed it. In the app this was
    * a round trip to the llama.cpp extension; in the core it is the runtime's own `increaseCtx`.
    */
   increaseCtx: (provider: LocalProvider, modelId: string, trigger: string) => Promise<CtxIncreaseOutcome>
+  /**
+   * The context window a local session serves, when the host can learn it (`SessionWindows`): what
+   * `/models` advertises and the request log records. Absent: no window is advertised, except the one
+   * a declared session states itself.
+   */
+  contextWindow?: (target: LocalTarget) => Promise<number | undefined>
   /**
    * Whether the app's API screen is watching. Only then are prompt and reply previews and stream
    * telemetry collected (ATO-113); the analytics observation is sent regardless.
@@ -202,6 +236,8 @@ export interface PublicServerDeps {
   images?: ImagesBackend
   /** The video counterpart, for `/videos`. */
   videos?: VideosBackend
+  /** Speech on the resident audio model, for `/audio/speech`; without it the route answers 503. */
+  speech?: AudioSpeechBackend
   /** The decision model, for `/systemone` and `/router/score`; without it those routes answer 503. */
   decision?: DecisionBackend
   /**

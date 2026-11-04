@@ -1,0 +1,307 @@
+{
+  "schema": "atomic-engine-contract",
+  "schema_version": 1,
+  "engine": "audio-cpp",
+  "generated_by": "by hand; test/contract/audiocpp-engine-contract.test.ts holds every part to the v0.9.3 help screen, src/audio, src/engine-builds and the fake server",
+  "invocations": [
+    {
+      "bin": "audiocpp_server",
+      "argv": ["--help"],
+      "source": "scripts/lib/audiocpp-surface.mjs",
+      "expect": "exit-0",
+      "severity": "warn",
+      "note": "Core never runs it; the check reads the flags and the endpoint list from it."
+    },
+    {
+      "bin": "audiocpp_server",
+      "argv": ["--version"],
+      "source": "src/audio/install.ts",
+      "expect": "exit-0",
+      "severity": "warn",
+      "note": "The install probe (prepareAudiocppTree); it reads the output, not the exit code."
+    },
+    {
+      "bin": "audiocpp_server",
+      "argv": ["--list-devices"],
+      "source": "src/audio/install.ts",
+      "expect": "exit-0",
+      "severity": "warn",
+      "note": "The install probe of a GPU build reads the device lines; v0.9.3 prints text, even with --json."
+    }
+  ],
+  "probe": {
+    "argv": ["--version"],
+    "marker": "audio.cpp ",
+    "source": "src/audio/install.ts",
+    "note": "parseAudioVersion: a line starting with the marker. Without one the archive installs on no host."
+  },
+  "version": {
+    "pattern": "^audio\\.cpp (\\S+)",
+    "commit_pattern": "^git: ([0-9a-z]+)",
+    "source": "app/server/main.cpp (--version), CMakeLists.txt (AUDIOCPP_VERSION, AUDIOCPP_GIT_SHA)",
+    "note": "The version is the tag's X.Y.Z (AUDIOCPP_VERSION, `dev` when the build sets none); git is `git rev-parse --short HEAD` of the build's checkout: upstream's tag commit, also in the fork, which applies its patches without committing them."
+  },
+  "flags": [
+    { "flag": "--config", "severity": "break", "source": "src/audio/args.ts" },
+    { "flag": "--no-ui", "severity": "break", "source": "src/audio/args.ts" },
+    { "flag": "--host", "severity": "break", "source": "src/audio/args.ts" },
+    { "flag": "--port", "severity": "break", "source": "src/audio/args.ts" },
+    { "flag": "--backend", "severity": "break", "source": "src/audio/args.ts" },
+    {
+      "flag": "--threads",
+      "severity": "break",
+      "source": "src/audio/args.ts",
+      "note": "Only when a thread count is set."
+    },
+    { "flag": "--log", "severity": "break", "source": "src/audio/args.ts" },
+    { "flag": "--load-progress", "severity": "break", "source": "src/audio/args.ts" }
+  ],
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/health",
+      "source": "src/audio/server-process.ts",
+      "severity": "break",
+      "note": "Readiness: the server listens only once its model is loaded (lazy_load false)."
+    },
+    {
+      "method": "GET",
+      "path": "/v1/models",
+      "source": "src/audio/server-process.ts",
+      "severity": "break",
+      "note": "With ?include_params=true: the model's id, family and task tell our server from a foreign listener."
+    },
+    { "method": "POST", "path": "/v1/audio/speech", "source": "src/audio/request.ts", "severity": "break" },
+    {
+      "method": "POST",
+      "path": "/v1/tasks/run",
+      "source": "src/audio/request.ts",
+      "severity": "break",
+      "note": "Music and sound effects: the WAV comes back base64 in JSON."
+    },
+    { "method": "GET", "path": "/v1/audio/voices", "source": "src/audio/server-process.ts", "severity": "break" }
+  ],
+  "strings": [
+    {
+      "id": "route.health",
+      "text": "/health",
+      "channel": "http-route",
+      "source": "src/audio/server-process.ts",
+      "upstream_text": "\"/health\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "route.models",
+      "text": "/v1/models",
+      "channel": "http-route",
+      "source": "src/audio/server-process.ts",
+      "upstream_text": "\"/v1/models\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "route.speech",
+      "text": "/v1/audio/speech",
+      "channel": "http-route",
+      "source": "src/audio/request.ts",
+      "upstream_text": "\"/v1/audio/speech\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "route.tasks-run",
+      "text": "/v1/tasks/run",
+      "channel": "http-route",
+      "source": "src/audio/request.ts",
+      "upstream_text": "\"/v1/tasks/run\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "route.voices",
+      "text": "/v1/audio/voices",
+      "channel": "http-route",
+      "source": "src/audio/server-process.ts",
+      "upstream_text": "\"/v1/audio/voices\"",
+      "severity_if_lost": "break"
+    },
+    {
+      "id": "ready.listening-on",
+      "text": "audiocpp_server listening on",
+      "channel": "log",
+      "source": "src/audio/server-process.ts",
+      "upstream_text": "audiocpp_server listening on",
+      "severity_if_lost": "info",
+      "note": "Not read: readiness is GET /health, which audio.cpp answers only once the model is loaded (lazy_load false). The fake server prints it; the live test holds every real load to it."
+    },
+    {
+      "id": "load.phase",
+      "text": "runtime.load.phase",
+      "channel": "log",
+      "source": "src/audio/args.ts",
+      "upstream_text": "\"runtime.load.phase\"",
+      "severity_if_lost": "info",
+      "note": "`inspect`, `load`, `loaded`: a key `--load-progress 1` asks for (args.ts passes it). Not read yet: a load progress bar would read it."
+    },
+    {
+      "id": "load.upload-progress",
+      "text": ".weights.upload_progress",
+      "channel": "log",
+      "source": "src/audio/args.ts",
+      "upstream_text": "\".weights.upload_progress\"",
+      "severity_if_lost": "info",
+      "note": "`<store>.weights.upload_progress <fraction>`: Kokoro prints it while it loads, Stable Audio and Qwen3-TTS do not (their weights go up on the first request). Not read yet."
+    },
+    {
+      "id": "load.server-progress",
+      "text": "server.load.progress",
+      "channel": "log",
+      "source": "src/audio/args.ts",
+      "upstream_text": "\"server.load.progress\"",
+      "severity_if_lost": "info",
+      "note": "`server.load.progress 1` once every resident model is loaded. Not read yet."
+    },
+    {
+      "id": "model.variant",
+      "text": "runtime.model.variant",
+      "channel": "log",
+      "source": "src/audio/output.ts",
+      "upstream_text": "\"runtime.model.variant\"",
+      "severity_if_lost": "warn",
+      "note": "readModelFact (needs --log): a Qwen3-TTS variant ending in `base` speaks only in a cloned voice (requiresVoiceRef), so a job without a reference is refused before the engine's 500."
+    },
+    {
+      "id": "model.supports-speaker-reference",
+      "text": "runtime.model.supports_speaker_reference",
+      "channel": "log",
+      "source": "src/audio/output.ts",
+      "upstream_text": "\"runtime.model.supports_speaker_reference\"",
+      "severity_if_lost": "warn",
+      "note": "readModelFact (needs --log): `1` makes supportsVoiceRef true for a speech model."
+    },
+    {
+      "id": "error.port-taken",
+      "text": "could not bind",
+      "channel": "log",
+      "source": "src/audio/output.ts",
+      "upstream_text": "\"could not bind \"",
+      "severity_if_lost": "warn",
+      "note": "exitedOnTakenAudioPort: a server that exits with it before it listens starts again on another port; without it the load fails."
+    },
+    {
+      "id": "error.model-path",
+      "text": "model path does not exist",
+      "channel": "log",
+      "source": "src/audio/service.ts",
+      "upstream_text": "\"model path does not exist: \"",
+      "severity_if_lost": "info",
+      "note": "Not read: the core refuses a missing file itself (MODEL_MISSING) before the spawn; a file gone between that check and the spawn exits the server with it, MODEL_LOAD_FAILED with the line in details."
+    }
+  ],
+  "assets": {
+    "source": "conf .github/workflows/mirror-audiocpp.yml (MATRIX) and src/engine-builds/select.ts (audiocppHostChoice)",
+    "note": "{version} is the bare upstream tag (vX.Y.Z) the archives are named by, on conf's -a<rev> mirror too. Each pattern takes the fork's name and upstream's, as conf's mirror does. `required`: conf's mirror refuses a release without it. `cpu`: the build every host of the platform falls back to. The fork's win-cuda13-x64, which conf mirrors but the ladder never picks (a CUDA 13 host takes win-cuda12-x64), is not listed, nor are upstream's archives conf does not mirror.",
+    "core_backends": [
+      {
+        "platform": "macos-arm64",
+        "backend": "macos-arm64",
+        "cpu": true,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:macos-arm64\\.zip|macos-arm64-metal\\.tar\\.gz)"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cuda12-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:win-cuda12-x64\\.zip|windows-x64-cuda12\\.4\\.zip)"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cudart-cu12",
+        "cpu": false,
+        "required": true,
+        "companion": true,
+        "asset": "audio-{version}-(?:cudart-win-cu12-x64\\.zip|cudart-windows-x64-cuda12\\.4\\.zip)"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-vulkan-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:win-vulkan-x64\\.zip|windows-x64-vulkan-portable\\.zip)"
+      },
+      {
+        "platform": "windows-x64",
+        "backend": "win-cpu-x64",
+        "cpu": true,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:win-cpu-x64\\.zip|windows-x64-cpu-portable\\.zip)"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cuda13-arm64",
+        "cpu": false,
+        "required": false,
+        "asset": "audio-{version}-bin-win-cuda13-arm64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-cpu-arm64",
+        "cpu": true,
+        "required": false,
+        "asset": "audio-{version}-bin-win-cpu-arm64\\.zip"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-vulkan-x64",
+        "cpu": false,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:linux-vulkan-x64\\.zip|ubuntu-x64-vulkan-portable\\.tar\\.gz)"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-cpu-x64",
+        "cpu": true,
+        "required": true,
+        "asset": "audio-{version}-bin-(?:linux-cpu-x64\\.zip|ubuntu-x64-cpu-portable\\.tar\\.gz)"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cuda13-arm64",
+        "cpu": false,
+        "required": false,
+        "asset": "audio-{version}-bin-linux-cuda13-arm64\\.zip"
+      },
+      {
+        "platform": "linux-arm64",
+        "backend": "linux-cpu-arm64",
+        "cpu": true,
+        "required": false,
+        "asset": "audio-{version}-bin-linux-cpu-arm64\\.zip"
+      }
+    ]
+  },
+  "upstream": {
+    "repo": "0xShug0/audio.cpp",
+    "branch": "main",
+    "watched_paths": [
+      { "path": "app/server/main.cpp", "why": "every flag core passes, --help, --version and --list-devices" },
+      { "path": "app/server/request_dispatch.h", "why": "the routes core calls and their methods" },
+      { "path": "app/server/config.cpp", "why": "the server.json keys core writes (models, lazy_load, max_loaded_models)" },
+      { "path": "app/server/http.cpp", "why": "the listener, the ready line and the error bodies" },
+      { "path": "app/server/server_protocol.cpp", "why": "the request and response JSON of speech and tasks" },
+      { "path": "app/server/runtime.cpp", "why": "model load and the load progress lines" },
+      {
+        "path": "src/framework/runtime/registry.cpp",
+        "why": "the model facts and the load phases the loader traces, the missing model path"
+      },
+      { "path": "src/framework/core/load_progress.cpp", "why": "the weight upload progress keys" },
+      { "path": "CMakeLists.txt", "why": "the version and commit --version prints, build options (static eSpeak)" }
+    ],
+    "release_note_keywords": [
+      { "pattern": "deprecat", "severity": "warn" },
+      { "pattern": "remove", "severity": "warn" },
+      { "pattern": "rename", "severity": "warn" },
+      { "pattern": "breaking", "severity": "warn" },
+      { "pattern": "\\b(server|audiocpp_server|api|cli|args?|config)\\b", "severity": "info" }
+    ]
+  }
+}

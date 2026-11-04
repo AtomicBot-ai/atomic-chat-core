@@ -270,6 +270,7 @@ function settle<J extends ImageJob | VideoJob>(
     const job = deps.state.anyJob(id) as J
     return { ok: true, outcome: { job, images: outcome.bytes } }
   }
+  deps.onFailure?.(outcome.raw, { component: 'diffusion', operation: 'job' })
   const error: DiffusionErrorBody = errorBody(outcome.raw)
   finishJob(deps, id, { ok: false, error })
   if (error.code !== 'CANCELLED') deps.emit('diffusion:error', { ...error, jobId: id })
@@ -428,11 +429,11 @@ async function runRemoteImage(
         negativePrompt: job.negativePrompt ?? null,
         width: size?.width ?? request.width,
         height: size?.height ?? request.height,
-        steps: job.steps ?? 0,
-        cfgScale: job.cfgScale ?? 0,
+        // Only the knobs the model was sent: a placeholder would read as a setting.
+        ...(job.steps === undefined ? {} : { steps: job.steps }),
+        ...(job.cfgScale === undefined ? {} : { cfgScale: job.cfgScale }),
         guidance: job.guidance ?? null,
-        seed: seed === undefined ? -1 : seed + index,
-        batchSeed: seed ?? -1,
+        ...(seed === undefined ? {} : { seed: seed + index, batchSeed: seed }),
         batchSize: job.n,
         samplingMethod: job.sampler ?? null,
         flowShift: null,
@@ -648,10 +649,9 @@ async function saveClip(
     frames: 0,
     frameCount: 0,
     fps: 0,
-    steps: request.steps,
-    cfgScale: request.cfgScale,
+    // A provider's clip is never sent steps or CFG, and a seed only when its model takes one.
     guidance: null,
-    seed: stored.seed ?? -1,
+    ...(stored.seed === undefined ? {} : { seed: stored.seed }),
     samplingMethod: null,
     flowShift: null,
     workflow: request.workflow ?? 'create',

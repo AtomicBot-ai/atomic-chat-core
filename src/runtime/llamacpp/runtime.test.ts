@@ -1261,3 +1261,44 @@ describe('builds in use and the exclusive turn', () => {
     await expect(runtime.load('demo')).resolves.toMatchObject({ model_id: 'demo' })
   })
 })
+
+describe('fit on a unified-memory Mac below 16 GiB', () => {
+  it('starts llama-server with the load plan’s window ceiling beside fit and its margin', async () => {
+    await data.writeModel('small-mac')
+    const baseSpawn = fakeLlamaSpawn()
+    const argvs: string[][] = []
+    const runtime = await makeRuntime({
+      // `MTL0: Apple M3 (5461 MiB, 5461 MiB free)`: Metal's two thirds of an 8 GiB Mac.
+      baseEnv: { ...process.env, FAKE_LLAMA_DEVICES: 'MTL0: Apple M3 (5461 MiB, 5461 MiB free)' },
+      unifiedMemory: async () => ({ totalMemoryBytes: 8 * 2 ** 30 }),
+      // LFM2.5 2.6B's header as the reader renders it: 8 of 30 blocks attend, 16 KiB of KV per token.
+      readGgufMetadata: async () => ({
+        'general.architecture': 'lfm2',
+        'lfm2.block_count': '30',
+        'lfm2.context_length': '131072',
+        'lfm2.embedding_length': '2048',
+        'lfm2.attention.head_count': '32',
+        'lfm2.attention.head_count_kv':
+          '[0, 0, 8, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 0]',
+      }),
+      readSettings: async () => {
+        const s = settings()
+        return { ...s, config: { ...s.config, fit: true } }
+      },
+      spawn: async (spec, opts) => {
+        argvs.push(spec.args)
+        return baseSpawn(spec, opts)
+      },
+    })
+    await runtime.load('small-mac')
+
+    const argv = argvs[0] ?? []
+    const flag = (name: string) => argv[argv.indexOf(name) + 1]
+    // 4096 MiB left to llama.cpp, less the 1 GiB reserve, holds the whole 32768 ceiling at 16 KiB a token.
+    expect(flag('--ctx-size')).toBe('32768')
+    expect(flag('--fit')).toBe('on')
+    expect(flag('--fit-target')).toBe('1365')
+    // The session still reports fit, so a context overflow is not answered with a reload.
+    expect(await runtime.autoIncreaseCtx('small-mac')).toEqual({ ok: false, reason: 'fit' })
+  })
+})

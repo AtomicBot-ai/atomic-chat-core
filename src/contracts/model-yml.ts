@@ -41,6 +41,10 @@ export interface ModelYml {
   atomic_runtime?: ModelYmlAtomicRuntime
   /** A Foundry Local variant (`<data>/foundry-local/models/<variant_id>/`), written by the app's installer. */
   foundry_local?: ModelYmlFoundryLocal
+  /** A LiteRT-LM variant (`<data>/litert-lm/models/<variant_id>/`), written by the app or `atc`. */
+  litert_lm?: ModelYmlLiteRtLm
+  /** A GenieX model (`<data>/geniex/models/<model_id or variant_id>/`), written by the app or `atc`. */
+  geniex?: ModelYmlGeniex
 }
 
 export interface ModelYmlAtomicRuntime {
@@ -89,6 +93,80 @@ export interface ModelYmlFoundryLocal {
   reasoning_end?: string
 }
 
+/** The backends a LiteRT-LM variant runs on (change `add-litert-lm-runtime`). */
+export const LITERT_LM_BACKENDS = ['cpu', 'gpu', 'npu'] as const
+export type LiteRtLmBackendId = (typeof LITERT_LM_BACKENDS)[number]
+
+/** The Intel NPU generations LiteRT-LM files are compiled for: Lunar Lake and Panther Lake (design D3). */
+export const LITERT_LM_NPUS = ['intel-lnl', 'intel-ptl'] as const
+export type LiteRtLmNpu = (typeof LITERT_LM_NPUS)[number]
+
+/**
+ * The `litert_lm` block (spec `litert-lm-models`, task 6.2): which variant the folder holds and what it
+ * can do. `tools`, `reasoning` and `vision` come from conf's list, or for a Hugging Face model from
+ * core's check of the downloaded file.
+ */
+export interface ModelYmlLiteRtLm {
+  model_id: string
+  variant_id: string
+  backend: LiteRtLmBackendId
+  /** Present exactly when `backend` is `npu`. */
+  npu?: LiteRtLmNpu
+  /** `<org>/<name>` on Hugging Face. */
+  repo: string
+  revision: string
+  /** The file's path in the repository; its name in the variant folder. */
+  file: string
+  /** Absent when neither conf nor the file declares one. */
+  context_length?: number
+  tools: boolean
+  reasoning: boolean
+  vision: boolean
+  source: 'curated' | 'huggingface'
+}
+
+/** The devices a GenieX model runs on: GenieX's own aliases (`geniex_resolve_device`), change `add-geniex-runtime`. */
+export const GENIEX_DEVICES = ['npu', 'gpu', 'cpu', 'hybrid'] as const
+export type GeniexDevice = (typeof GENIEX_DEVICES)[number]
+
+/** The GenieX plugins: `llama_cpp` runs a GGUF file, `qairt` an AI Hub bundle (design D4). */
+export const GENIEX_PLUGINS = ['llama_cpp', 'qairt'] as const
+export type GeniexPlugin = (typeof GENIEX_PLUGINS)[number]
+
+/** The Snapdragon chips AI Hub bundles are compiled for, as conf's model list spells them (design D3). */
+export const GENIEX_CHIPS = ['x-elite', 'x2-elite'] as const
+export type GeniexChip = (typeof GENIEX_CHIPS)[number]
+
+/**
+ * The `geniex` block (spec `geniex-models`, "Скачанная модель лежит в папке провайдера с model.yml";
+ * task 6.2, design D4): what the folder holds and how the host runs it. A GGUF file (`llama_cpp`)
+ * is one record whose device is a launch parameter (`backend` is the default, the settings may
+ * change it); an AI Hub bundle (`qairt`) is one variant per chip and runs on the NPU only.
+ */
+export interface ModelYmlGeniex {
+  model_id: string
+  variant_id: string
+  plugin: GeniexPlugin
+  /** The default device; `npu` for a bundle. */
+  backend: GeniexDevice
+  /** `qairt`: the chip the bundle is compiled for. */
+  chip?: GeniexChip
+  /** `llama_cpp`: `<org>/<name>` on Hugging Face and the commit the file came from. */
+  repo?: string
+  revision?: string
+  /** `llama_cpp`: the file's path in the repository; its name in the model folder. */
+  file?: string
+  mmproj?: string
+  /** `qairt`: the zip the bundle was unpacked from. */
+  bundle_url?: string
+  precision?: string
+  context_length: number
+  tools: boolean
+  reasoning: boolean
+  vision: boolean
+  source: 'curated' | 'huggingface'
+}
+
 /** Key order the app's serde_yaml writer produces; `writeModelYml` must emit keys in this order. */
 export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'model_path',
@@ -108,4 +186,6 @@ export const MODEL_YML_KEY_ORDER: readonly (keyof ModelYml)[] = [
   'capabilities',
   'atomic_runtime',
   'foundry_local',
+  'litert_lm',
+  'geniex',
 ]

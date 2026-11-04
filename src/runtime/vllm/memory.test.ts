@@ -13,6 +13,7 @@ import {
   vllmCheckEngine,
   vllmKvCacheBytes,
   vllmLaunchPlan,
+  vllmLimits,
 } from './memory.js'
 import { managedModelCheckOf } from '../managed-engines/index.js'
 import { VLLM_ENGINE } from './engine.js'
@@ -69,7 +70,7 @@ describe('the KV cache in bytes', () => {
     expect(
       vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, fixed, card(), false).bytes
     ).toBe(1.5 * GiB)
-    const fp8 = vllmSettings({ kv_cache_dtype: 'fp8' })
+    const fp8 = vllmSettings({ kv_cache_dtype: 'fp8', context_length: 8192, max_num_seqs: 1 })
     expect(
       vllmKvCacheBytes({ configJson: config(), hfQuantConfigJson: null }, fp8, card(), false).bytes
     ).toBe((8192 * PER_TOKEN_BF16) / 2)
@@ -101,10 +102,110 @@ describe('the KV cache in bytes', () => {
         i % 4 === 3 ? 'full_attention' : 'linear_attention'
       ),
     })
-    const settings = vllmSettings({ context_length: 2048, max_output_tokens: 1024 })
+    const settings = vllmSettings({ context_length: 2048, max_output_tokens: 1024, max_num_seqs: 1 })
     expect(
       vllmKvCacheBytes({ configJson: hybrid, hfQuantConfigJson: null }, settings, card(), false).bytes
     ).toBe(2048 * 2 * 7 * 8 * 128 * 2)
+  })
+})
+
+/** Integrations audit 2026-11-03, S2: 8K and one request refused every coding agent's 13-27K prompt. */
+describe('the automatic window and request count', () => {
+  const model = (bytes: number, extra: Record<string, unknown> = {}) => ({
+    weightBytesTotal: bytes,
+    configJson: config(extra),
+    hfQuantConfigJson: null,
+  })
+  const overhead = VLLM_ENGINE_OVERHEAD_BYTES + VLLM_FREE_MEMORY_MARGIN_BYTES
+  /** A card whose free memory holds the weights, vLLM's overhead and `tokens` of KV, exactly. */
+  const roomFor = (weights: number, tokens: number) =>
+    card({ total_vram_bytes: 80 * GiB, free_vram_bytes: weights + overhead + tokens * PER_TOKEN_BF16 })
+
+  it('takes 64K and two requests where the card has room for both', () => {
+    expect(vllmLimits(vllmSettings({}), model(4 * GiB), roomFor(4 * GiB, 131_072), HOST)).toEqual({
+      context_length: 65_536,
+      max_num_seqs: 2,
+    })
+  })
+
+  it('narrows the window before it drops the second request, down to 32K alone, then 16K', () => {
+    const at = (tokens: number) =>
+      vllmLimits(vllmSettings({}), model(4 * GiB), roomFor(4 * GiB, tokens), HOST)
+    expect(at(131_071)).toEqual({ context_length: 32_768, max_num_seqs: 2 })
+    expect(at(65_535)).toEqual({ context_length: 32_768, max_num_seqs: 1 })
+    expect(at(32_767)).toEqual({ context_length: 16_384, max_num_seqs: 1 })
+  })
+
+  it('falls back to the old 8K and one request where nothing fits, so the check refuses as before', () => {
+    const tiny = card({ free_vram_bytes: 2 * GiB })
+    expect(vllmLimits(vllmSettings({}), model(4 * GiB), tiny, HOST)).toEqual({
+      context_length: 8192,
+      max_num_seqs: 1,
+    })
+    const verdict = checkCheckpoint(
+      {
+        repository: 'acme/model',
+        revision: 'main',
+        config_json: config(),
+        hf_quant_config_json: null,
+        files: weights(4 * GiB),
+      },
+      VLLM,
+      [tiny],
+      HOST,
+      vllmCheckEngine(vllmSettings({}))
+    )
+    expect(verdict.verdict).toMatchObject({
+      ok: false,
+      error: { details: expect.stringContaining('context_length=8192 max_num_seqs=1') },
+    })
+  })
+
+  it('never asks for a window above what the model takes, nor one the output cap would fill', () => {
+    const big = roomFor(GiB, 1_000_000)
+    expect(vllmLimits(vllmSettings({}), model(GiB, { max_position_embeddings: 40_960 }), big, HOST)).toEqual({
+      context_length: 32_768,
+      max_num_seqs: 2,
+    })
+    expect(vllmLimits(vllmSettings({}), model(GiB, { max_position_embeddings: 4096 }), big, HOST)).toEqual({
+      context_length: 4096,
+      max_num_seqs: 2,
+    })
+    expect(
+      vllmLimits(vllmSettings({ max_output_tokens: 32_768 }), model(GiB), big, HOST).context_length
+    ).toBe(65_536)
+  })
+
+  it('keeps a pinned window or request count and makes only the other automatic', () => {
+    const big = roomFor(GiB, 1_000_000)
+    expect(vllmLimits(vllmSettings({ context_length: 12_000 }), model(GiB), big, HOST)).toEqual({
+      context_length: 12_000,
+      max_num_seqs: 2,
+    })
+    expect(vllmLimits(vllmSettings({ max_num_seqs: 4 }), model(GiB), big, HOST)).toEqual({
+      context_length: 65_536,
+      max_num_seqs: 4,
+    })
+    expect(
+      vllmLimits(
+        vllmSettings({ context_length: 8192, max_num_seqs: 1 }),
+        model(GiB),
+        card({ free_vram_bytes: GiB }),
+        HOST
+      )
+    ).toEqual({ context_length: 8192, max_num_seqs: 1 })
+  })
+
+  it('with a KV cache size set by hand, takes only a window one sequence of which fits it', () => {
+    const fixed = vllmSettings({ kv_cache_memory_gib: 2 })
+    // 2 GiB / 112 KiB per token = 18724 tokens: 16K fits, 32K does not.
+    expect(vllmLimits(fixed, model(GiB), roomFor(GiB, 1_000_000), HOST).context_length).toBe(16_384)
+  })
+
+  it('hands the window and request count to the launch through the plan, and to the session limits', () => {
+    const plan = vllmLaunchPlan(vllmSettings({}), model(4 * GiB), roomFor(4 * GiB, 65_536), HOST)
+    expect(plan).toMatchObject({ maxModelLen: 32_768, maxNumSeqs: 2 })
+    expect(VLLM_ENGINE.planContextLength?.(plan)).toBe(32_768)
   })
 })
 

@@ -135,6 +135,7 @@ export interface LlamacppRuntimeOptions {
   resolveLatestBackend?: LoadPlanDeps['resolveLatestBackend'] | undefined
   cpuInfo?: LoadPlanDeps['cpuInfo'] | undefined
   unifiedMemory?: LoadPlanDeps['unifiedMemory'] | undefined
+  systemMemory?: LoadPlanDeps['systemMemory'] | undefined
   ensureGemmaMtpDraft?: LoadPlanDeps['ensureGemmaMtpDraft'] | undefined
   ensureDflashDraft?: LoadPlanDeps['ensureDflashDraft'] | undefined
   /** Model that must never be auto-unloaded. */
@@ -491,6 +492,7 @@ export class LlamacppRuntime implements LocalRuntime {
       },
       cpuInfo: this.options.cpuInfo ?? (async () => undefined),
       ...(this.options.unifiedMemory ? { unifiedMemory: this.options.unifiedMemory } : {}),
+      ...(this.options.systemMemory ? { systemMemory: this.options.systemMemory } : {}),
       listDevices: (exePath) => this.getDevices(exePath),
       exists: async (path) => {
         const { stat } = await import('node:fs/promises')
@@ -534,6 +536,8 @@ export class LlamacppRuntime implements LocalRuntime {
       modelPath: plan.modelPath,
       port: plan.port,
       mmprojPath: plan.mmprojPath ?? null,
+      ...(plan.fitCtxCeiling !== undefined ? { fitCtxCeiling: plan.fitCtxCeiling } : {}),
+      ...(plan.cacheRamMiB !== undefined ? { cacheRamMiB: plan.cacheRamMiB } : {}),
     })
     const exeDir = dirname(plan.exePath)
     const { env, cwd } = buildProcessEnv({
@@ -692,7 +696,11 @@ export class LlamacppRuntime implements LocalRuntime {
     return this.unloadSession(modelId)
   }
 
-  /** The context window a loaded session is actually running with. */
+  /**
+   * The context window a loaded session was asked for. Under fit that is not the one it runs with:
+   * no `--ctx-size` is sent (only the load plan's ceiling on a small unified-memory Mac) and llama.cpp
+   * picks the window, which only the server's `/props` knows.
+   */
   getCtxSize(modelId: string): number | undefined {
     const configured = this.sessions.get(modelId)?.plan.config.ctx_size
     return typeof configured === 'number' && configured > 0 ? configured : undefined

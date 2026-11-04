@@ -1,7 +1,8 @@
 /**
- * The part of `bun:ffi` that `ffi-bun.ts` uses, declared here so the core needs no `@types/bun`
- * (AGENTS.md invariant 8: no new dependency). Only `ffi-bun.ts` imports this module (operator decision
- * Q2 of change `add-foundry-local`); it runs only inside the compiled binaries, never under Node.
+ * The part of `bun:ffi` that the hosts' `ffi-bun.ts` use, declared here so the core needs no
+ * `@types/bun` (AGENTS.md invariant 8: no new dependency). Only the two `ffi-bun.ts` import this module
+ * (operator decision Q2 of change `add-foundry-local`; change `add-litert-lm-runtime`, design D1); they
+ * run only inside the compiled binaries, never under Node.
  */
 declare module 'bun:ffi' {
   /** A native address, as Bun hands it to JavaScript. */
@@ -15,6 +16,8 @@ declare module 'bun:ffi' {
     readonly i64: number
     readonly u64: number
     readonly f32: number
+    readonly f64: number
+    readonly bool: number
     readonly void: number
     readonly cstring: number
   }
@@ -51,5 +54,13 @@ declare module 'bun:ffi' {
   export const read: {
     ptr(address: Pointer, byteOffset?: number): Pointer
     u8(address: Pointer, byteOffset?: number): number
+    u32(address: Pointer, byteOffset?: number): number
   }
+
+  /** Compile C with the TinyCC built into Bun and bind its symbols (LiteRT-LM's chunk shim). */
+  export function cc<S extends Record<string, FFIFunction>>(options: {
+    source: string
+    symbols: S
+    flags?: string | string[]
+  }): { symbols: { [K in keyof S]: (...args: NativeArgument[]) => unknown }; close(): void }
 }

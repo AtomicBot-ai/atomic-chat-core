@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * The embedding module's surface: one embedding `llama-server` at most (stock llama.cpp), its
  * lifecycle, and the target the public `/v1/embeddings` forwards to.
@@ -63,6 +64,8 @@ export type EmbeddingEmitter = <K extends 'embedding:state' | 'embedding:error'>
 export type EmbeddingLogger = (level: 'info' | 'warn' | 'debug', msg: string) => void
 
 export interface EmbeddingServiceDeps {
+  onFailure?: FailureObserver
+
   /** The core's data folder: relative model paths are resolved against it. */
   dataFolder: string
   readSettings: () => EmbeddingSettings
@@ -319,12 +322,21 @@ export class EmbeddingService {
       } catch {
         parsed = answer.text
       }
+      if (answer.status >= 500)
+        this.deps.onFailure?.(new Error('Embedding inference failed'), {
+          component: 'embedding',
+          operation: 'inference',
+          reason: 'upstream',
+          category: 'operational',
+        })
       return { status: answer.status, body: parsed }
     } catch (error) {
+      this.deps.onFailure?.(error, { component: 'embedding', operation: 'inference' })
       throw new AtomicCoreError(
         'EMBEDDING_UNAVAILABLE',
         'The embedding model did not answer.',
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
+        { cause: error }
       )
     } finally {
       target.release()
@@ -504,6 +516,11 @@ export class EmbeddingService {
     } catch (error) {
       const body = errorOf(error)
       if (body.code === 'EMBEDDING_UNAVAILABLE') throw error
+      this.deps.onFailure?.(error, {
+        component: 'embedding',
+        operation: mode === 'restart' ? 'restart' : 'load',
+        ...(engine?.version_backend ? { engineVersion: engine.version_backend } : {}),
+      })
       if (mode === 'restart') {
         this.onRestartFailed(body)
         throw error
@@ -566,6 +583,13 @@ export class EmbeddingService {
       message: `The embedding model exited unexpectedly with ${describeExit(exit)}.`,
       ...(tail ? { details: tail } : {}),
     }
+    this.deps.onFailure?.(new AtomicCoreError('EMBEDDING_UNAVAILABLE', error.message, error.details), {
+      component: 'embedding',
+      operation: 'exit',
+      reason: 'process_exit',
+      exitCode: exit.code,
+      signal: exit.signal,
+    })
     this.deps.log('warn', error.message)
     this.deps.emit('embedding:error', error)
     const restarts = nextRestartCount(this.state.restarts, this.now() - this.readySince)

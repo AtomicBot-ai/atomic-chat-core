@@ -2,6 +2,8 @@
  * The `/engines` layer through the compiled binary (change `unify-engine-lifecycle`, task 4.3):
  *
  *   - versions over the fixture mirror: the llama.cpp manifest and an sd.cpp manifest from `file://`;
+ *   - audio.cpp listed, installed and updated to the fork's build of the same version, the old one
+ *     removed and the active one refused;
  *   - a llama.cpp update applied by the core while a model runs from the fake `llama-server`: the
  *     model is unloaded, `version_backend` moves, the old pack goes;
  *   - another installed pack made active while a model runs;
@@ -23,9 +25,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { startBackendInstallFixture } from '../helpers/backend-install-e2e.js'
 import type { InstallFixture } from '../helpers/backend-install-e2e.js'
 import * as core from '../helpers/compiled-core.js'
-import { startReleaseMirror } from '../helpers/engine-builds-mirror.js'
+import { fakeAudiocppServer, launcherArchive, startReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
+import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
+import { geniexTestEnv, writeFakeGeniexHost } from '../helpers/geniex-host.js'
+import { makeZip } from '../helpers/make-zip.js'
 import {
   DESCRIPTOR_ID,
   DESCRIPTOR_URL,
@@ -571,6 +576,353 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_PLATFORM === null)('Foundry Local th
       const removed = await send(ready, 'DELETE', `/engines/foundry-local/builds/v2.1.0/${platform}`)
       expect(await removed.json()).toEqual({ removed: true })
       expect((await entry()).builds.map((build) => build.version)).toEqual(['v2.2.0'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------
+// LiteRT-LM (change add-litert-lm-runtime, task 4.5)
+// ---------------------------------------------------------------------------------------------
+
+const FAKE_LITERT_HOST = fileURLToPath(new URL('../helpers/fake-litert-host.mjs', import.meta.url))
+const LITERT_PLATFORM = process.platform === 'win32' ? null : liteRtLmTestPlatform()
+const ALL_LITERT_PLATFORMS = ['macos-arm64', 'linux-x64', 'linux-arm64', 'win-x64']
+const LITERT_LIBRARY: Record<string, string> = {
+  'macos-arm64': 'liblitert-lm.dylib',
+  'linux-x64': 'liblitert-lm.so',
+  'linux-arm64': 'liblitert-lm.so',
+  'win-x64': 'litert-lm.dll',
+}
+
+describe.skipIf(!existsSync(BIN) || LITERT_PLATFORM === null)('LiteRT-LM through /engines', () => {
+  it('lists, installs and updates the build, and never removes the one a model runs from', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const manifest = join(dataFolder, 'litert-lm-manifest.json')
+      const releases: unknown[] = []
+      const publish = async (version: string, publishedAt: string) => {
+        const assets = ALL_LITERT_PLATFORMS.map((platform) => {
+          const name = `litert_lm_api-${version}-py3-none-${platform}.whl`
+          const body = makeZip([
+            { name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from(version) },
+          ])
+          mirror.serve(`/packages/${version}/${name}`, body)
+          return {
+            platform,
+            url: `https://files.pythonhosted.org/packages/${version}/${name}`,
+            name,
+            size: body.length,
+            sha256: createHash('sha256').update(body).digest('hex'),
+          }
+        })
+        releases.unshift({ version, published_at: publishedAt, min_core_version: '0.1.0', abi: 1, assets })
+        await writeFile(manifest, JSON.stringify({ schema_version: 1, releases }))
+      }
+      const host = join(dataFolder, 'fake-litert-host')
+      await writeFile(
+        host,
+        `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_LITERT_HOST)} "$@"\n`,
+        {
+          mode: 0o755,
+        }
+      )
+      await publish('0.18.1', '2026-10-19T22:44:33Z')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find(
+          (candidate) => candidate.engine === 'litert-lm'
+        ) as Entry
+      const platform = LITERT_PLATFORM as string
+
+      expect(await entry(true)).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: '0.18.1', variant: platform },
+      })
+      const installed = await send(ready, 'POST', '/engines/litert-lm/update', {
+        task_id: 'lr-engines-1',
+        proxy,
+      })
+      expect(await installed.json()).toMatchObject({
+        updated: true,
+        active: { version: '0.18.1', variant: platform },
+      })
+
+      // A model runs from the build.
+      const model = join(dataFolder, 'litert-lm', 'models', 'e2e-lr-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.litertlm'), 'litertlm')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: litert-lm/models/e2e-lr-cpu/m.litertlm\nname: e2e-lr-cpu\nsize_bytes: 8\nlitert_lm:\n  model_id: m\n  variant_id: e2e-lr-cpu\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.litertlm\n  tools: false\n  reasoning: false\n  vision: false\n  source: huggingface\n`
+      )
+      const loaded = await send(ready, 'POST', '/models/litert-lm/e2e-lr-cpu/load', {})
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: '0.18.1',
+          variant: platform,
+          active: true,
+          in_use: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', `/engines/litert-lm/builds/0.18.1/${platform}`)
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      const viaBuilds = await send(ready, 'DELETE', `/engine-builds/litert-lm/0.18.1/${platform}`)
+      expect(viaBuilds.status).toBe(409)
+      expect(((await viaBuilds.json()) as { error: { code: string } }).error.code).toBe('BACKEND_IN_USE')
+      expect(existsSync(join(dataFolder, 'litert-lm', 'backends', '0.18.1', platform))).toBe(true)
+
+      // conf publishes 0.18.2: offered, installed; the model running from 0.18.1 is unloaded by it.
+      await publish('0.18.2', '2026-11-01T00:00:00Z')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: '0.18.2', variant: platform },
+      })
+      const updated = await send(ready, 'POST', '/engines/litert-lm/update', {
+        task_id: 'lr-engines-2',
+        proxy,
+      })
+      expect(await updated.json()).toMatchObject({ updated: true, active: { version: '0.18.2' } })
+      expect(
+        ((await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }).sessions
+      ).toEqual([])
+      const removed = await send(ready, 'DELETE', `/engines/litert-lm/builds/0.18.1/${platform}`)
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['0.18.2'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.5)
+// ---------------------------------------------------------------------------------------------
+
+const GENIEX_MIRROR = 'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex'
+
+describe.skipIf(!existsSync(BIN) || !POSIX)('GenieX through /engines', () => {
+  it('lists, installs and updates the build on a Snapdragon X host, and never removes the active one', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const manifest = join(dataFolder, 'geniex-manifest.json')
+      const releases: unknown[] = []
+      const publish = async (version: string, publishedAt: string) => {
+        const name = `geniex-sdk-windows-arm64-v${version}.zip`
+        const body = makeZip([{ name: 'sdk-windows-arm64/lib/geniex.dll', data: Buffer.from(version) }])
+        mirror.serve(`/qai-hub-geniex/${name}`, body)
+        releases.unshift({
+          version,
+          published_at: publishedAt,
+          min_core_version: '0.1.0',
+          abi: 1,
+          notes_url: `https://github.com/qualcomm/GenieX/releases/tag/v${version}`,
+          assets: [
+            {
+              platform: 'win-arm64',
+              url: `${GENIEX_MIRROR}/${name}`,
+              name,
+              size: body.length,
+              sha256: createHash('sha256').update(body).digest('hex'),
+            },
+          ],
+        })
+        await writeFile(manifest, JSON.stringify({ schema_version: 1, releases }))
+      }
+      const host = await writeFakeGeniexHost(join(dataFolder, 'fake-geniex-host'))
+      await publish('0.9.3', '2026-10-19T23:09:06Z')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_GENIEX_MANIFEST_URL: pathToFileURL(manifest).href,
+        ...geniexTestEnv(host),
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find((candidate) => candidate.engine === 'geniex') as Entry
+
+      expect(await entry(true)).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: '0.9.3', variant: 'win-arm64' },
+      })
+      const installed = await send(ready, 'POST', '/engines/geniex/update', {
+        task_id: 'gx-engines-1',
+        proxy,
+      })
+      expect(await installed.json()).toMatchObject({
+        updated: true,
+        active: { version: '0.9.3', variant: 'win-arm64' },
+      })
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: '0.9.3',
+          variant: 'win-arm64',
+          active: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      // A model runs from the build: in use, and refused on both routes.
+      const model = join(dataFolder, 'geniex', 'models', 'e2e-gx-cpu')
+      await mkdir(model, { recursive: true })
+      await writeFile(join(model, 'm.gguf'), 'gguf')
+      await writeFile(
+        join(model, 'model.yml'),
+        `model_path: geniex/models/e2e-gx-cpu/m.gguf\nname: e2e-gx-cpu\nsize_bytes: 4\ngeniex:\n  model_id: m\n  variant_id: e2e-gx-cpu\n  plugin: llama_cpp\n  backend: cpu\n  repo: o/r\n  revision: ${'a'.repeat(40)}\n  file: m.gguf\n  context_length: 4096\n  tools: false\n  reasoning: false\n  vision: false\n  source: huggingface\n`
+      )
+      const loaded = await send(ready, 'POST', '/models/geniex/e2e-gx-cpu/load', {})
+      expect(loaded.status, await loaded.clone().text()).toBe(200)
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: '0.9.3',
+          variant: 'win-arm64',
+          active: true,
+          in_use: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', '/engines/geniex/builds/0.9.3/win-arm64')
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      const viaBuilds = await send(ready, 'DELETE', '/engine-builds/geniex/0.9.3/win-arm64')
+      expect(viaBuilds.status).toBe(409)
+      expect(((await viaBuilds.json()) as { error: { code: string } }).error.code).toBe('BACKEND_IN_USE')
+      expect(existsSync(join(dataFolder, 'geniex', 'backends', '0.9.3', 'win-arm64'))).toBe(true)
+
+      // conf publishes 0.9.4: offered, installed; the model running from 0.9.3 is unloaded by it, and 0.9.3 is then removable.
+      await publish('0.9.4', '2026-11-01T00:00:00Z')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: '0.9.4', variant: 'win-arm64' },
+      })
+      const updated = await send(ready, 'POST', '/engines/geniex/update', { task_id: 'gx-engines-2', proxy })
+      expect(await updated.json()).toMatchObject({ updated: true, active: { version: '0.9.4' } })
+      expect(
+        ((await (await control(ready, '/sessions')).json()) as { sessions: unknown[] }).sessions
+      ).toEqual([])
+      const removed = await send(ready, 'DELETE', '/engines/geniex/builds/0.9.3/win-arm64')
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['0.9.4'])
+    } finally {
+      await mirror.close()
+    }
+  }, 120_000)
+})
+
+// ---------------------------------------------------------------------------------------------
+// audio.cpp
+// ---------------------------------------------------------------------------------------------
+
+/** The ids a host of the CI matrix picks; one fake archive (answering as a Metal build) serves them all. */
+const AUDIO_HOST_IDS = ['macos-arm64', 'linux-cpu-x64', 'linux-cpu-arm64', 'linux-vulkan-x64']
+
+describe.skipIf(!existsSync(BIN) || !POSIX)('audio.cpp through /engines', () => {
+  it('lists, installs and updates the build, and never removes the active one', async () => {
+    const mirror = await startReleaseMirror()
+    try {
+      const manifest = join(dataFolder, 'audiocpp-manifest.json')
+      const publish = async (tag: string) => {
+        const archive = await launcherArchive(dataFolder, `audio-${tag}.tar.gz`, {
+          audiocpp_server: fakeAudiocppServer(),
+        })
+        mirror.serve(`/releases/${tag}/audio.tar.gz`, archive.body)
+        await writeFile(
+          manifest,
+          JSON.stringify({
+            upstream_repo: 'AtomicBot-ai/audio.cpp',
+            tag_name: tag,
+            download_base: 'https://mirror.atomic.invalid/releases',
+            assets: AUDIO_HOST_IDS.map((backend) => ({
+              backend,
+              name: 'audio.tar.gz',
+              sha256: archive.sha256,
+              size: archive.size,
+            })),
+          })
+        )
+      }
+      await publish('v0.9.3')
+      const { ready } = await core.startDaemon(dataFolder, daemons, [], {
+        ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+      })
+      const proxy = mirror.proxy
+      const entry = async (force = false) =>
+        (await versions(ready, { force, proxy })).find(
+          (candidate) => candidate.engine === 'audio-cpp'
+        ) as Entry
+
+      const listed = await versions(ready, { force: true, proxy })
+      // Right after sd.cpp, on every desktop platform.
+      expect(listed.findIndex((candidate) => candidate.engine === 'audio-cpp')).toBe(
+        listed.findIndex((candidate) => candidate.engine === 'sd-cpp') + 1
+      )
+      const first = listed.find((candidate) => candidate.engine === 'audio-cpp') as Entry
+      expect(first).toMatchObject({
+        kind: 'engine-build',
+        active_choice: 'core',
+        builds: [],
+        active: null,
+        latest: { version: 'v0.9.3' },
+        source: 'remote',
+      })
+      expect(AUDIO_HOST_IDS).toContain(first.latest?.variant)
+
+      const installed = await send(ready, 'POST', '/engines/audio-cpp/update', {
+        task_id: 'audio-engines-1',
+        proxy,
+      })
+      const applied = (await installed.json()) as {
+        updated: boolean
+        active: { version: string; variant: string }
+      }
+      expect(applied).toMatchObject({ updated: true, active: { version: 'v0.9.3' } })
+      // A Vulkan host walks down to the CPU build: the fake carries no Vulkan backend.
+      const variant = applied.active.variant
+      expect((await entry()).builds).toEqual([
+        expect.objectContaining({
+          version: 'v0.9.3',
+          variant,
+          active: true,
+          removable: false,
+          not_removable_reason: 'active',
+        }),
+      ])
+      const viaEngines = await send(ready, 'DELETE', `/engines/audio-cpp/builds/v0.9.3/${variant}`)
+      expect(viaEngines.status).toBe(400)
+      expect(((await viaEngines.json()) as { error: { details?: string } }).error.details).toBe('active')
+      expect(existsSync(join(dataFolder, 'audio', 'backends', 'v0.9.3', variant))).toBe(true)
+
+      // conf publishes the fork's build of v0.9.3: newer, offered, installed; the bare tag is then removable.
+      await publish('v0.9.3-a1b2c3d4')
+      expect((await entry(true)).update).toMatchObject({
+        needed: true,
+        target: { version: 'v0.9.3-a1b2c3d4' },
+      })
+      const updated = await send(ready, 'POST', '/engines/audio-cpp/update', {
+        task_id: 'audio-engines-2',
+        proxy,
+      })
+      expect(await updated.json()).toMatchObject({
+        updated: true,
+        active: { version: 'v0.9.3-a1b2c3d4', variant },
+      })
+      const removed = await send(ready, 'DELETE', `/engines/audio-cpp/builds/v0.9.3/${variant}`)
+      expect(await removed.json()).toEqual({ removed: true })
+      expect((await entry()).builds.map((build) => build.version)).toEqual(['v0.9.3-a1b2c3d4'])
     } finally {
       await mirror.close()
     }

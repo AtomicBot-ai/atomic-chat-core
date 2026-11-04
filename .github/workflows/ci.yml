@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - run: bun install --frozen-lockfile
@@ -43,7 +43,7 @@ jobs:
         include:
           - os: ubuntu-latest
           - os: ubuntu-24.04-arm
-          - os: macos-14
+          - os: macos-15
           - { os: windows-2022, shard: 1/2 }
           - { os: windows-2022, shard: 2/2 }
           - { os: windows-11-arm, shard: 1/2 }
@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       # bun's package cache: without it an install takes 20-40 s on the Windows runners.
@@ -68,7 +68,7 @@ jobs:
       - if: runner.os == 'macOS'
         run: npm run test:coverage
         env:
-          # macos-14 has 3 vCPUs and Vitest forks one fewer worker than that by default.
+          # macos-15 has 3 vCPUs and Vitest forks one fewer worker than that by default.
           VITEST_MAX_FORKS: 3
       - if: runner.os != 'macOS'
         run: npm test -- ${{ matrix.shard && format('--shard={0}', matrix.shard) || '' }}
@@ -86,12 +86,12 @@ jobs:
       fail-fast: false
       matrix:
         # Same OS list as `unit`: the e2e suites drive the binary compiled on each of them.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-2022, windows-11-arm]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-15, windows-2022, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       # See `unit`.
@@ -103,9 +103,20 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: npm run build
       - run: npm run build:bin
+      # The first start of a freshly built binary on a Windows runner waits for Defender's scan of a
+      # 100 MB exe, past the 20 s the e2e helpers give a ready line (v0.20.0's gates, windows-11-arm:
+      # the first test of each file failed, every later start took 3 s). One start here absorbs it.
+      - name: Start each binary once so the e2e suites meet warm executables
+        shell: bash
+        # `build:bin` leaves a `.map` beside each binary; only the binaries start.
+        run: |
+          for bin in dist/bin/atomic-chat-*; do
+            case "$bin" in *.map) continue ;; esac
+            "$bin" --version
+          done
       - run: npm run test:e2e
         env:
-          # As in `unit`: all three of macos-14's vCPUs. The e2e suites mostly wait on the compiled
+          # As in `unit`: all three of macos-15's vCPUs. The e2e suites mostly wait on the compiled
           # binary and its fake engines. Empty elsewhere, which leaves Vitest's default.
           VITEST_MAX_FORKS: ${{ runner.os == 'macOS' && '3' || '' }}
       - uses: actions/upload-artifact@v4
@@ -121,12 +132,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, windows-11-arm, ubuntu-latest, ubuntu-24.04-arm, macos-14]
+        os: [windows-2022, windows-11-arm, ubuntu-latest, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - run: bun install --frozen-lockfile
@@ -163,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
-        with: { bun-version: 1.3.10 } # error-report stacks depend on its format
+        with: { bun-version: 1.4.4 } # error-report stacks depend on its format; 1.4+ is the first with bun:ffi on Windows arm64 (GenieX)
       - uses: actions/setup-node@v7
         with: { node-version: 22 }
       - run: bun install --frozen-lockfile

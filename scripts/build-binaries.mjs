@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildGeniexWorkerSource } from './build-geniex-worker.mjs'
 
 // Not `.pathname`: on Windows that is `/D:/…`, which neither `mkdirSync` nor `cwd` accepts.
 const ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -62,6 +63,9 @@ function assertDsnBaked(outfile) {
 const all = process.argv.includes('--all')
 const targets = all ? Object.keys(TARGETS) : [hostTarget()]
 mkdirSync(OUT_DIR, { recursive: true })
+// The GenieX host's Worker (change add-geniex-runtime, design D1) rides inside each binary as a string:
+// `scripts/build-geniex-worker.mjs` says why not as a second entrypoint.
+buildGeniexWorkerSource()
 
 for (const target of targets) {
   const triple = TARGETS[target]

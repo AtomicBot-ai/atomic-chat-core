@@ -18,8 +18,11 @@ describe('engine lifecycle contracts', () => {
       'llamacpp',
       'atomic-prism',
       'sd-cpp',
+      'audio-cpp',
       'mlx',
       'foundry-local',
+      'litert-lm',
+      'geniex',
       'tensorrt-llm',
       'vllm',
       'sglang',
@@ -35,8 +38,11 @@ describe('engine lifecycle contracts', () => {
     expect([...MANAGED_PROVIDER_IDS]).toEqual(['tensorrt-llm', 'vllm', 'sglang'])
     expect(ENGINE_IDS.filter((engine) => ENGINE_KINDS[engine] === 'engine-build')).toEqual([
       'sd-cpp',
+      'audio-cpp',
       'mlx',
       'foundry-local',
+      'litert-lm',
+      'geniex',
     ])
   })
 

@@ -8,6 +8,7 @@
 import { AtomicCoreError } from '../contracts/index.js'
 import type { EngineBuildId, EngineBuildRef } from '../contracts/index.js'
 import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/install.js'
+import { listInstalledAudioBuilds, prepareAudiocppTree, writeAudioInstallRecord } from '../audio/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { listDownloadedMlx, probeMlxServer, readBundledMlx, writeMlxInstallRecord } from './builds.js'
 import type { BundledMlx } from './builds.js'
@@ -17,20 +18,45 @@ import {
   prepareFoundryLocalTree,
   writeFoundryLocalInstallRecord,
 } from './foundry-local.js'
-import { FOUNDRY_LOCAL_C_API_VERSIONS, foundryLocalAssetUrl, mlxAssetUrl, sdcppAssetUrl } from './manifest.js'
-import type { FoundryLocalManifest, ManifestOf, MlxManifest, SdcppManifest } from './manifest.js'
+import { listLiteRtLmBuilds, prepareLiteRtLmTree, writeLiteRtLmInstallRecord } from './litert-lm.js'
+import { listGeniexBuilds, prepareGeniexTree, writeGeniexInstallRecord } from './geniex.js'
+import {
+  audiocppAssetUrl,
+  FOUNDRY_LOCAL_C_API_VERSIONS,
+  foundryLocalAssetUrl,
+  mlxAssetUrl,
+  sdcppAssetUrl,
+  SUPPORTED_GENIEX_ABI,
+  SUPPORTED_LITERT_LM_ABI,
+} from './manifest.js'
+import type {
+  AudiocppManifest,
+  FoundryLocalManifest,
+  GgmlReleaseAsset,
+  GgmlReleaseManifest,
+  GeniexManifest,
+  LiteRtLmManifest,
+  ManifestOf,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
 import { compareBuilds } from './order.js'
 import {
+  audioBackendKindOf,
+  audiocppHostChoice,
   backendKindOf,
   companionFor,
   foundryLocalHostChoice,
+  geniexHostChoice,
+  liteRtLmHostChoice,
   mlxHostChoice,
   readFailedBackends,
   rememberFailedBackend,
   sdcppHostChoice,
   sdcppHostOf,
 } from './select.js'
-import type { FoundryLocalHostPlatform } from './select.js'
+import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
@@ -40,21 +66,50 @@ export interface Build extends EngineBuildRef {
   published_at: string | null
   /** Foundry Local: the C API version recorded at install; `null` when unknown. */
   c_api_version?: number | null
+  /** LiteRT-LM and GenieX: the binding number recorded at install; `null` when unknown. */
+  abi?: number | null
+  /** GenieX: the device ids the install's probe found (`HTP0`, `GPUOpenCL`, `CPU`). */
+  devices?: string[]
+  /** GenieX: `geniex_version()` as the install's probe read it. */
+  library_version?: string | null
 }
+
+/**
+ * What a host's probe learns about an unpacked build beyond "it loads", kept in its install record
+ * (GenieX, task 4.4): the devices the library found and its own version. Hosts whose probe learns
+ * nothing to keep answer `void`.
+ */
+export interface EngineProbeFacts {
+  libraryVersion: string | null
+  devices: string[]
+}
+
+/**
+ * Which build of an engine with one archive per platform this host runs, or why none
+ * (`foundryLocalHostPlatform`, `liteRtLmHostPlatform`, `geniexHostPlatform`); an engine may carry
+ * more beside the platform (GenieX: the chip), which only its own row reads.
+ */
+export type EngineHostPlatform =
+  { platform: string; [fact: string]: unknown } | { platform: null; reason: string }
 
 /** What a row may read from the service's dependencies. */
 export interface EngineContext {
   /** This engine's `<data>/…/backends`. */
   root: string
-  failedBackendsFile: string
+  /** Where this engine remembers the rungs of its ladder that failed here; absent, it remembers none. */
+  failedBackendsFile: string | undefined
   resourcesDir?: string | undefined
   platform: NodeJS.Platform
   hardware: () => Promise<Pick<HardwareFacts, 'osType' | 'arch' | 'cpuExtensions' | 'gpus'>>
   log?: ((level: 'info' | 'warn', message: string) => void) | undefined
-  /** Which Foundry Local archive this host runs (`foundryLocalHostPlatform`), or why none. */
-  foundryLocalHost: FoundryLocalHostPlatform
-  /** `foundry-host probe --lib <dir>` of this core; throws `ENGINE_INSTALL_FAILED` with what it printed. */
-  foundryHostProbe?: ((libDir: string) => Promise<void>) | undefined
+  /** Which build of this engine the host runs, for the engines that are one archive per platform. */
+  hostPlatform: EngineHostPlatform
+  /**
+   * This core's own host mode run against an unpacked build (`foundry-host probe`, `litert-host
+   * probe`, `geniex-host probe`); throws `ENGINE_INSTALL_FAILED` with what it printed, and answers
+   * the facts the record keeps, when the host has any. Absent where this core has none.
+   */
+  hostProbe?: ((buildDir: string) => Promise<EngineProbeFacts | void>) | undefined
 }
 
 export interface HostChoice {
@@ -76,18 +131,26 @@ export interface BuildRecordInfo {
   publishedAt: string | null
   /** Foundry Local: the release's C API version. */
   cApiVersion: number | null
+  /** LiteRT-LM and GenieX: the release's binding number. */
+  abi: number | null
+  /** What the probe learned (`EngineProbeFacts`), for the hosts whose record keeps it. */
+  probe: EngineProbeFacts | null
 }
 
 export interface EngineDescriptor<M> {
   /** The release an install takes from the manifest, and the order key it carries. */
-  release(manifest: M): { tag: string; published_at: string | null; c_api_version?: number }
+  release(manifest: M): { tag: string; published_at: string | null; c_api_version?: number; abi?: number }
   hostChoice(ctx: EngineContext, manifest: M | null): Promise<HostChoice>
   /** The build's archive first, companions after; all unpack into one directory. */
   archives(manifest: M, backendId: string): ArchiveRef[]
   /** Fix the unpacked tree up before the probe; runs even when a test replaces the probe. */
   prepare?(staging: string, ctx: EngineContext): Promise<void>
-  /** Make the unpacked tree runnable and prove it runs here; throws `ENGINE_INSTALL_FAILED`. */
-  probe(staging: string, ctx: EngineContext): Promise<void>
+  /**
+   * Make the unpacked tree runnable and prove it runs here; throws `ENGINE_INSTALL_FAILED`. What it
+   * answers (if anything) reaches `record` as `info.probe`. `backendId` is the build being installed
+   * (audio.cpp checks the build carries that backend and, for a GPU build, sees a device).
+   */
+  probe(staging: string, ctx: EngineContext, backendId: string): Promise<EngineProbeFacts | void>
   /** The ownership marker and `install.json`. */
   record(staging: string, info: BuildRecordInfo): Promise<void>
   builds(ctx: EngineContext): Promise<Build[]>
@@ -105,6 +168,26 @@ const pin = (asset: { sha256?: string; size?: number }) => ({
   ...(asset.size !== undefined ? { size: asset.size } : {}),
 })
 
+/** The failed rungs of the engine's ladder on this machine; none when it keeps no file. */
+const failedRungs = (ctx: EngineContext): Promise<Set<string>> =>
+  ctx.failedBackendsFile ? readFailedBackends(ctx.failedBackendsFile) : Promise.resolve(new Set())
+
+const rememberRung = (ctx: EngineContext, tag: string, backendId: string): Promise<void> =>
+  ctx.failedBackendsFile ? rememberFailedBackend(ctx.failedBackendsFile, tag, backendId) : Promise.resolve()
+
+/** A ggml release's build and its companion (the Windows cudart beside the CUDA 12 build), as listed. */
+function ggmlArchives(
+  manifest: GgmlReleaseManifest,
+  backendId: string,
+  url: (manifest: GgmlReleaseManifest, asset: GgmlReleaseAsset) => string
+): ArchiveRef[] {
+  const ids = [backendId, companionFor(backendId)]
+  return ids.flatMap((id) => {
+    const asset = manifest.assets.find((candidate) => candidate.backend === id)
+    return asset ? [{ ...pin(asset), url: url(manifest, asset), name: asset.name }] : []
+  })
+}
+
 /** The newest of `builds` by the engine's order; the first one wins a tie. */
 function newest(engine: EngineBuildId, builds: Build[]): Build | undefined {
   let best: Build | undefined
@@ -117,15 +200,9 @@ const sdcpp: EngineDescriptor<SdcppManifest> = {
   async hostChoice(ctx, manifest) {
     const host = sdcppHostOf(await ctx.hardware())
     if (!manifest) return { ladder: [], backend_id: null, reason: 'The sd.cpp manifest is unavailable.' }
-    return sdcppHostChoice(host, manifest, await readFailedBackends(ctx.failedBackendsFile))
+    return sdcppHostChoice(host, manifest, await failedRungs(ctx))
   },
-  archives(manifest, backendId) {
-    const ids = [backendId, companionFor(backendId)]
-    return ids.flatMap((id) => {
-      const asset = manifest.assets.find((candidate) => candidate.backend === id)
-      return asset ? [{ ...pin(asset), url: sdcppAssetUrl(manifest, asset), name: asset.name }] : []
-    })
-  },
+  archives: (manifest, backendId) => ggmlArchives(manifest, backendId, sdcppAssetUrl),
   probe: (staging, ctx) =>
     prepareSdcppTree(staging, { platform: ctx.platform, ...(ctx.log ? { log: ctx.log } : {}) }),
   record: (staging, info) =>
@@ -152,7 +229,60 @@ const sdcpp: EngineDescriptor<SdcppManifest> = {
   },
   /** The newest install, which `selectModelInstall` hands the next load. */
   active: (builds) => builds[0],
-  rememberFailedRung: (ctx, tag, backendId) => rememberFailedBackend(ctx.failedBackendsFile, tag, backendId),
+  rememberFailedRung: rememberRung,
+}
+
+/**
+ * audio.cpp (`audiocpp_server`): sd.cpp's shape throughout — one tag, the host's ladder over the same
+ * backend ids (no ROCm), the cudart companion beside the Windows CUDA 12 build, flat archives (the
+ * fork's `.zip`s and upstream's `.tar.gz`s alike hold the server at their root), its own failed rungs.
+ * The probe runs `--version` (audio.cpp, carrying the build's backend) and, for a GPU build,
+ * `--list-devices` (a device of that kind is there); a failure sends the install down the ladder.
+ */
+const audiocpp: EngineDescriptor<AudiocppManifest> = {
+  release: (manifest) => ({ tag: manifest.tag_name, published_at: null }),
+  async hostChoice(ctx, manifest) {
+    const host = sdcppHostOf(await ctx.hardware())
+    if (!manifest) return { ladder: [], backend_id: null, reason: 'The audio.cpp manifest is unavailable.' }
+    return audiocppHostChoice(host, manifest, await failedRungs(ctx))
+  },
+  archives: (manifest, backendId) => ggmlArchives(manifest, backendId, audiocppAssetUrl),
+  async probe(staging, ctx, backendId) {
+    const backend = audioBackendKindOf(backendId)
+    if (!backend)
+      throw new AtomicCoreError('ENGINE_INSTALL_FAILED', `audio.cpp has no build for ${backendId}.`)
+    await prepareAudiocppTree(staging, backend, {
+      platform: ctx.platform,
+      ...(ctx.log ? { log: ctx.log } : {}),
+    })
+  },
+  async record(staging, info) {
+    const backend = audioBackendKindOf(info.backendId)
+    if (!backend)
+      throw new AtomicCoreError('ENGINE_INSTALL_FAILED', `audio.cpp has no build for ${info.backendId}.`)
+    await writeAudioInstallRecord(staging, {
+      tag: info.tag,
+      backendId: info.backendId,
+      backend,
+      engine: 'audio-cpp',
+      sha256: info.sha256,
+      installedAtMs: info.installedAtMs,
+      dir: staging,
+    })
+  },
+  async builds(ctx) {
+    return (await listInstalledAudioBuilds(ctx.root, ctx.platform)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: null,
+    }))
+  },
+  /** The newest install, as for sd.cpp: the build the audio service starts the next server from. */
+  active: (builds) => builds[0],
+  rememberFailedRung: rememberRung,
 }
 
 const mlx: EngineDescriptor<MlxManifest> = {
@@ -166,7 +296,8 @@ const mlx: EngineDescriptor<MlxManifest> = {
       .filter((asset) => asset.backend === backendId)
       .map((asset) => ({ ...pin(asset), url: mlxAssetUrl(manifest, asset), name: asset.name })),
   probe: (staging, ctx) => probeMlxServer(staging, { platform: ctx.platform }),
-  record: (staging, { cApiVersion: _cApiVersion, ...info }) => writeMlxInstallRecord(staging, info),
+  record: (staging, { cApiVersion: _cApiVersion, abi: _abi, probe: _probe, ...info }) =>
+    writeMlxInstallRecord(staging, info),
   async builds(ctx) {
     const out: Build[] = (await listDownloadedMlx(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -201,7 +332,7 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
     return { tag: newest.tag, published_at: newest.published_at, c_api_version: newest.c_api_version }
   },
   hostChoice: async (ctx, manifest) =>
-    foundryLocalHostChoice(ctx.foundryLocalHost, manifest?.releases[0] ?? null),
+    foundryLocalHostChoice(ctx.hostPlatform as FoundryLocalHostPlatform, manifest?.releases[0] ?? null),
   archives(manifest, backendId) {
     const release = manifest.releases[0]
     const asset = release?.assets.find((candidate) => candidate.platform === backendId)
@@ -211,14 +342,14 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
   },
   prepare: (staging, ctx) => prepareFoundryLocalTree(staging, ctx.platform),
   async probe(staging, ctx) {
-    if (!ctx.foundryHostProbe)
+    if (!ctx.hostProbe)
       throw new AtomicCoreError(
         'ENGINE_INSTALL_FAILED',
         'This core has no Foundry Local host to check the build with.'
       )
-    await ctx.foundryHostProbe(staging)
+    await ctx.hostProbe(staging)
   },
-  record: (staging, info) => writeFoundryLocalInstallRecord(staging, info),
+  record: (staging, { abi: _abi, probe: _probe, ...info }) => writeFoundryLocalInstallRecord(staging, info),
   async builds(ctx) {
     return (await listFoundryLocalBuilds(ctx.root)).map((record) => ({
       tag: record.tag,
@@ -240,8 +371,108 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
     ),
 }
 
+/**
+ * LiteRT-LM (change `add-litert-lm-runtime`, task 4.4): the host's wheel of the newest release; the
+ * native part of it goes to `lib/`, `litert-host probe --lib <staging>` of this core proves it loads.
+ */
+const liteRtLm: EngineDescriptor<LiteRtLmManifest> = {
+  release: (manifest) => {
+    const newest = manifest.releases[0] as LiteRtLmManifest['releases'][number]
+    return { tag: newest.version, published_at: newest.published_at, abi: newest.abi }
+  },
+  hostChoice: async (ctx, manifest) =>
+    liteRtLmHostChoice(ctx.hostPlatform as LiteRtLmHostPlatform, manifest?.releases[0] ?? null),
+  archives(manifest, backendId) {
+    const asset = manifest.releases[0]?.assets.find((candidate) => candidate.platform === backendId)
+    return asset ? [{ url: asset.url, name: asset.name, sha256: asset.sha256, size: asset.size }] : []
+  },
+  prepare: (staging) => prepareLiteRtLmTree(staging),
+  async probe(staging, ctx) {
+    if (!ctx.hostProbe)
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'This core has no LiteRT-LM host to check the build with.'
+      )
+    await ctx.hostProbe(staging)
+  },
+  record: (staging, { cApiVersion: _cApiVersion, probe: _probe, ...info }) =>
+    writeLiteRtLmInstallRecord(staging, info),
+  async builds(ctx) {
+    return (await listLiteRtLmBuilds(ctx.root)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: record.publishedAt,
+      abi: record.abi,
+    }))
+  },
+  /** The newest by `published_at` among the builds whose ABI this core's host binds (design D2). */
+  active: (builds) =>
+    newest(
+      'litert-lm',
+      builds.filter((build) => build.abi != null && SUPPORTED_LITERT_LM_ABI.includes(build.abi))
+    ),
+}
+
+/**
+ * GenieX (change `add-geniex-runtime`, task 4.4): the SDK zip of the newest release; `lib/**` of it
+ * goes to the build, `geniex-host probe --lib <staging>` of this core proves the library loads and
+ * names the devices it sees, which the record keeps for `GET /runtimes/geniex/accelerators`.
+ */
+const geniex: EngineDescriptor<GeniexManifest> = {
+  release: (manifest) => {
+    const newest = manifest.releases[0] as GeniexManifest['releases'][number]
+    return { tag: newest.version, published_at: newest.published_at, abi: newest.abi }
+  },
+  hostChoice: async (ctx, manifest) =>
+    geniexHostChoice(ctx.hostPlatform as GeniexHostPlatform, manifest?.releases[0] ?? null),
+  archives(manifest, backendId) {
+    const asset = manifest.releases[0]?.assets.find((candidate) => candidate.platform === backendId)
+    return asset ? [{ url: asset.url, name: asset.name, sha256: asset.sha256, size: asset.size }] : []
+  },
+  prepare: (staging) => prepareGeniexTree(staging),
+  async probe(staging, ctx) {
+    if (!ctx.hostProbe)
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'This core has no GenieX host to check the build with.'
+      )
+    return ctx.hostProbe(staging)
+  },
+  record: (staging, { cApiVersion: _cApiVersion, probe, ...info }) =>
+    writeGeniexInstallRecord(staging, {
+      ...info,
+      libraryVersion: probe?.libraryVersion ?? null,
+      devices: probe?.devices ?? [],
+    }),
+  async builds(ctx) {
+    return (await listGeniexBuilds(ctx.root)).map((record) => ({
+      tag: record.tag,
+      backend_id: record.backendId,
+      origin: 'downloaded',
+      dir: record.dir,
+      installed_at_ms: record.installedAtMs,
+      published_at: record.publishedAt,
+      abi: record.abi,
+      devices: record.devices,
+      library_version: record.libraryVersion,
+    }))
+  },
+  /** The newest by `published_at` among the builds whose ABI this core's host binds (design D2). */
+  active: (builds) =>
+    newest(
+      'geniex',
+      builds.filter((build) => build.abi != null && SUPPORTED_GENIEX_ABI.includes(build.abi))
+    ),
+}
+
 export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<ManifestOf[K]> } = {
   'sd-cpp': sdcpp,
   'mlx': mlx,
   'foundry-local': foundryLocal,
+  'litert-lm': liteRtLm,
+  'geniex': geniex,
+  'audio-cpp': audiocpp,
 }

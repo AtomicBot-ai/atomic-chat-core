@@ -11,15 +11,21 @@ import { runAppDaemon } from './host/app-daemon.js'
 import { createCoreReporter } from './telemetry/index.js'
 
 // The Foundry Local host (change add-foundry-local, design D1): the app's core starts its own binary
-// in this hidden mode, one process per model; it never reaches the daemon.
+// in this hidden mode, one process per model; it never reaches the daemon. The same public entry `atc`
+// uses (change close-cli-core-gaps, D1).
 if (process.argv[2] === 'foundry-host') {
-  const host = await import('./runtime/foundry-local/index.js')
-  process.exit(
-    await host.runFoundryHost(process.argv.slice(3), {
-      ...host.lineIo(nodeCliIo()),
-      loadLibrary: host.loadLibraryWithBun,
-    })
-  )
+  const { runFoundryHostMain } = await import('./runtime/foundry-local/foundry-host.js')
+  process.exit(await runFoundryHostMain(process.argv.slice(3)))
+}
+// The LiteRT-LM host (change add-litert-lm-runtime, design D1), the same way.
+if (process.argv[2] === 'litert-host') {
+  const { runLiteRtHostMain } = await import('./runtime/litert-lm/litert-host.js')
+  process.exit(await runLiteRtHostMain(process.argv.slice(3)))
+}
+// The GenieX host (change add-geniex-runtime, design D1), the same way.
+if (process.argv[2] === 'geniex-host') {
+  const { runGeniexHostMain } = await import('./runtime/geniex/geniex-host.js')
+  process.exit(await runGeniexHostMain(process.argv.slice(3)))
 }
 
 await runAppDaemon({

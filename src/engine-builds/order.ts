@@ -8,6 +8,11 @@
  *     rebuilds of one tag are equal: their shas carry no order.
  *   - MLX: `published_at` of the GitHub release. The tags are commit hashes.
  *   - Foundry Local: `published_at` of the `microsoft/foundry-local` release, like MLX.
+ *   - LiteRT-LM: `published_at` of the PyPI release (change `add-litert-lm-runtime`, task 4.4).
+ *   - GenieX: `published_at` of the SDK release on Qualcomm's mirror (change `add-geniex-runtime`, task 4.4).
+ *   - audio.cpp: the semver `X.Y.Z` of `vX.Y.Z[-a<rev>]`; at an equal version the Atomic fork's build
+ *     (`-a<rev>`) is newer than the bare upstream tag, and two fork builds of one version are equal,
+ *     as for sd.cpp.
  *
  * A build whose order cannot be read (a dev stub, an installer without `mlx-server.json`) is older
  * than every build whose order can, so any verified build replaces it.
@@ -18,7 +23,7 @@ import { isDateTime } from './manifest.js'
 
 export interface OrderedBuild {
   tag: string
-  /** MLX and Foundry Local. */
+  /** MLX, Foundry Local, LiteRT-LM and GenieX. */
   published_at?: string | null
 }
 
@@ -29,7 +34,14 @@ export function sdcppBuildKey(tag: string): [number, number] | null {
   return [Number(match[1]), match[2] ? 1 : 0]
 }
 
-/** MLX and Foundry Local: the release date. */
+/** `[major, minor, patch, 1 for an Atomic build]`, or `null` for a tag that is not an audio.cpp release. */
+export function audiocppBuildKey(tag: string): [number, number, number, number] | null {
+  const match = /^v(\d+)\.(\d+)\.(\d+)(-a[0-9a-f]+)?$/.exec(tag)
+  if (!match) return null
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] ? 1 : 0]
+}
+
+/** MLX, Foundry Local and LiteRT-LM: the release date. */
 function publishedKey(build: OrderedBuild): [number] | null {
   return isDateTime(build.published_at) ? [Date.parse(build.published_at)] : null
 }
@@ -48,6 +60,9 @@ const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number
   'sd-cpp': (build) => sdcppBuildKey(build.tag),
   'mlx': publishedKey,
   'foundry-local': publishedKey,
+  'litert-lm': publishedKey,
+  'geniex': publishedKey,
+  'audio-cpp': (build) => audiocppBuildKey(build.tag),
 }
 
 /** Negative when `a` is older, positive when newer, zero when neither is. */

@@ -64,9 +64,31 @@ describe('runCli', () => {
     ])
     expect(node.exitCode).toBe(3)
     expect(node.stderr).toMatch(
-      /^foundry_local does not load from \/nowhere: .*compiled atomic-chat-core binaries only/
+      /^foundry_local does not load from \/nowhere: .*only inside a compiled binary/
     )
     expect(USAGE).not.toContain('foundry-host')
+  })
+
+  it('runs the hidden litert-host mode: a usage error is 2, and under Node the library cannot load (3)', async () => {
+    const usage = await run(['litert-host', 'probe'])
+    expect(usage.exitCode).toBe(2)
+    expect(usage.stderr).toBe('--lib is required\n')
+    const node = await run(['litert-host', 'probe', '--lib', '/nowhere'])
+    expect(node.exitCode).toBe(3)
+    expect(node.stderr).toMatch(/^LiteRT-LM does not load from \/nowhere: .*only inside a compiled binary/)
+    expect(USAGE).not.toContain('litert-host')
+  })
+
+  it('runs the hidden geniex-host mode: a usage error is 2, and under Node there is no Worker to load the library in (3)', async () => {
+    const usage = await run(['geniex-host', 'probe'])
+    expect(usage.exitCode).toBe(2)
+    expect(usage.stderr).toBe('--lib is required\n')
+    const node = await run(['geniex-host', 'probe', '--lib', '/nowhere'])
+    expect(node.exitCode).toBe(3)
+    expect(node.stderr).toMatch(
+      /^GenieX does not load from \/nowhere: .*only inside a compiled binary \(no Worker\)/
+    )
+    expect(USAGE).not.toContain('geniex-host')
   })
 
   it('rejects an unknown command with usage on stderr', async () => {

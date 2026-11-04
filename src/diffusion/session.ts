@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * Session lifecycle: bringing `sd-server` up from a `ServerSpec`, tearing it down, and describing
  * the result as the status and capabilities the app reads. Every state change here emits
@@ -42,6 +43,8 @@ export type DiffusionEmitter = <K extends DiffusionEventName>(name: K, payload: 
 export type DiffusionLogger = (level: 'info' | 'warn' | 'debug', msg: string) => void
 
 export interface SessionDeps {
+  onFailure?: FailureObserver
+
   state: DiffusionState
   emit: DiffusionEmitter
   log: DiffusionLogger
@@ -284,6 +287,7 @@ export async function loadFromSpec(
     started = await spawnFallingBack(deps, spec, signal)
   } catch (raw) {
     const error = toDiffusionError(raw)
+    deps.onFailure?.(error, { component: 'diffusion', operation: 'load' })
     const body = errorBody(error)
     state.setModelState('failed', body)
     await emitState(deps, 'load-failed')

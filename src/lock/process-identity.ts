@@ -19,8 +19,8 @@ export interface IdentityDeps {
   platform?: NodeJS.Platform
   /** Read a procfs entry (Linux). */
   readText?: (path: string) => Promise<string>
-  /** Run a probe and return its stdout. */
-  run?: (file: string, args: string[]) => Promise<string>
+  /** Run a probe and return its stdout; `env` is laid over this process's environment. */
+  run?: (file: string, args: string[], env?: Record<string, string>) => Promise<string>
   /** Signal-0 liveness probe. */
   alive?: (pid: number) => boolean
 }
@@ -45,13 +45,39 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export function runProbe(file: string, args: string[]): Promise<string> {
+export function runProbe(file: string, args: string[], env?: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: IDENTITY_PROBE_TIMEOUT_MS, windowsHide: true }, (err, stdout) => {
-      if (err) reject(err)
-      else resolve(stdout)
-    })
+    execFile(
+      file,
+      args,
+      {
+        timeout: IDENTITY_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+        ...(env ? { env: { ...process.env, ...env } } : {}),
+      },
+      (err, stdout) => {
+        if (err) reject(err)
+        else resolve(stdout)
+      }
+    )
   })
+}
+
+/**
+ * What `ps` prints depends on the locale and the time zone of whoever runs it; an identity compared
+ * later by another process (a core started from another terminal, a laptop in another zone) must not.
+ */
+const PINNED_PS_ENV = { LC_ALL: 'C', TZ: 'UTC' }
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** `Mon Oct 19 10:33:52 2026` (C locale, UTC) → seconds since the epoch; `undefined` for anything else. */
+function utcLstartSeconds(text: string): number | undefined {
+  const m = /^[A-Z][a-z]{2} ([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(text)
+  const month = m ? MONTHS.indexOf(m[1] as string) : -1
+  if (!m || month < 0) return undefined
+  const [day, h, min, sec, year] = m.slice(2).map(Number) as [number, number, number, number, number]
+  return Date.UTC(year, month, day, h, min, sec) / 1000
 }
 
 /**
@@ -78,19 +104,19 @@ export async function processStartId(pid: number, deps: IdentityDeps = {}): Prom
     if (platform === 'darwin') {
       // `lstart` has one-second resolution; a PID reused inside the same second is indistinguishable,
       // which the takeover path treats as "unknown", never as a free lock.
-      const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)])
+      const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], PINNED_PS_ENV)
       const value = out.trim().replace(/\s+/g, ' ')
-      return value ? `darwin:${value}` : undefined
+      return value ? `darwin-utc:${value}` : undefined
     }
     if (platform === 'win32') {
       const out = await run('powershell.exe', [
         '-NoProfile',
         '-NonInteractive',
         '-Command',
-        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.Ticks`,
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
       ])
       const value = out.trim()
-      return /^\d+$/.test(value) ? `win32:${value}` : undefined
+      return /^\d+$/.test(value) ? `win32-utc:${value}` : undefined
     }
   } catch {
     return undefined // process gone, probe missing or refused
@@ -118,9 +144,9 @@ export async function processStartEpoch(pid: number, deps: IdentityDeps = {}): P
       return `epoch:${Math.floor(boot + ticks / 100)}`
     }
     if (platform === 'darwin') {
-      const out = (await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)])).trim()
-      const epoch = Math.floor(Date.parse(out) / 1000)
-      return Number.isFinite(epoch) ? `epoch:${epoch}` : undefined
+      const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], PINNED_PS_ENV)
+      const epoch = utcLstartSeconds(out.trim().replace(/\s+/g, ' '))
+      return epoch === undefined ? undefined : `epoch:${epoch}`
     }
     if (platform === 'win32') {
       const out = await run('powershell.exe', [
@@ -177,9 +203,59 @@ export async function verifyProcessIdentity(
   const alive = deps.alive ?? isProcessAlive
   if (!alive(pid)) return 'dead'
   if (!expected) return 'unknown'
+  // Written before identities were pinned: in the writer's locale and zone, which this reader cannot
+  // know. Equal still proves it; a difference proves nothing, so it never frees what the owner holds.
+  if (/^(darwin|win32):/.test(expected)) {
+    const legacy = await legacyStartId(pid, deps)
+    return legacy !== undefined && legacy === expected ? 'match' : 'unknown'
+  }
   const actual = await processStartId(pid, deps)
   if (!actual) return 'unknown'
   return actual === expected ? 'match' : 'mismatch'
+}
+
+/** The identity as cores before 0.18.3 wrote it: `ps` in the C locale and local zone, local ticks. */
+async function legacyStartId(pid: number, deps: IdentityDeps): Promise<string | undefined> {
+  const platform = deps.platform ?? process.platform
+  const run = deps.run ?? runProbe
+  try {
+    if (platform === 'darwin') {
+      const out = await run('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { LC_ALL: 'C' })
+      const value = out.trim().replace(/\s+/g, ' ')
+      return value ? `darwin:${value}` : undefined
+    }
+    if (platform === 'win32') {
+      const out = await run('powershell.exe', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.Ticks`,
+      ])
+      const value = out.trim()
+      return /^\d+$/.test(value) ? `win32:${value}` : undefined
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * Compare a recorded start time (`epoch:<seconds>`, `processStartEpoch`) with the live process. Seconds
+ * since the epoch read the same in every locale and zone, so a difference is proof of another process
+ * behind the PID; a second either way is the same start read at a different instant.
+ */
+export async function verifyStartEpoch(
+  pid: number,
+  expected: string | null | undefined,
+  deps: IdentityDeps = {}
+): Promise<IdentityVerdict> {
+  const alive = deps.alive ?? isProcessAlive
+  if (!alive(pid)) return 'dead'
+  const want = Number(/^epoch:(\d+)$/.exec(expected ?? '')?.[1])
+  const got = Number(/^epoch:(\d+)$/.exec((await processStartEpoch(pid, deps)) ?? '')?.[1])
+  if (!Number.isFinite(want) || !Number.isFinite(got)) return 'unknown'
+  return Math.abs(want - got) <= 1 ? 'match' : 'mismatch'
 }
 
 /** Only a proven-gone process releases what it held. */

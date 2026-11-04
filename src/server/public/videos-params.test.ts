@@ -214,6 +214,9 @@ describe('the video object', () => {
       atomic: { job_id: 'j1', seed: 5, path: '/videos/j1.webm', poster_path: '/videos/j1.thumb.png' },
     })
     expect(videoObjectFromItem({ ...item, fps: 0 }).seconds).toBe('0')
+    // A provider's clip whose model takes no seed has none to report.
+    const { seed: _seed, ...unseeded } = item.recipe
+    expect(videoObjectFromItem({ ...item, recipe: unseeded }).atomic.seed).toBeNull()
     for (const [state, status] of [
       ['queued', 'queued'],
       ['generating', 'in_progress'],

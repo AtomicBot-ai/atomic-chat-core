@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ErrorReport } from '../../telemetry/index.js'
 import { sseEvent } from './forward.js'
+import type { LocalTarget } from './types.js'
 import {
   closeAll,
   closedPort,
@@ -63,6 +64,158 @@ describe('compute failures', () => {
   })
 })
 
+describe('refusals before the engine', () => {
+  it("answers a model nothing serves with OpenAI's model_not_found envelope on every model route", async () => {
+    const server = await startPublic({ sessions: [localSession(await closedPort())] })
+
+    for (const path of ['/chat/completions', '/messages', '/completions', '/embeddings']) {
+      const res = await postJson(server, path, {
+        model: 'ghost',
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+      expect(res.status, path).toBe(404)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      expect(await res.json(), path).toEqual({
+        error: {
+          message: "No running session found for model 'ghost'",
+          type: 'invalid_request_error',
+          param: 'model',
+          code: 'model_not_found',
+        },
+      })
+    }
+  })
+
+  it('refuses an empty conversation with a 400 and never asks the local engine', async () => {
+    let calls = 0
+    const { port } = await startUpstream((_req, _body, res) => {
+      calls++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"choices":[{"message":{"content":"unsolicited"}}]}')
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    for (const path of ['/chat/completions', '/messages']) {
+      const res = await postJson(server, path, { model: 'demo', max_tokens: 8, messages: [] })
+      expect(res.status, path).toBe(400)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      expect(await res.json(), path).toMatchObject({
+        error: { type: 'invalid_request_error', param: 'messages', code: 'empty_array' },
+      })
+    }
+    expect(calls).toBe(0)
+
+    const ok = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'hi' }],
+    })
+    expect(ok.status).toBe(200)
+    expect(calls).toBe(1)
+  })
+
+  it('refuses a chat role OpenAI does not define on every local engine, and passes the roles clients send', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"choices":[{"message":{"content":"VALIDATION_TEST"}}]}')
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(port),
+        localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' }),
+        localSession(port, { provider: 'vllm', modelId: 'vllm-model' }),
+      ],
+    })
+
+    for (const model of ['demo', 'mlx-model', 'vllm-model']) {
+      const res = await postJson(server, '/chat/completions', {
+        model,
+        max_tokens: 64,
+        messages: [{ role: 'not-a-real-role', content: 'Reply exactly VALIDATION_TEST.' }],
+      })
+      expect(res.status, model).toBe(400)
+      expect(res.headers.get('content-type'), model).toBe('application/json')
+      expect(await res.json(), model).toEqual({
+        error: {
+          message:
+            "Invalid value for 'messages[0].role': 'not-a-real-role'. Supported values are: 'system', 'developer', 'user', 'assistant' and 'tool'.",
+          type: 'invalid_request_error',
+          param: 'messages[0].role',
+          code: 'invalid_value',
+        },
+      })
+    }
+    const missing = await postJson(server, '/chat/completions', {
+      model: 'demo',
+      messages: [{ content: 'x' }],
+    })
+    expect(await missing.json()).toMatchObject({
+      error: { param: 'messages[0].role', code: 'missing_required_parameter' },
+    })
+    expect(seen).toEqual([])
+
+    const conversation = [
+      { role: 'system', content: 'Be brief.' },
+      { role: 'developer', content: 'Use tools.' },
+      { role: 'user', content: [{ type: 'text', text: 'What is 6 x 7?' }] },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'c1', type: 'function', function: { name: 'mul', arguments: '{"a":6,"b":7}' } }],
+      },
+      { role: 'tool', tool_call_id: 'c1', content: '42' },
+    ]
+    const ok = await postJson(server, '/chat/completions', { model: 'demo', messages: conversation })
+    expect(ok.status).toBe(200)
+    expect(seen.map((body) => JSON.parse(body).messages)).toEqual([conversation])
+  })
+
+  it('refuses a mixed embeddings input to a local session and passes the OpenAI forms', async () => {
+    const seen: unknown[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(JSON.parse(body).input)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"object":"list","data":[]}')
+    })
+    const server = await startPublic({
+      sessions: [localSession(port, { modelId: 'nomic-embed-text-v1.5', isEmbedding: true })],
+    })
+    const embed = (input: unknown) =>
+      postJson(server, '/embeddings', { model: 'nomic-embed-text-v1.5', input })
+
+    for (const input of [['test', 7], ['alpha', 7, 'omega'], [[1, 2], ['x']], [1, 2.5], 7]) {
+      const res = await embed(input)
+      expect(res.status, JSON.stringify(input)).toBe(400)
+      expect(res.headers.get('content-type')).toBe('application/json')
+      expect(await res.json()).toMatchObject({ error: { type: 'invalid_request_error', param: 'input' } })
+    }
+    expect(seen).toEqual([])
+
+    const valid = ['alpha', ['alpha', 'omega'], [101, 7], [[101, 7], [0]]]
+    for (const input of valid) expect((await embed(input)).status, JSON.stringify(input)).toBe(200)
+    expect(seen).toEqual(valid)
+  })
+
+  it('leaves the roles and the input to a remote provider, which validates its own requests', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url ?? '')
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    const server = await startPublic({ remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1` })] })
+
+    const chat = await postJson(server, '/chat/completions', {
+      model: 'cloud-model',
+      messages: [{ role: 'not-a-real-role', content: 'x' }],
+    })
+    const embeddings = await postJson(server, '/embeddings', { model: 'cloud-model', input: ['alpha', 7] })
+    expect([chat.status, embeddings.status]).toEqual([200, 200])
+    expect(seen).toEqual(['/v1/chat/completions', '/v1/embeddings'])
+  })
+})
+
 describe('remote providers', () => {
   it('reports an unreachable provider as a gateway failure, not a retriable outage', async () => {
     const port = await closedPort()
@@ -121,7 +274,341 @@ describe('sseEvent', () => {
   })
 })
 
+describe('Anthropic thinking on a llama.cpp engine (QA B08)', () => {
+  // What Claude Code sends for its session title to a model it does not know: no `thinking`, the
+  // default 32k output budget, a short system prompt and the user's first message.
+  const titleRequest = {
+    model: 'demo',
+    max_tokens: 32000,
+    stream: true,
+    system: [
+      { type: 'text', text: 'You are naming a coding session. Return JSON with a single "title" field.' },
+    ],
+    messages: [{ role: 'user', content: '<session>how are you?</session>' }],
+  }
+  const anthropicReply = JSON.stringify({ type: 'message', content: [{ type: 'text', text: '{}' }] })
+
+  it("sends a request that asks for no thinking with the template's thinking turned off, and nothing else changed", async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, ...JSON.parse(body) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    expect((await postJson(server, '/messages', titleRequest)).status).toBe(200)
+    expect(
+      (await postJson(server, '/messages', { ...titleRequest, thinking: { type: 'disabled' } })).status
+    ).toBe(200)
+    expect(seen).toEqual([
+      { url: '/v1/messages', ...titleRequest, chat_template_kwargs: { enable_thinking: false } },
+      {
+        url: '/v1/messages',
+        ...titleRequest,
+        thinking: { type: 'disabled' },
+        chat_template_kwargs: { enable_thinking: false },
+      },
+    ])
+  })
+
+  it('passes a request that asks for thinking, or sets the switch itself, byte for byte', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const asked = [
+      { ...titleRequest, thinking: { type: 'adaptive' } },
+      { ...titleRequest, thinking: { type: 'enabled', budget_tokens: 4096 } },
+      { ...titleRequest, chat_template_kwargs: { enable_thinking: true } },
+    ]
+    for (const body of asked) expect((await postJson(server, '/messages', body)).status).toBe(200)
+    expect(seen).toEqual(asked.map((body) => JSON.stringify(body)))
+  })
+
+  it('turns thinking off on the chat-completions fallback too', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        // What a strict chat template answers for a system message after the first turn.
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'fine' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', { ...titleRequest, stream: false })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ content: [{ type: 'text', text: 'fine' }] })
+    expect(seen.map((s) => s.url)).toEqual(['/v1/messages', '/v1/chat/completions'])
+    expect(seen[1]?.body).toMatchObject({ chat_template_kwargs: { enable_thinking: false } })
+  })
+
+  it("keeps the request's max_tokens on a llama.cpp fallback, and only there", async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'fine' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(port),
+        localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' }),
+      ],
+    })
+
+    // Claude Code's own turn asks for adaptive thinking: the template keeps thinking, the cap stays.
+    const turn = { ...titleRequest, stream: false, thinking: { type: 'adaptive' } }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect((await postJson(server, '/messages', { ...turn, model: 'mlx-model' })).status).toBe(200)
+
+    const fallbacks = seen.filter((s) => s.url === '/v1/chat/completions').map((s) => s.body)
+    expect(fallbacks).toHaveLength(2)
+    expect(fallbacks[0]).toMatchObject({ model: 'demo', max_tokens: 32000 })
+    expect(fallbacks[0]).not.toHaveProperty('chat_template_kwargs')
+    expect(fallbacks[1]).toMatchObject({ model: 'mlx-model' })
+    expect(fallbacks[1]).not.toHaveProperty('max_tokens')
+  })
+
+  it('answers a turn with system messages in its conversation natively, each kept in place', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const turn = {
+      model: 'demo',
+      max_tokens: 32000,
+      thinking: { type: 'adaptive' },
+      system: [{ type: 'text', text: 'You are Claude Code.' }],
+      messages: [
+        { role: 'user', content: 'how are you?' },
+        { role: 'assistant', content: [{ type: 'text', text: 'Fine.' }] },
+        { role: 'system', content: 'The user switched to plan mode.' },
+        { role: 'user', content: 'and now?' },
+      ],
+    }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect(seen).toEqual([
+      {
+        url: '/v1/messages',
+        body: {
+          ...turn,
+          // The system prompt llama.cpp has cached is not touched: the reminder joins the next user turn.
+          messages: [
+            turn.messages[0],
+            turn.messages[1],
+            {
+              role: 'user',
+              content: '<system-reminder>\nThe user switched to plan mode.\n</system-reminder>\n\nand now?',
+            },
+          ],
+        },
+      },
+    ])
+  })
+
+  it('keeps the reminder in place on the chat-completions fallback too', async () => {
+    const seen: Array<{ url: string | undefined; body: Record<string, unknown> }> = []
+    const { port } = await startUpstream((req, body, res) => {
+      seen.push({ url: req.url, body: JSON.parse(body) })
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'Failed to parse tool call' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const turn = {
+      model: 'demo',
+      max_tokens: 100,
+      thinking: { type: 'adaptive' },
+      system: 'You are Claude Code.',
+      messages: [
+        { role: 'user', content: 'how are you?' },
+        { role: 'assistant', content: 'Fine.' },
+        { role: 'system', content: 'Plan mode.' },
+        { role: 'user', content: 'and now?' },
+      ],
+    }
+    expect((await postJson(server, '/messages', turn)).status).toBe(200)
+    expect(seen[1]?.body['messages']).toEqual([
+      { role: 'system', content: 'You are Claude Code.' },
+      { role: 'user', content: 'how are you?' },
+      { role: 'assistant', content: 'Fine.' },
+      { role: 'user', content: '<system-reminder>\nPlan mode.\n</system-reminder>\n\nand now?' },
+    ])
+  })
+
+  it('leaves /messages to an engine other than llama.cpp as sent', async () => {
+    const seen: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      seen.push(body)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(anthropicReply)
+    })
+    const server = await startPublic({
+      sessions: [localSession(port, { provider: 'mlx', modelId: 'mlx-model', apiKey: '' })],
+    })
+
+    const body = { ...titleRequest, model: 'mlx-model' }
+    expect((await postJson(server, '/messages', body)).status).toBe(200)
+    expect(seen).toEqual([JSON.stringify(body)])
+  })
+})
+
+describe('a context overflow on /v1/messages (audit X1)', () => {
+  // What llama.cpp b12019 answers, streamed or not, for a prompt its window cannot hold.
+  const overflow = JSON.stringify({
+    error: {
+      code: 400,
+      message: 'request (70000 tokens) exceeds the available context size (65536 tokens), try increasing it',
+      type: 'exceed_context_size_error',
+      n_prompt_tokens: 70000,
+      n_ctx: 65536,
+    },
+  })
+  const promptTooLong = {
+    type: 'error',
+    error: { type: 'invalid_request_error', message: 'prompt is too long: 70000 tokens > 65536 maximum' },
+  }
+  const turn = { model: 'demo', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }
+
+  it("answers in the Anthropic API's words, which make Claude Code compact, without a fallback", async () => {
+    const seen: Array<string | undefined> = []
+    const { port } = await startUpstream((req, _body, res) => {
+      seen.push(req.url)
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(overflow)
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.json()).toEqual(promptTooLong)
+    expect(seen).toEqual(['/v1/messages'])
+
+    // OpenAI routes keep llama.cpp's own error, as before.
+    const chat = await postJson(server, '/chat/completions', { ...turn, max_tokens: undefined })
+    expect(chat.status).toBe(400)
+    expect(await chat.json()).toEqual(JSON.parse(overflow))
+  })
+
+  it('answers the same way when the chat-completions fallback overflows, read from the message too', async () => {
+    const { port } = await startUpstream((req, _body, res) => {
+      if (req.url === '/v1/messages') {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { code: 500, message: 'System message must be at the beginning.' } }))
+        return
+      }
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          error: {
+            code: 400,
+            message:
+              'request (70000 tokens) exceeds the available context size (65536 tokens), try increasing it',
+            type: 'exceed_context_size_error',
+          },
+        })
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual(promptTooLong)
+  })
+
+  it("relays a remote provider's own error as it came", async () => {
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(400, { 'content-type': 'application/json' })
+      res.end(overflow)
+    })
+    const server = await startPublic({
+      remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1`, models: ['demo'] })],
+    })
+
+    const res = await postJson(server, '/messages', turn)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual(JSON.parse(overflow))
+  })
+})
+
 describe('error reports', () => {
+  it.each([
+    [200, 'ok', []],
+    [400, 'invalid request', []],
+    [500, 'Compute error: out of memory', [['warning', 'oom']]],
+    [503, 'request (12 tokens) exceeds the available context size', []],
+    [503, 'failed to initialize context size', [['error', '503']]],
+  ] as const)(
+    'reports only the final local /messages fallback failure (%i)',
+    async (status, message, expected) => {
+      const captured: ErrorReport[] = []
+      const { port } = await startUpstream((req, _body, res) => {
+        if (req.url === '/v1/messages') {
+          res.writeHead(500)
+          res.end('initial route failure')
+          return
+        }
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify(
+            status === 200
+              ? { choices: [{ message: { content: 'ok' } }] }
+              : { error: { message: message + ' PRIVATE_ENGINE_TEXT' } }
+          )
+        )
+      })
+      const server = await startPublic({
+        sessions: [localSession(port)],
+        errors: { capture: (report) => captured.push(report) },
+      })
+      const response = await postJson(server, '/messages', {
+        model: 'demo',
+        max_tokens: 32,
+        messages: [{ role: 'user', content: 'PRIVATE_PROMPT' }],
+      })
+      expect(response.status).toBe(status)
+      expect(captured.map((report) => [report.level, report.tags?.['failure_kind']])).toEqual(expected)
+      expect(JSON.stringify(captured)).not.toMatch(/PRIVATE_ENGINE_TEXT|PRIVATE_PROMPT/)
+    }
+  )
+
   it('reports a failing local engine: compute failures as warnings, other 5xx as errors, 4xx never', async () => {
     const replies = [
       [500, { error: { message: 'Compute error: out of memory' } }],
@@ -362,4 +849,109 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
       })
     }
   )
+})
+
+describe('the provider the app selected for a model id', () => {
+  /** A local engine and a remote provider that both serve `demo`, each counting its calls. */
+  async function collision(
+    selection: Array<[string, string]> | undefined,
+    {
+      localLoaded = true,
+      localProvider = 'llamacpp-upstream',
+    }: { localLoaded?: boolean; localProvider?: LocalTarget['provider'] } = {}
+  ) {
+    const calls = { local: 0, remote: 0 }
+    const local = await startUpstream((_req, _body, res) => {
+      calls.local++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"from":"local"}')
+    })
+    const remote = await startUpstream((_req, _body, res) => {
+      calls.remote++
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"from":"remote"}')
+    })
+    const server = await startPublic({
+      sessions: [
+        localSession(local.port, { provider: localProvider, ...(localLoaded ? {} : { modelId: 'other' }) }),
+      ],
+      remote: [
+        remoteProvider({
+          provider: 'custom',
+          baseUrl: `http://127.0.0.1:${remote.port}/v1`,
+          models: ['demo'],
+        }),
+      ],
+      ...(selection ? { selection: () => new Map(selection) } : {}),
+    })
+    return { server, calls }
+  }
+  const chat = { model: 'demo', messages: [{ role: 'user', content: 'hi' }] }
+
+  it('sends the id to the remote provider without a selection, as before', async () => {
+    const { server, calls } = await collision(undefined)
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'remote' })
+    expect(calls).toEqual({ local: 0, remote: 1 })
+  })
+
+  it('sends the id to the selected local engine although a remote provider lists it', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']])
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'local' })
+    expect(calls).toEqual({ local: 1, remote: 0 })
+  })
+
+  it('keeps a model selected on one local engine local when another engine holds it', async () => {
+    // The app named llama.cpp upstream; TurboQuant (`llamacpp`) has the session.
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']], { localProvider: 'llamacpp' })
+
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'local' })
+    expect((await postJson(server, '/responses', { model: 'demo', input: 'hi' })).status).toBe(200)
+    expect(calls).toEqual({ local: 2, remote: 0 })
+    const { data } = (await (await fetch(`http://127.0.0.1:${server.port}/v1/models`)).json()) as {
+      data: Array<{ id: string; owned_by: string }>
+    }
+    expect(data.filter((m) => m.id === 'demo').map((m) => m.owned_by)).toEqual(['llama.cpp'])
+  })
+
+  it('sends /responses for the id to the selected local engine too', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']])
+    expect((await postJson(server, '/responses', { model: 'demo', input: 'hi' })).status).toBe(200)
+    expect(calls).toEqual({ local: 1, remote: 0 })
+  })
+
+  it('sends the id to the selected remote provider while the local engine has it loaded', async () => {
+    const { server, calls } = await collision([['demo', 'custom']])
+    expect(await (await postJson(server, '/chat/completions', chat)).json()).toEqual({ from: 'remote' })
+    expect(calls).toEqual({ local: 0, remote: 1 })
+  })
+
+  it('answers 503 naming the model and the selected engine when it has no session, and asks nobody', async () => {
+    const { server, calls } = await collision([['demo', 'llamacpp-upstream']], { localLoaded: false })
+
+    for (const path of ['/chat/completions', '/messages', '/responses']) {
+      const res = await postJson(server, path, { ...chat, input: 'hi' })
+      expect(res.status, path).toBe(503)
+      expect(res.headers.get('content-type'), path).toBe('application/json')
+      const body = (await res.json()) as { error: { message: string; code: string; type: string } }
+      expect(body.error, path).toMatchObject({ code: 'selected_provider_unavailable', type: 'server_error' })
+      expect(body.error.message, path).toContain("model 'demo'")
+      expect(body.error.message, path).toContain('llamacpp-upstream')
+    }
+    expect(calls).toEqual({ local: 0, remote: 0 })
+  })
+
+  it('lists the id once in /v1/models, owned by the backend its requests go to', async () => {
+    const owners = async (selection: Array<[string, string]> | undefined, loaded = true) => {
+      const { server } = await collision(selection, { localLoaded: loaded })
+      const res = await fetch(`http://127.0.0.1:${server.port}/v1/models`)
+      const { data } = (await res.json()) as { data: Array<{ id: string; owned_by: string }> }
+      return data.filter((m) => m.id === 'demo').map((m) => m.owned_by)
+    }
+
+    expect(await owners(undefined)).toEqual(['remote'])
+    expect(await owners([['demo', 'llamacpp-upstream']])).toEqual(['llama.cpp-upstream'])
+    expect(await owners([['demo', 'custom']])).toEqual(['remote'])
+    // Selected but not loaded: nothing serves it, so nothing lists it.
+    expect(await owners([['demo', 'llamacpp-upstream']], false)).toEqual([])
+  })
 })

@@ -1,6 +1,7 @@
 /**
- * Engine builds of sd.cpp and MLX: the catalog, the update check, the install, the removal and the
- * cleanup at start (openspec change `move-sdcpp-mlx-install-to-core`, spec `engine-builds`).
+ * Engine builds (sd.cpp, audio.cpp, MLX, Foundry Local, LiteRT-LM, GenieX): the catalog, the update
+ * check, the install, the removal and the cleanup at start (openspec change
+ * `move-sdcpp-mlx-install-to-core`, spec `engine-builds`).
  *
  * The core advises and the client decides (ADR 2026-09-27): the catalog and the update check only
  * read; an install happens when a client calls it, and that call is also the client's consent to
@@ -17,9 +18,10 @@
  * decision during its acceptance): the old ones stay listed, inactive, for the user to remove. The
  * `retired` and `kept_in_use` of an install answer are therefore always empty.
  *
- * sd.cpp walks down the host's ladder when a build unpacks but fails its probe (design D7): the pair
- * is remembered in `<data>/diffusion/failed-backends.json` and the next build is installed under the
- * same task id; only the last build's failure reaches the client.
+ * sd.cpp and audio.cpp walk down the host's ladder when a build unpacks but fails its probe (design
+ * D7): the pair is remembered in the engine's own failed-backends file
+ * (`<data>/diffusion/failed-backends.json`, `<data>/audio/failed-backends.json`) and the next build is
+ * installed under the same task id; only the last build's failure reaches the client.
  */
 
 import { readdir, rm } from 'node:fs/promises'
@@ -44,13 +46,20 @@ import type { Downloader } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'
 import { ENGINE_DESCRIPTORS } from './engines.js'
-import type { Build, EngineContext, EngineDescriptor, HostChoice } from './engines.js'
+import type {
+  ArchiveRef,
+  Build,
+  EngineContext,
+  EngineDescriptor,
+  EngineHostPlatform,
+  EngineProbeFacts,
+  HostChoice,
+} from './engines.js'
 import { installStaged } from './install.js'
 import type { BuildArchive } from './install.js'
 import { assetInstallable } from './manifest.js'
 import type { ManifestOf, ManifestRead } from './manifest.js'
 import { compareBuilds } from './order.js'
-import type { FoundryLocalHostPlatform } from './select.js'
 
 /** Any engine's manifest, where the service handles them alike. */
 type AnyManifest = ManifestOf[EngineBuildId]
@@ -80,10 +89,14 @@ export const IDLE_ENGINE_HOST: EngineHost = {
 
 export interface EngineBuildsDeps {
   dataFolder: string
-  /** `<data>/diffusion/backends` and `<data>/mlx/backends`. */
+  /** Each engine's `<data>/…/backends` (`<data>/diffusion/backends`, `<data>/audio/backends`, …). */
   roots: Record<EngineBuildId, string>
-  /** `<data>/diffusion/failed-backends.json`. */
-  failedBackendsFile: string
+  /**
+   * Where each engine with a ladder remembers the builds that failed their probe on this machine:
+   * sd.cpp `<data>/diffusion/failed-backends.json`, audio.cpp `<data>/audio/failed-backends.json`. An
+   * engine absent here remembers nothing.
+   */
+  failedBackendsFiles: Partial<Record<EngineBuildId, string>>
   /** The desktop app's `resources/bin`; absent on `atc`. */
   resourcesDir?: string | undefined
   platform: NodeJS.Platform
@@ -103,10 +116,13 @@ export interface EngineBuildsDeps {
   emit: <K extends 'engine-build:changed' | 'engine:changed'>(name: K, payload: CoreEvents[K]) => void
   now?: () => number
   log?: (level: 'info' | 'warn', message: string) => void
-  /** Which Foundry Local archive this host runs; absent, none (`foundryLocalHostPlatform`). */
-  foundryLocalHost?: FoundryLocalHostPlatform
-  /** `foundry-host probe` of this core against an unpacked build. */
-  foundryHostProbe?: (libDir: string) => Promise<void>
+  /**
+   * Which build each one-archive-per-platform engine runs here (`foundryLocalHostPlatform`,
+   * `liteRtLmHostPlatform`); an engine absent from the table runs nowhere.
+   */
+  hostPlatforms?: Partial<Record<EngineBuildId, EngineHostPlatform>>
+  /** This core's host mode probing an unpacked build, per engine (`foundry-host`, `litert-host`, `geniex-host`). */
+  hostProbes?: Partial<Record<EngineBuildId, (buildDir: string) => Promise<EngineProbeFacts | void>>>
   /** Test seams for the probes. */
   probe?: Partial<Record<EngineBuildId, (dir: string) => Promise<void>>>
 }
@@ -119,6 +135,25 @@ const ref = (build: Build): EngineBuildRef => ({
   backend_id: build.backend_id,
   origin: build.origin,
 })
+
+/** What `archives` download in all; `null` when there are none or the manifest leaves a size out. */
+function downloadBytes(archives: ArchiveRef[]): number | null {
+  let total = 0
+  for (const archive of archives) {
+    if (archive.size === undefined) return null
+    total += archive.size
+  }
+  return archives.length > 0 ? total : null
+}
+
+const ENGINE_LABELS: Record<EngineBuildId, string> = {
+  'sd-cpp': 'sd.cpp',
+  'mlx': 'MLX',
+  'foundry-local': 'Foundry Local',
+  'litert-lm': 'LiteRT-LM',
+  'geniex': 'GenieX',
+  'audio-cpp': 'audio.cpp',
+}
 
 export function parseEngineBuildId(raw: string): EngineBuildId {
   const known = ENGINE_BUILD_IDS.find((id) => id === raw)
@@ -146,6 +181,8 @@ export class EngineBuildsService {
     const installed: InstalledEngineBuild[] = []
     for (const build of builds) installed.push(await this.describe(build, active, inUse))
     const release = read.manifest ? this.engine(engine).release(read.manifest) : null
+    const archives =
+      read.manifest && choice.backend_id ? this.engine(engine).archives(read.manifest, choice.backend_id) : []
     const manifest: EngineBuildManifestInfo | null =
       release && read.source && read.fetched_at !== null
         ? {
@@ -162,6 +199,7 @@ export class EngineBuildsService {
       manifest_error: manifest ? null : read.error,
       host_backend_id: choice.backend_id,
       host_reason: choice.reason,
+      host_download_bytes: downloadBytes(archives),
       installed,
       active: installed.find((build) => build.active) ?? null,
     }
@@ -290,7 +328,7 @@ export class EngineBuildsService {
     onProbeFailure: (error: unknown) => never
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
     const descriptor = this.engine(engine)
-    const { tag, published_at: publishedAt, c_api_version: cApiVersion } = descriptor.release(manifest)
+    const { tag, published_at: publishedAt, c_api_version: cApiVersion, abi } = descriptor.release(manifest)
     const archives = descriptor.archives(manifest, backendId)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
@@ -302,7 +340,9 @@ export class EngineBuildsService {
     const dir = join(this.deps.roots[engine], tag, backendId)
     const sha256 = archives[0]?.sha256 ?? null
     const context = this.context(engine)
-    const probe = this.deps.probe?.[engine] ?? ((staging: string) => descriptor.probe(staging, context))
+    const probe: (staging: string) => Promise<EngineProbeFacts | void> =
+      this.deps.probe?.[engine] ?? ((staging) => descriptor.probe(staging, context, backendId))
+    let facts: EngineProbeFacts | null = null
     const { replaced } = await installStaged({
       dataFolder: this.deps.dataFolder,
       target: dir,
@@ -314,7 +354,7 @@ export class EngineBuildsService {
       now: this.now,
       verify: async (staging) => {
         await descriptor.prepare?.(staging, context)
-        await probe(staging).catch(onProbeFailure)
+        facts = (await probe(staging).catch(onProbeFailure)) ?? null
       },
       record: (staging) =>
         descriptor.record(staging, {
@@ -324,6 +364,8 @@ export class EngineBuildsService {
           installedAtMs: this.now(),
           publishedAt,
           cApiVersion: cApiVersion ?? null,
+          abi: abi ?? null,
+          probe: facts,
         }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
@@ -411,7 +453,12 @@ export class EngineBuildsService {
 
   /** The directory of the build the next load of `engine` uses; nothing installed, `undefined`. */
   async activeDir(engine: EngineBuildId): Promise<string | undefined> {
-    return this.activeOf(engine, await this.builds(engine))?.dir
+    return (await this.activeBuild(engine))?.dir
+  }
+
+  /** The build the next load of `engine` uses, with what its record keeps (GenieX: the probe's devices). */
+  async activeBuild(engine: EngineBuildId): Promise<Build | undefined> {
+    return this.activeOf(engine, await this.builds(engine))
   }
 
   /** The build the next MLX load starts: the newest of bundled and downloaded, bundled on a tie. */
@@ -436,16 +483,16 @@ export class EngineBuildsService {
   private context(engine: EngineBuildId): EngineContext {
     return {
       root: this.deps.roots[engine],
-      failedBackendsFile: this.deps.failedBackendsFile,
+      failedBackendsFile: this.deps.failedBackendsFiles[engine],
       resourcesDir: this.deps.resourcesDir,
       platform: this.deps.platform,
       hardware: this.deps.hardware,
       log: this.deps.log,
-      foundryLocalHost: this.deps.foundryLocalHost ?? {
+      hostPlatform: this.deps.hostPlatforms?.[engine] ?? {
         platform: null,
-        reason: 'Foundry Local does not run on this computer.',
+        reason: `${ENGINE_LABELS[engine]} does not run on this computer.`,
       },
-      foundryHostProbe: this.deps.foundryHostProbe,
+      hostProbe: this.deps.hostProbes?.[engine],
     }
   }
 

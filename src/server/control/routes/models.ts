@@ -127,8 +127,9 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
 
   // Deleting a model of the store (spec "Модель хранилища удаляется через core"): only core knows
   // whether any managed provider has it loaded and owns every engine's caches of it, so clients never
-  // remove its folder themselves. The id is taken as sent, never percent-decoded: `Qwen%2FQwen3-1.7B`
-  // is not `Qwen/Qwen3-1.7B`.
+  // remove its folder themselves. The id arrives percent-decoded segment by segment, like every path
+  // parameter (change close-cli-core-gaps, design D4: `Qwen%2FQwen3-1.7B` is `Qwen/Qwen3-1.7B`), and is
+  // then compared exactly with the ids the store lists, never resolved as a path.
   router.delete(p('/managed-models/*modelId'), async (_req, res, { params }) => {
     if (!deps.managedModelDelete) {
       return sendError(

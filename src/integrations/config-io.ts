@@ -10,9 +10,17 @@
  *    diverge on any file with more than one key.
  *  - `serde_yaml` 0.9 does not indent sequence items under their key.
  *  - The managed shell-rc block has an exact shape, including where its blank lines fall.
+ *
+ * Codex is the exception to "rewrite the user's file": it gets a profile file of its own and only
+ * ever *repairs* the shared `config.toml` (`configure/codex-repair.ts`). A repair must never turn an
+ * unreadable file into an empty one, so it reads through `readStrict` ("not found" is the only
+ * absence), backs up through `createNew` (never over an earlier backup) and writes back with the
+ * file's own `permissions` — operations the lenient writers above do not need. Its writes also go
+ * through a symbolic link (`linkTarget`) rather than over it: dotfile managers link
+ * `~/.codex/config.toml` into their repository, and replacing the link would detach it.
  */
 
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -27,14 +35,41 @@ export const ATOMIC_MANAGED_END = '# <<< Atomic Chat (managed) <<<'
 export interface ConfigFs {
   /** Absolute path of the home directory. */
   home: string
+  /** The file's text, or `undefined` when it cannot be read for any reason. */
   read: (relative: string) => Promise<string | undefined>
+  /**
+   * `read` for a file whose loss would be worse than a refusal: only "not found" is `undefined`.
+   * Any other failure throws, and so does content that is not UTF-8 — decoding it lossily and
+   * writing it back would corrupt the user's file. A byte-order mark is kept, so the text encodes
+   * back to the exact bytes read.
+   */
+  readStrict: (relative: string) => Promise<string | undefined>
+  /**
+   * Atomic replace (temp file + rename). A `mode` is applied exactly, whatever the umask or a stale
+   * temp file would have left.
+   */
   write: (relative: string, contents: string, options?: { mode?: number }) => Promise<void>
+  /**
+   * Create a file only if nothing is at that path yet; resolves `false`, touching nothing, when
+   * something is. A failure after the file was created removes it again.
+   */
+  createNew: (relative: string, contents: string, options?: { mode?: number }) => Promise<boolean>
+  /** Permission bits (`mode & 0o777`) of an existing file, `undefined` when there is none. */
+  permissions: (relative: string) => Promise<number | undefined>
+  /**
+   * Where a write to this path should land so a symbolic link stays a link: the fully resolved real
+   * path when the path itself is a link, else the path unchanged (whether or not it exists). A link
+   * to nothing rejects with `ENOENT`.
+   */
+  linkTarget: (relative: string) => Promise<string>
   mkdirp: (relative: string) => Promise<void>
   exists: (relative: string) => Promise<boolean>
   remove: (relative: string) => Promise<void>
   /** Absolute path for a relative one, for the rare writer that records its own location. */
   absolute: (relative: string) => string
 }
+
+const isNotFound = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === 'ENOENT'
 
 export function nodeConfigFs(home: string): ConfigFs {
   const abs = (relative: string) => (isAbsolute(relative) ? relative : join(home, ...relative.split('/')))
@@ -46,16 +81,63 @@ export function nodeConfigFs(home: string): ConfigFs {
         (t) => t,
         () => undefined
       ),
+    readStrict: async (relative) => {
+      let bytes: Buffer
+      try {
+        bytes = await readFile(abs(relative))
+      } catch (e) {
+        if (isNotFound(e)) return undefined
+        throw e
+      }
+      return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+    },
     write: async (relative, contents, options = {}) => {
       const path = abs(relative)
       await mkdir(dirname(path), { recursive: true })
       // Write beside the target and rename over it, so a crash cannot truncate a user's config.
       const tmp = `${path}.atomic-tmp`
       await writeFile(tmp, contents, options.mode !== undefined ? { mode: options.mode } : {})
+      // `writeFile` applies `mode` only to a file it creates, and only through the umask.
+      if (options.mode !== undefined) await chmod(tmp, options.mode)
       await rename(tmp, path).catch(async (e: unknown) => {
         await rm(tmp, { force: true }).catch(() => {})
         throw e
       })
+    },
+    createNew: async (relative, contents, options = {}) => {
+      const path = abs(relative)
+      await mkdir(dirname(path), { recursive: true })
+      try {
+        await writeFile(path, contents, {
+          flag: 'wx',
+          ...(options.mode !== undefined ? { mode: options.mode } : {}),
+        })
+        return true
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false
+        // `wx` failed after creating the file (a full disk): leave no half-written file behind.
+        await rm(path, { force: true }).catch(() => {})
+        throw e
+      }
+    },
+    permissions: (relative) =>
+      stat(abs(relative)).then(
+        (s) => s.mode & 0o777,
+        (e: unknown) => {
+          if (isNotFound(e)) return undefined
+          throw e
+        }
+      ),
+    linkTarget: async (relative) => {
+      const path = abs(relative)
+      let link: boolean
+      try {
+        link = (await lstat(path)).isSymbolicLink()
+      } catch (e) {
+        if (isNotFound(e)) return path
+        throw e
+      }
+      return link ? realpath(path) : path
     },
     mkdirp: (relative) => mkdir(abs(relative), { recursive: true }).then(() => undefined),
     exists: (relative) =>
@@ -177,9 +259,10 @@ export function parseYaml(text: string, path: string): unknown {
 // ── managed blocks ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * Remove every `# >>> Atomic Chat (managed) >>> … # <<< Atomic Chat (managed) <<<` region. Some
- * writers (Codex) keep two, so this strips all of them, and — like the Rust original — it does not
- * consume the newline after the closing marker, which is why blank-line residue is expected.
+ * Remove every `# >>> Atomic Chat (managed) >>> … # <<< Atomic Chat (managed) <<<` region. It strips
+ * all of them, and — like the Rust original — it does not consume the newline after the closing
+ * marker, which is why blank-line residue is expected. The DeepSeek Harness writer uses it; Codex's
+ * legacy regions are removed by `configure/codex-repair.ts`, which only removes what it recognises.
  */
 export function stripAtomicManagedBlock(content: string): string {
   let result = content
@@ -254,9 +337,34 @@ export async function writeMarkedEnvToShell(
 
 // ── small shared helpers ────────────────────────────────────────────────────────────────────────
 
-/** TOML basic string escaping: only `\` and `"`, as the Rust writer does. */
+/**
+ * The inside of a TOML basic string. Everything TOML forbids raw is escaped — `\`, `"`, and every
+ * control character (the five with a short form use it, the rest and DEL become `\uXXXX`, upper-case
+ * hex) — so any value yields a file Codex can parse. The desktop writer escapes the same way, which is
+ * what keeps the two sides' profile files byte-identical.
+ */
 export function tomlBasicStringEscape(value: string): string {
-  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  let out = ''
+  for (const char of value) {
+    const short = TOML_SHORT_ESCAPES[char]
+    if (short !== undefined) {
+      out += short
+      continue
+    }
+    const code = char.codePointAt(0) as number
+    out += code < 0x20 || code === 0x7f ? `\\u${code.toString(16).toUpperCase().padStart(4, '0')}` : char
+  }
+  return out
+}
+
+const TOML_SHORT_ESCAPES: Readonly<Record<string, string>> = {
+  '\\': '\\\\',
+  '"': '\\"',
+  '\b': '\\b',
+  '\t': '\\t',
+  '\n': '\\n',
+  '\f': '\\f',
+  '\r': '\\r',
 }
 
 /** The key an agent should use when the user configured none. Not uniform across agents. */

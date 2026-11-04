@@ -13,6 +13,7 @@
  *   node fake-sglang-engine.mjs <port> <ready|slow|nogen>
  */
 import { createServer } from 'node:http'
+import { exitWithTheTest } from './fake-engine-lifetime.mjs'
 
 const [port, mode] = process.argv.slice(2)
 const OVERFLOW = {
@@ -22,6 +23,8 @@ const OVERFLOW = {
   param: null,
   code: 400,
 }
+
+exitWithTheTest()
 
 createServer((req, res) => {
   let body = ''

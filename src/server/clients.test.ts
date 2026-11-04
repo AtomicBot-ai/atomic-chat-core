@@ -60,6 +60,19 @@ describe('ClientRegistry', () => {
     expect(() => registry.register({ name: 'late' })).toThrow(/stopping/)
   })
 
+  it('gives every lease back the time the process was not running', () => {
+    const { registry, advance } = clockRegistry()
+    const app = registry.register({ name: 'app' })
+    advance(CLIENT_EXPIRY_MS + 30_000)
+    registry.extendLeases(30_000)
+    registry.extendLeases(-5)
+    registry.extendLeases(Number.NaN)
+    expect(registry.list().map((c) => c.name)).toEqual(['app'])
+    expect(registry.heartbeat(app.id)).toBe(true)
+    advance(CLIENT_EXPIRY_MS + 1)
+    expect(registry.count()).toBe(0)
+  })
+
   it('truncates an absurd client name instead of storing it', () => {
     const { registry } = clockRegistry()
     expect(registry.register({ name: 'x'.repeat(5000) }).name).toHaveLength(200)

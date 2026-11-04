@@ -270,6 +270,7 @@ describe('engineBuildVersions', () => {
     manifest_error: null,
     host_backend_id: 'macos-arm64',
     host_reason: null,
+    host_download_bytes: 42,
     installed: [build('v1', 'bundled', true)],
     active: build('v1', 'bundled', true),
     ...over,
@@ -326,6 +327,37 @@ describe('engineBuildVersions', () => {
       source: 'remote',
       source_error: null,
       error: null,
+    })
+  })
+
+  it('sizes the manifest build as latest with nothing active, from the catalog', async () => {
+    const empty = { installed: [], active: null }
+    const noUpdate = async () => check({ update_needed: false, current: null, target: null })
+    const entry = await engineBuildVersions(
+      { engine: 'mlx', catalog: async () => sdCatalog(empty), checkUpdates: noUpdate },
+      {}
+    )
+    expect(entry.active).toBeNull()
+    expect(entry.latest).toEqual({
+      version: 'v2',
+      variant: 'macos-arm64',
+      published_at: '2026-10-01T00:00:00Z',
+      download_bytes: 42,
+    })
+    expect(entry.update).toEqual({ needed: false, target: null, apply: 'swap' })
+
+    const unsized = await engineBuildVersions(
+      {
+        engine: 'mlx',
+        catalog: async () => sdCatalog({ ...empty, host_download_bytes: null }),
+        checkUpdates: noUpdate,
+      },
+      {}
+    )
+    expect(unsized.latest).toEqual({
+      version: 'v2',
+      variant: 'macos-arm64',
+      published_at: '2026-10-01T00:00:00Z',
     })
   })
 
@@ -487,6 +519,7 @@ describe('collectEngineVersions', () => {
             manifest_error: 'x',
             host_backend_id: null,
             host_reason: null,
+            host_download_bytes: null,
             installed: [],
             active: null,
           }),

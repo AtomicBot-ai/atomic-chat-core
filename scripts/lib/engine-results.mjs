@@ -16,6 +16,24 @@ export const CANDIDATE_ID_RE = /^[A-Za-z0-9._:-]{1,80}$/
 
 const OUTCOMES = { passed: 'passed', failed: 'failed' }
 
+/**
+ * The jobs of the core suites for the engine's platforms (`platforms` of its config): one per platform
+ * on its runner (`core_runner` when the live runner is another), Windows split in two shards as in
+ * ci.yml. What the workflow's `core` job runs, so a platform the engine is not checked on costs nothing.
+ */
+export function coreMatrix(platforms) {
+  return platforms.flatMap(({ platform, runner, core_runner: coreRunner }) => {
+    const os = coreRunner ?? runner
+    return platform.startsWith('windows-')
+      ? [1, 2].map((k) => ({ platform, os, shard: `${k}/2`, part: `-${k}` }))
+      : [{ platform, os }]
+  })
+}
+
+/** The live tests a cell on `platform` has to pass: those without `platforms`, or naming it. */
+export const requiredLiveTests = (required, platform) =>
+  (required ?? []).filter((r) => !r.platforms || r.platforms.includes(platform))
+
 /** A Vitest JSON report → `[{file, name, status}]`, `name` being the test's full name. */
 export function vitestOutcomes(report) {
   return (report?.testResults ?? []).flatMap((file) => {

@@ -22,7 +22,8 @@ describe('SGLANG_ENGINE', () => {
 
   it('reads its own settings and refuses an invalid one before anything else', () => {
     expect(SGLANG_ENGINE.settings({ max_running_requests: 4 }).max_running_requests).toBe(4)
-    expect(() => SGLANG_ENGINE.settings({ max_running_requests: 0 })).toThrow(
+    expect(SGLANG_ENGINE.settings({ max_running_requests: 0 }).max_running_requests).toBe(0) // automatic
+    expect(() => SGLANG_ENGINE.settings({ max_running_requests: -1 })).toThrow(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' })
     )
     expect(SGLANG_ENGINE.check(SGLANG_ENGINE.settings({})).engineId).toBe('sglang')
@@ -47,7 +48,14 @@ describe('SGLANG_ENGINE', () => {
       gpu,
       { availableBytes: 0, totalBytes: 0 }
     )
-    expect(plan).toEqual({ memFractionStatic: 0.6923, multimodal: false })
+    // A tiny KV shape on a free card: the widest automatic window and two requests.
+    expect(plan).toEqual({
+      contextLength: 65_536,
+      maxRunningRequests: 2,
+      memFractionStatic: 0.6923,
+      multimodal: false,
+    })
+    expect(SGLANG_ENGINE.planContextLength?.(plan)).toBe(65_536)
   })
 })
 

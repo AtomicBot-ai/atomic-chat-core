@@ -4,8 +4,19 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
+import audiocppFork from '../../test/fixtures/audiocpp/conf/audiocpp-manifest.json' with { type: 'json' }
+import audiocppBootstrap from '../../test/fixtures/audiocpp/conf/audiocpp-manifest.staging.json' with { type: 'json' }
 import {
   assetInstallable,
+  AUDIOCPP_MANIFEST_SPEC,
+  AUDIOCPP_MANIFEST_URL,
+  AUDIOCPP_UPSTREAM_REPO,
+  audiocppAssetUrl,
+  ggmlReleaseAssetUrl,
+  parseAudiocppManifest,
+  parseGgmlReleaseManifest,
+  SDCPP_MANIFEST_SPEC,
+  SDCPP_UPSTREAM_REPO,
   EngineManifestSource,
   ENGINE_MANIFEST_TTL_MS,
   manifestKinds,
@@ -18,8 +29,20 @@ import {
   FOUNDRY_LOCAL_MANIFEST_URL,
   foundryLocalAssetUrl,
   parseFoundryLocalManifest,
+  LITERT_LM_MANIFEST_URL,
+  parseLiteRtLmManifest,
+  SUPPORTED_LITERT_LM_ABI,
+  GENIEX_MANIFEST_URL,
+  parseGeniexManifest,
+  SUPPORTED_GENIEX_ABI,
 } from './manifest.js'
-import type { MlxManifest, SdcppManifest } from './manifest.js'
+import type {
+  AudiocppManifest,
+  GeniexManifest,
+  LiteRtLmManifest,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
 
 const SDCPP = {
   $schema: './sdcpp-schema.json',
@@ -84,6 +107,96 @@ describe('parseSdcppManifest', () => {
   it('marks an asset without sha256 or size as not installable', () => {
     const parsed = parseSdcppManifest(SDCPP)
     expect(parsed.assets.map(assetInstallable)).toEqual([true, true, false])
+  })
+})
+
+describe('parseGgmlReleaseManifest', () => {
+  const spec = { label: 'demo.cpp', tagPattern: /^r\d+$/, defaultRepo: 'example/demo.cpp' }
+
+  it('takes the tag pattern and the name in its errors from the engine it parses for', () => {
+    expect(parseGgmlReleaseManifest({ tag_name: 'r7', assets: SDCPP.assets }, spec).tag_name).toBe('r7')
+    expect(() => parseGgmlReleaseManifest({ ...SDCPP }, spec)).toThrow(
+      'the demo.cpp manifest has no valid tag_name ("master-883-137f740-a36f1b1a")'
+    )
+    expect(() => parseGgmlReleaseManifest([], spec)).toThrow('the demo.cpp manifest is not an object')
+  })
+
+  it('reads the sd.cpp manifest exactly as parseSdcppManifest does', () => {
+    expect(parseGgmlReleaseManifest(SDCPP, SDCPP_MANIFEST_SPEC)).toEqual(parseSdcppManifest(SDCPP))
+    expect(SDCPP_MANIFEST_SPEC.defaultRepo).toBe(SDCPP_UPSTREAM_REPO)
+    expect(() => parseSdcppManifest(null)).toThrow('the sd.cpp manifest is not an object')
+  })
+})
+
+describe('parseAudiocppManifest', () => {
+  it('reads the fork manifest the mirror publishes: an -a<rev> tag, download_base, every build and the companion', () => {
+    const parsed = parseAudiocppManifest(audiocppFork)
+    expect(parsed).toMatchObject({
+      upstream_repo: 'AtomicBot-ai/audio.cpp',
+      tag_name: 'v0.9.3-a1b2c3d4',
+      download_base: 'https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download',
+    })
+    expect(parsed.assets).toHaveLength(12)
+    expect(parsed.assets.filter((asset) => asset.companion)).toEqual([
+      expect.objectContaining({ backend: 'win-cudart-cu12', name: 'audio-v0.9.3-cudart-win-cu12-x64.zip' }),
+    ])
+    expect(parsed.assets.every(assetInstallable)).toBe(true)
+    expect(parsed).not.toHaveProperty('$schema')
+  })
+
+  it("reads conf's bootstrap manifest: upstream 0xShug0/audio.cpp, no mirror, upstream .tar.gz and .zip names", () => {
+    const parsed = parseAudiocppManifest(audiocppBootstrap)
+    expect(parsed).toEqual({
+      updated_at: '2026-10-29T11:50:24Z',
+      upstream_repo: '0xShug0/audio.cpp',
+      tag_name: 'v0.9.3',
+      assets: audiocppBootstrap.assets,
+    })
+    expect(parsed.assets.map((asset) => asset.name.replace(/^.*\.(zip|tar\.gz)$/, '$1'))).toEqual([
+      'tar.gz',
+      'tar.gz',
+      'tar.gz',
+      'zip',
+      'zip',
+      'zip',
+      'zip',
+    ])
+  })
+
+  it.each([
+    ['v0.9.3', true],
+    ['v10.20.300', true],
+    ['v0.9.3-a1b2c3d4', true],
+    // An upstream side tag is not an engine release.
+    ['v0.9.2-drama3-base-small', false],
+    ['v0.8.2-audio8-perf-hotfix', false],
+    // `-a` then exactly seven hex digits: `-a1b2c3d` has six.
+    ['v0.9.3-a1b2c3d', false],
+    ['v0.9.3-a1b2c3d45', false],
+    ['0.9.3', false],
+    ['v0.9', false],
+    ['master-883-137f740', false],
+    ['../v0.9.3', false],
+  ] as const)('tag %s accepted: %s', (tag, ok) => {
+    const parse = () => parseAudiocppManifest({ ...audiocppBootstrap, tag_name: tag })
+    if (ok) expect(parse().tag_name).toBe(tag)
+    else expect(parse).toThrow(`the audio.cpp manifest has no valid tag_name (${JSON.stringify(tag)})`)
+  })
+
+  it('skips an asset whose name is a path or not an archive, and refuses a manifest with none left', () => {
+    const parsed = parseAudiocppManifest({
+      ...audiocppBootstrap,
+      assets: [
+        { backend: 'linux-cpu-x64', name: '../audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'audio.exe', sha256: 'a'.repeat(64), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+      ],
+    })
+    expect(parsed.assets).toEqual([
+      { backend: 'linux-cpu-x64', name: 'audio.tar.gz', sha256: 'a'.repeat(64), size: 1 },
+    ])
+    expect(() => parseAudiocppManifest({ ...audiocppBootstrap, assets: [] })).toThrow(/no usable asset/)
+    expect(() => parseAudiocppManifest('v0.9.3')).toThrow('the audio.cpp manifest is not an object')
   })
 })
 
@@ -232,6 +345,276 @@ describe('parseFoundryLocalManifest', () => {
   })
 })
 
+const PYPI = 'https://files.pythonhosted.org/packages/cd/4d/24cd'
+const LR_ASSET = (platform: string, tag = 'macosx_12_0_arm64') => ({
+  platform,
+  url: `${PYPI}/litert_lm_api-0.18.1-py3-none-${tag}.whl`,
+  name: `litert_lm_api-0.18.1-py3-none-${tag}.whl`,
+  size: 100,
+  sha256: 'e'.repeat(64),
+})
+const LR_OPENVINO = {
+  id: 'openvino',
+  platform: 'win-x64',
+  version: '2026.4.1',
+  url: `${PYPI}/openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl`,
+  name: 'openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl',
+  size: 200,
+  sha256: 'f'.repeat(64),
+}
+const LR_RELEASE = (version: string, published_at: string, over: Record<string, unknown> = {}) => ({
+  version,
+  published_at,
+  min_core_version: '0.18.0',
+  abi: 1,
+  notes_url: `https://github.com/google-ai-edge/LiteRT-LM/releases/tag/v${version}`,
+  assets: [
+    LR_ASSET('macos-arm64'),
+    LR_ASSET('linux-x64', 'manylinux_2_27_x86_64'),
+    LR_ASSET('linux-arm64', 'manylinux_2_27_aarch64'),
+    LR_ASSET('win-x64', 'win_amd64'),
+  ],
+  accelerators: [LR_OPENVINO],
+  ...over,
+})
+const LITERT = (releases: unknown[], over: Record<string, unknown> = {}) => ({
+  $schema: './litert-lm-schema.json',
+  schema_version: 1,
+  releases,
+  ...over,
+})
+const LR_HOST = { coreVersion: '0.18.6', abis: SUPPORTED_LITERT_LM_ABI }
+
+describe('parseLiteRtLmManifest', () => {
+  it('reads the manifest conf publishes, wheels and the OpenVINO accelerator, newest release first', () => {
+    const parsed = parseLiteRtLmManifest(
+      LITERT([LR_RELEASE('0.17.0', '2026-08-01T00:00:00Z'), LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z')]),
+      LR_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.18.1', '0.17.0'])
+    expect(parsed.releases[0]?.assets.find((asset) => asset.platform === 'win-x64')).toEqual(
+      LR_ASSET('win-x64', 'win_amd64')
+    )
+    expect(parsed.releases[0]?.accelerators).toEqual([LR_OPENVINO])
+    expect(SUPPORTED_LITERT_LM_ABI).toEqual([1])
+  })
+
+  it('drops a field it does not know at every level instead of refusing the document', () => {
+    const release = { ...LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z'), channel: 'stable' }
+    release.assets = release.assets.map((asset) => ({ ...asset, signature: 'x' }))
+    release.accelerators = [{ ...LR_OPENVINO, extra: true } as typeof LR_OPENVINO]
+    const parsed = parseLiteRtLmManifest(LITERT([release], { updated_at: 'x' }), LR_HOST)
+    expect(Object.keys(parsed)).toEqual(['releases'])
+    expect(Object.keys(parsed.releases[0] ?? {})).toEqual([
+      'version',
+      'published_at',
+      'min_core_version',
+      'abi',
+      'notes_url',
+      'assets',
+      'accelerators',
+    ])
+    expect(Object.keys(parsed.releases[0]?.assets[0] ?? {})).toEqual([
+      'platform',
+      'url',
+      'name',
+      'size',
+      'sha256',
+    ])
+    expect(Object.keys(parsed.releases[0]?.accelerators[0] ?? {})).toEqual([
+      'id',
+      'platform',
+      'version',
+      'url',
+      'name',
+      'size',
+      'sha256',
+    ])
+  })
+
+  it('skips a release for a newer core or an ABI this core does not bind, and keeps the rest', () => {
+    const parsed = parseLiteRtLmManifest(
+      LITERT([
+        LR_RELEASE('0.19.0', '2026-12-01T00:00:00Z', { min_core_version: '0.19.0' }),
+        LR_RELEASE('0.18.2', '2026-11-01T00:00:00Z', { abi: 2 }),
+        LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z'),
+      ]),
+      LR_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.18.1'])
+  })
+
+  it('takes a wheel only from files.pythonhosted.org and skips any asset that is not a pinned wheel', () => {
+    const release = LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z')
+    release.assets[0] = { ...LR_ASSET('macos-arm64'), url: 'https://example.com/litert_lm_api-0.18.1-x.whl' }
+    release.assets[1] = { ...LR_ASSET('linux-x64', 'manylinux_2_27_x86_64'), name: '../x.whl' }
+    release.assets[2] = { ...LR_ASSET('linux-arm64', 'manylinux_2_27_aarch64'), sha256: undefined as never }
+    release.assets.push({ ...LR_ASSET('freebsd-x64'), platform: 'freebsd-x64' })
+    release.accelerators = [{ ...LR_OPENVINO, url: 'http://files.pythonhosted.org/openvino.whl' }]
+    const parsed = parseLiteRtLmManifest(LITERT([release]), LR_HOST)
+    expect(parsed.releases[0]?.assets.map((asset) => asset.platform)).toEqual(['win-x64'])
+    expect(parsed.releases[0]?.accelerators).toEqual([])
+  })
+
+  it('keeps an accelerator only as the schema has it: openvino on win-x64, once', () => {
+    const release = LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z', {
+      accelerators: [
+        { ...LR_OPENVINO, platform: 'linux-x64' },
+        { ...LR_OPENVINO, id: 'cuda' },
+        LR_OPENVINO,
+        { ...LR_OPENVINO, version: '2027.0.0' },
+      ],
+    })
+    expect(parseLiteRtLmManifest(LITERT([release]), LR_HOST).releases[0]?.accelerators).toEqual([LR_OPENVINO])
+    const without = { ...LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z') } as Record<string, unknown>
+    delete without['accelerators']
+    expect(parseLiteRtLmManifest(LITERT([without]), LR_HOST).releases[0]?.accelerators).toEqual([])
+  })
+
+  it('skips a malformed release and refuses a document with no release left or another schema', () => {
+    const parsed = parseLiteRtLmManifest(
+      LITERT([
+        LR_RELEASE('v0.18.2', '2026-11-01T00:00:00Z'),
+        LR_RELEASE('0.18.3', 'yesterday'),
+        LR_RELEASE('0.18.4', '2026-11-02T00:00:00Z', { abi: 0 }),
+        LR_RELEASE('0.18.5', '2026-11-03T00:00:00Z', { assets: [] }),
+        LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z'),
+      ]),
+      LR_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.18.1'])
+    expect(() => parseLiteRtLmManifest(LITERT([], { schema_version: 2 }), LR_HOST)).toThrow(/schema_version/)
+    expect(() =>
+      parseLiteRtLmManifest(LITERT([LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z', { abi: 9 })]), LR_HOST)
+    ).toThrow(/no release this core can install/)
+    expect(() => parseLiteRtLmManifest(LITERT('x' as never), LR_HOST)).toThrow(/releases/)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.1)
+// ---------------------------------------------------------------------------------------------
+
+const GX_MIRROR = 'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex'
+const GX_ASSET = (version = '0.9.3', over: Record<string, unknown> = {}) => ({
+  platform: 'win-arm64',
+  url: `${GX_MIRROR}/geniex-sdk-windows-arm64-v${version}.zip`,
+  name: `geniex-sdk-windows-arm64-v${version}.zip`,
+  size: 91519631,
+  sha256: '3edffa6e64878dfb68ea45116c37550a286e01d0c5066c28e8673cdfd4840446',
+  ...over,
+})
+const GX_RELEASE = (version: string, published_at: string, over: Record<string, unknown> = {}) => ({
+  version,
+  published_at,
+  min_core_version: '0.20.0',
+  abi: 1,
+  notes_url: `https://github.com/qualcomm/GenieX/releases/tag/v${version}`,
+  assets: [GX_ASSET(version)],
+  ...over,
+})
+const GENIEX = (releases: unknown[], over: Record<string, unknown> = {}) => ({
+  $schema: './geniex-schema.json',
+  schema_version: 1,
+  releases,
+  ...over,
+})
+const GX_HOST = { coreVersion: '0.20.0', abis: SUPPORTED_GENIEX_ABI }
+
+describe('parseGeniexManifest', () => {
+  it('reads the manifest conf publishes, newest release first, with the zip of each platform', () => {
+    const parsed = parseGeniexManifest(
+      GENIEX([GX_RELEASE('0.9.2', '2026-09-01T00:00:00Z'), GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z')]),
+      GX_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3', '0.9.2'])
+    expect(parsed.releases[0]).toEqual({
+      version: '0.9.3',
+      published_at: '2026-10-19T23:09:06Z',
+      min_core_version: '0.20.0',
+      abi: 1,
+      notes_url: 'https://github.com/qualcomm/GenieX/releases/tag/v0.9.3',
+      assets: [GX_ASSET('0.9.3')],
+    })
+    expect(SUPPORTED_GENIEX_ABI).toEqual([1])
+  })
+
+  it('drops a field it does not know at every level instead of refusing the document', () => {
+    const release = { ...GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z'), htp_signed: true }
+    release.assets = release.assets.map((asset) => ({ ...asset, signature: 'x' }))
+    const parsed = parseGeniexManifest(GENIEX([release], { updated_at: 'x' }), GX_HOST)
+    expect(Object.keys(parsed)).toEqual(['releases'])
+    expect(Object.keys(parsed.releases[0] ?? {})).toEqual([
+      'version',
+      'published_at',
+      'min_core_version',
+      'abi',
+      'notes_url',
+      'assets',
+    ])
+    expect(Object.keys(parsed.releases[0]?.assets[0] ?? {})).toEqual([
+      'platform',
+      'url',
+      'name',
+      'size',
+      'sha256',
+    ])
+  })
+
+  it('skips a release for a newer core, one with an ABI this core does not bind, and keeps the rest', () => {
+    const parsed = parseGeniexManifest(
+      GENIEX([
+        GX_RELEASE('0.10.0', '2026-12-01T00:00:00Z', { min_core_version: '0.21.0' }),
+        GX_RELEASE('0.9.5', '2026-11-15T00:00:00Z', { abi: 2 }),
+        GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z'),
+      ]),
+      GX_HOST
+    )
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3'])
+  })
+
+  it('takes a zip from the S3 mirror or a qualcomm/GenieX GitHub release only, and never one unpinned', () => {
+    const github = GX_ASSET('0.9.3', {
+      url: 'https://github.com/qualcomm/GenieX/releases/download/v0.9.3/geniex-sdk-windows-arm64-v0.9.3.zip',
+    })
+    expect(
+      parseGeniexManifest(
+        GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { assets: [github] })]),
+        GX_HOST
+      ).releases[0]?.assets
+    ).toEqual([github])
+    const foreign = GX_RELEASE('0.9.4', '2026-11-01T00:00:00Z', {
+      assets: [GX_ASSET('0.9.4', { url: 'https://example.com/geniex-sdk-windows-arm64-v0.9.4.zip' })],
+    })
+    const unpinned = GX_RELEASE('0.9.5', '2026-11-02T00:00:00Z', {
+      assets: [GX_ASSET('0.9.5', { sha256: undefined })],
+    })
+    const unknownPlatform = GX_RELEASE('0.9.6', '2026-11-03T00:00:00Z', {
+      assets: [GX_ASSET('0.9.6', { platform: 'linux-arm64' })],
+    })
+    const badName = GX_RELEASE('0.9.7', '2026-11-04T00:00:00Z', {
+      assets: [GX_ASSET('0.9.7', { name: 'geniex.zip' })],
+    })
+    const parsed = parseGeniexManifest(
+      GENIEX([foreign, unpinned, unknownPlatform, badName, GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z')]),
+      GX_HOST
+    )
+    // A release whose only asset is unusable lists nothing to install and is skipped whole.
+    expect(parsed.releases.map((release) => release.version)).toEqual(['0.9.3'])
+  })
+
+  it('refuses another schema version, no releases, and a document with nothing left to install', () => {
+    expect(() => parseGeniexManifest(GENIEX([], { schema_version: 2 }), GX_HOST)).toThrow(/schema_version/)
+    expect(() => parseGeniexManifest(GENIEX('x' as never), GX_HOST)).toThrow(/releases/)
+    expect(() =>
+      parseGeniexManifest(GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { abi: 9 })]), GX_HOST)
+    ).toThrow(/no release this core can install/)
+    expect(() => parseGeniexManifest(GENIEX([GX_RELEASE('0.9.3', 'not a date')]), GX_HOST)).toThrow(
+      /no release this core can install/
+    )
+  })
+})
+
 describe('asset URLs', () => {
   it('downloads sd.cpp from the mirror, or from the upstream release without the Atomic suffix', () => {
     const manifest = parseSdcppManifest(SDCPP)
@@ -241,6 +624,40 @@ describe('asset URLs', () => {
     const { download_base: _base, ...upstream } = manifest
     expect(sdcppAssetUrl(upstream, manifest.assets[0]!)).toBe(
       'https://github.com/AtomicBot-ai/stable-diffusion.cpp/releases/download/master-883-137f740/sd-mac.zip'
+    )
+  })
+
+  it('downloads audio.cpp from the mirror, or from the release of upstream_repo (the fork by default) without the Atomic suffix', () => {
+    const fork = parseAudiocppManifest(audiocppFork)
+    const mac = fork.assets.find(
+      (asset) => asset.backend === 'macos-arm64'
+    ) as AudiocppManifest['assets'][number]
+    expect(audiocppAssetUrl(fork, mac)).toBe(
+      'https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download/v0.9.3-a1b2c3d4/audio-v0.9.3-bin-macos-arm64.zip'
+    )
+    const { download_base: _base, ...unmirrored } = fork
+    expect(audiocppAssetUrl(unmirrored, mac)).toBe(
+      'https://github.com/AtomicBot-ai/audio.cpp/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64.zip'
+    )
+    const { upstream_repo: _repo, ...bare } = unmirrored
+    expect(audiocppAssetUrl(bare, mac)).toBe(
+      `https://github.com/${AUDIOCPP_UPSTREAM_REPO}/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64.zip`
+    )
+    const bootstrap = parseAudiocppManifest(audiocppBootstrap)
+    expect(bootstrap.assets.map((asset) => audiocppAssetUrl(bootstrap, asset))).toContain(
+      'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/audio-v0.9.3-bin-macos-arm64-metal.tar.gz'
+    )
+    expect(AUDIOCPP_MANIFEST_SPEC.defaultRepo).toBe('AtomicBot-ai/audio.cpp')
+  })
+
+  it('builds every ggml release URL from the repository the caller names when the manifest names none', () => {
+    const manifest = { tag_name: 'r7-a1234567', assets: [] }
+    const asset = { backend: 'linux-cpu-x64', name: 'a.zip' }
+    expect(ggmlReleaseAssetUrl(manifest, asset, 'example/demo.cpp')).toBe(
+      'https://github.com/example/demo.cpp/releases/download/r7/a.zip'
+    )
+    expect(ggmlReleaseAssetUrl({ ...manifest, download_base: 'https://m.test' }, asset, 'x/y')).toBe(
+      'https://m.test/r7-a1234567/a.zip'
     )
   })
 
@@ -276,7 +693,7 @@ afterEach(() => data.cleanup())
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
 function source<T>(
-  kind: 'sd-cpp' | 'mlx',
+  kind: 'sd-cpp' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
   respond: (url: string) => Response | Promise<Response>,
   opts: { env?: Record<string, string>; clock?: { now: number } } = {}
 ) {
@@ -388,6 +805,87 @@ describe('EngineManifestSource', () => {
     expect(plain.urls).toEqual([])
     expect(refused.manifest).toBeNull()
     expect(refused.error).toMatch(/file:\/\/ nor https:\/\//)
+  })
+
+  it('reads the LiteRT-LM manifest from conf main or ATOMIC_LITERT_LM_MANIFEST_URL and caches it under <data>/litert-lm', async () => {
+    const doc = LITERT([LR_RELEASE('0.18.1', '2026-10-19T22:44:33Z')])
+    const remote = source<LiteRtLmManifest>('litert-lm', () => json(doc))
+    expect((await remote.src.read()).manifest?.releases[0]?.version).toBe('0.18.1')
+    expect(remote.urls).toEqual([LITERT_LM_MANIFEST_URL])
+    expect(LITERT_LM_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/litert-lm-manifest.json'
+    )
+    const cached = JSON.parse(
+      await readFile(join(data.layout.provider('litert-lm').root, 'litert-lm-manifest.cache.json'), 'utf8')
+    )
+    expect(cached.manifest.releases[0].version).toBe('0.18.1')
+
+    const file = join(data.root, 'litert-lm-manifest.json')
+    await writeFile(file, JSON.stringify(LITERT([LR_RELEASE('0.18.2', '2026-11-01T00:00:00Z')])))
+    const local = source<LiteRtLmManifest>('litert-lm', () => json(doc), {
+      env: { ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(file).href },
+    })
+    expect((await local.src.read()).manifest?.releases[0]?.version).toBe('0.18.2')
+    expect(local.urls).toEqual([])
+  })
+
+  it('reads the GenieX manifest from conf main or ATOMIC_GENIEX_MANIFEST_URL and caches it under <data>/geniex', async () => {
+    // `min_core_version` below this core's own: the manifest's 0.20.0 would skip the release until 6.9.
+    const doc = GENIEX([GX_RELEASE('0.9.3', '2026-10-19T23:09:06Z', { min_core_version: '0.1.0' })])
+    const remote = source<GeniexManifest>('geniex', () => json(doc))
+    expect((await remote.src.read()).manifest?.releases[0]?.version).toBe('0.9.3')
+    expect(remote.urls).toEqual([GENIEX_MANIFEST_URL])
+    expect(GENIEX_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/geniex-manifest.json'
+    )
+    const cached = JSON.parse(
+      await readFile(join(data.layout.provider('geniex').root, 'geniex-manifest.cache.json'), 'utf8')
+    )
+    expect(cached.manifest.releases[0].version).toBe('0.9.3')
+
+    const file = join(data.root, 'geniex-manifest.json')
+    await writeFile(
+      file,
+      JSON.stringify(GENIEX([GX_RELEASE('0.9.4', '2026-11-01T00:00:00Z', { min_core_version: '0.1.0' })]))
+    )
+    const local = source<GeniexManifest>('geniex', () => json(doc), {
+      env: { ATOMIC_GENIEX_MANIFEST_URL: pathToFileURL(file).href },
+    })
+    expect((await local.src.read()).manifest?.releases[0]?.version).toBe('0.9.4')
+    expect(local.urls).toEqual([])
+  })
+
+  it('reads the audio.cpp manifest from conf main or ATOMIC_AUDIOCPP_MANIFEST_URL and caches it as <data>/audio/audiocpp-manifest.cache.json', async () => {
+    const remote = source<AudiocppManifest>('audio-cpp', () => json(audiocppBootstrap))
+    expect((await remote.src.read()).manifest?.tag_name).toBe('v0.9.3')
+    expect(remote.urls).toEqual([AUDIOCPP_MANIFEST_URL])
+    expect(AUDIOCPP_MANIFEST_URL).toBe(
+      'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/audiocpp-manifest.json'
+    )
+    expect(data.layout.audio.manifestCache).toBe(join(data.root, 'audio', 'audiocpp-manifest.cache.json'))
+    const cached = JSON.parse(await readFile(data.layout.audio.manifestCache, 'utf8'))
+    expect(cached.manifest.upstream_repo).toBe('0xShug0/audio.cpp')
+
+    const file = join(data.root, 'audiocpp-manifest.json')
+    await writeFile(file, JSON.stringify(audiocppFork))
+    const local = source<AudiocppManifest>('audio-cpp', () => json(audiocppBootstrap), {
+      env: { ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(file).href },
+    })
+    expect((await local.src.read()).manifest?.tag_name).toBe('v0.9.3-a1b2c3d4')
+    expect(local.urls).toEqual([])
+  })
+
+  it('answers "no manifest" with the reason while conf has not published the audio.cpp one yet (404)', async () => {
+    const { src } = source<AudiocppManifest>(
+      'audio-cpp',
+      () => new Response('404: Not Found', { status: 404 })
+    )
+    expect(await src.read()).toEqual({
+      manifest: null,
+      source: null,
+      fetched_at: null,
+      error: `audio.cpp manifest from ${AUDIOCPP_MANIFEST_URL}: HTTP 404`,
+    })
   })
 
   it('fetches an https:// override instead of conf main', async () => {

@@ -7,6 +7,9 @@
  *     loaded (unloaded with `engine-updated`, the old build kept) → removed.
  *   - MLX: the installer's build active → a newer one installed → the next load starts it → a restart
  *     with an installer newer still makes the installer's build active and keeps the download.
+ *   - audio.cpp: catalog → install from the mirror → the fork's `-a<rev>` build of the same version
+ *     offered and installed beside it → the old one removed; conf's bootstrap manifest installed from
+ *     upstream `0xShug0/audio.cpp`'s flat `.tar.gz`.
  *
  * No imports from `src/`. POSIX only: the fake engines are shell launchers.
  */
@@ -21,10 +24,19 @@ import * as core from '../helpers/compiled-core.js'
 import type { ReadyLine } from '../helpers/compiled-core.js'
 import * as sd from '../helpers/compiled-diffusion.js'
 import type { SdContext } from '../helpers/compiled-diffusion.js'
-import { launcherArchive, nodeLauncher, startReleaseMirror } from '../helpers/engine-builds-mirror.js'
+import {
+  audiocppUpstreamArchive,
+  fakeAudiocppServer,
+  launcherArchive,
+  nodeLauncher,
+  startReleaseMirror,
+} from '../helpers/engine-builds-mirror.js'
 import type { ReleaseMirror } from '../helpers/engine-builds-mirror.js'
 import { FAKE_SIDECAR_SCRIPT } from '../helpers/fake-sidecar-server.js'
 import { foundryLocalTestPlatform } from '../helpers/foundry-local-host.js'
+import { liteRtLmTestPlatform } from '../helpers/litert-lm-host.js'
+import { geniexTestEnv, writeFakeGeniexHost } from '../helpers/geniex-host.js'
+import { makeZip } from '../helpers/make-zip.js'
 
 const { BIN } = core
 const { control, json, waitFor } = sd
@@ -49,6 +61,7 @@ const post = (ready: ReadyLine, path: string, body: unknown = {}) =>
 interface Catalog {
   manifest: { tag: string; source: string } | null
   host_backend_id: string | null
+  host_download_bytes: number | null
   installed: Array<{ tag: string; backend_id: string; origin: string; active: boolean; removable: boolean }>
   active: { tag: string; origin: string } | null
 }
@@ -222,6 +235,7 @@ describe.skipIf(!existsSync(BIN) || process.platform !== 'darwin' || process.arc
       const ready = first.ready
       const catalog = await json<Catalog>(await post(ready, '/engine-builds/mlx/catalog', { force: true }))
       expect(catalog.host_backend_id).toBe('macos-arm64')
+      expect(catalog.host_download_bytes).toBe(archive.size)
       expect(catalog.installed).toEqual([
         expect.objectContaining({
           origin: 'bundled',
@@ -392,6 +406,221 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)('Foundry Local builds
   }, 120_000)
 })
 
+const LITERT_PLATFORMS = ['macos-arm64', 'linux-x64', 'linux-arm64', 'win-x64']
+const LITERT_HOST = process.platform === 'win32' ? null : liteRtLmTestPlatform()
+const LITERT_LIBRARY: Record<string, string> = {
+  'macos-arm64': 'liblitert-lm.dylib',
+  'linux-x64': 'liblitert-lm.so',
+  'linux-arm64': 'liblitert-lm.so',
+  'win-x64': 'litert-lm.dll',
+}
+
+describe.skipIf(!existsSync(BIN) || LITERT_HOST === null)(
+  'LiteRT-LM builds through the core (task 4.4)',
+  () => {
+    it('installs the host wheel from a file:// manifest, checked by litert-host probe, and leaves nothing when the host refuses it', async () => {
+      const folder = ctx.dataFolder
+      const assets = LITERT_PLATFORMS.map((platform) => {
+        const name = `litert_lm_api-0.18.1-py3-none-${platform}.whl`
+        const body = makeZip([
+          { name: 'litert_lm/__init__.py', data: Buffer.from('py') },
+          { name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from('lib'), mode: 0o777 },
+          { name: 'litert_lm_api-0.18.1.dist-info/RECORD', data: Buffer.from('record') },
+        ])
+        mirror.serve(`/packages/aa/${name}`, body)
+        return {
+          platform,
+          url: `https://files.pythonhosted.org/packages/aa/${name}`,
+          name,
+          size: body.length,
+          sha256: createHash('sha256').update(body).digest('hex'),
+        }
+      })
+      const manifest = join(folder, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets,
+            },
+          ],
+        })
+      )
+      // The host stand-in: records its argv, answers like `litert-host probe` unless told to fail.
+      const argvFile = join(folder, 'host.argv')
+      const failFlag = join(folder, 'host.fail')
+      const host = join(folder, 'fake-litert-host')
+      await writeFile(
+        host,
+        [
+          '#!/bin/sh',
+          `echo "$@" >> ${JSON.stringify(argvFile)}`,
+          `if [ -f ${JSON.stringify(failFlag)} ]; then echo "dlopen: liblitert-lm.so: wrong ELF class" >&2; exit 3; fi`,
+          `echo '{"version":"0.18.1","abi":1,"backends":["cpu","gpu"]}'`,
+        ].join('\n'),
+        { mode: 0o755 }
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+      })
+      const proxy = mirror.proxy
+
+      const catalog = await json<Catalog>(
+        await post(ready, '/engine-builds/litert-lm/catalog', { force: true })
+      )
+      expect(catalog.manifest).toMatchObject({ tag: '0.18.1', source: 'remote' })
+      expect(catalog.host_backend_id).toBe(LITERT_HOST)
+      const platform = catalog.host_backend_id as string
+
+      const installed = await json(
+        await post(ready, '/engine-builds/litert-lm/install', { task_id: 'lr-1', proxy })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: '0.18.1', backend_id: platform } })
+      const dir = join(folder, 'litert-lm', 'backends', '0.18.1', platform)
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+      expect(await readdir(join(dir, 'lib'))).toEqual([LITERT_LIBRARY[platform]])
+      expect(existsSync(join(dir, 'litert_lm'))).toBe(false)
+      expect((await readFile(argvFile, 'utf8')).trim()).toMatch(
+        new RegExp(`^probe --lib .*0\\.18\\.1/${platform}\\.incoming-\\d+$`)
+      )
+
+      // The host refuses a forced reinstall: the install fails with what it printed, the build stays.
+      await writeFile(failFlag, '')
+      const refused = await post(ready, '/engine-builds/litert-lm/install', {
+        task_id: 'lr-2',
+        proxy,
+        force: true,
+      })
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'ENGINE_INSTALL_FAILED', details: expect.stringContaining('wrong ELF class') },
+      })
+      expect((await readdir(join(folder, 'litert-lm', 'backends', '0.18.1'))).sort()).toEqual([platform])
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+    }, 120_000)
+  }
+)
+
+describe.skipIf(!existsSync(BIN) || LITERT_HOST === null)(
+  'LiteRT-LM OpenVINO through the core (task 6.4)',
+  () => {
+    it('offers OpenVINO on an Intel NPU, prepares it with progress, unpacks only its libs, and does not download twice', async () => {
+      const folder = ctx.dataFolder
+      const platform = LITERT_HOST as string
+      const libName = `litert_lm_api-0.18.1-py3-none-${platform}.whl`
+      const lib = makeZip([{ name: `litert_lm/${LITERT_LIBRARY[platform]}`, data: Buffer.from('lib') }])
+      mirror.serve(`/packages/lr/${libName}`, lib)
+      const ovName = 'openvino-2026.4.1-22982-cp312-cp312-win_amd64.whl'
+      const ov = makeZip([
+        { name: 'openvino/__init__.py', data: Buffer.from('py') },
+        { name: 'openvino/libs/openvino.dll', data: Buffer.from('ov'.repeat(50_000)) },
+        { name: 'openvino/libs/openvino_intel_npu_plugin.dll', data: Buffer.from('npu') },
+      ])
+      mirror.serve(`/packages/ov/${ovName}`, ov)
+      const pin = (body: Buffer) => ({
+        size: body.length,
+        sha256: createHash('sha256').update(body).digest('hex'),
+      })
+      const manifest = join(folder, 'litert-lm-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.18.1',
+              published_at: '2026-10-19T22:44:33Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              assets: [
+                {
+                  platform,
+                  url: `https://files.pythonhosted.org/packages/lr/${libName}`,
+                  name: libName,
+                  ...pin(lib),
+                },
+              ],
+              accelerators: [
+                {
+                  id: 'openvino',
+                  platform: 'win-x64',
+                  version: '2026.4.1',
+                  url: `https://files.pythonhosted.org/packages/ov/${ovName}`,
+                  name: ovName,
+                  ...pin(ov),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      const host = join(folder, 'fake-litert-host')
+      await writeFile(host, `#!/bin/sh\necho '{"version":"0.18.1","abi":1,"backends":["cpu","gpu"]}'\n`, {
+        mode: 0o755,
+      })
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_LITERT_LM_MANIFEST_URL: pathToFileURL(manifest).href,
+        ATOMIC_LITERT_HOST_TEST_COMMAND: host,
+        ATOMIC_LITERT_LM_TEST_NPU: 'intel-lnl',
+      })
+      const proxy = mirror.proxy
+      const accelerators = async () =>
+        json<{
+          npu: string | null
+          accelerators: Array<{ name: string; prepared: boolean; reason?: string }>
+        }>(await control(ctx, ready, '/runtimes/litert-lm/accelerators'))
+      expect(await accelerators()).toMatchObject({ npu: null, accelerators: [] })
+      expect(
+        await json(await post(ready, '/engine-builds/litert-lm/install', { task_id: 'lr-1', proxy }))
+      ).toMatchObject({
+        installed: true,
+      })
+      expect(await accelerators()).toMatchObject({
+        npu: 'intel-lnl',
+        accelerators: [
+          { name: 'openvino', device: 'npu', version: '2026.4.1', size_bytes: ov.length, prepared: false },
+        ],
+      })
+
+      const events = await sd.collectEvents(ctx, ready)
+      expect(await json(await post(ready, '/runtimes/litert-lm/accelerators/prepare', { proxy }))).toEqual({
+        accelerators: [{ name: 'openvino', prepared: true }],
+      })
+      await waitFor(
+        () =>
+          events.some(
+            (e) => e.event === 'litert-lm:accelerators' && (e.data as { stage: string }).stage === 'done'
+          ),
+        'done'
+      )
+      const steps = events
+        .filter((e) => e.event === 'litert-lm:accelerators')
+        .map((e) => e.data as { stage: string })
+      expect(steps[0]).toEqual({ accelerator: 'openvino', stage: 'started', fraction: 0 })
+      expect(steps.some((step) => step.stage === 'downloading')).toBe(true)
+      expect(steps.at(-1)).toEqual({ accelerator: 'openvino', stage: 'done', fraction: 1 })
+      const dir = join(folder, 'litert-lm', 'accelerators', 'openvino', '2026.4.1')
+      expect((await readdir(dir)).sort()).toEqual([
+        '.atomic-owned',
+        'openvino.dll',
+        'openvino_intel_npu_plugin.dll',
+      ])
+      expect((await accelerators()).accelerators[0]?.prepared).toBe(true)
+
+      const downloads = () => mirror.seen.filter((path) => path.startsWith('/packages/ov/')).length
+      expect(downloads()).toBe(1)
+      await post(ready, '/runtimes/litert-lm/accelerators/prepare', { proxy })
+      expect(downloads()).toBe(1)
+    }, 120_000)
+  }
+)
+
 const FAKE_FOUNDRY_HOST = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
 
 describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(
@@ -545,3 +774,324 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(
     }, 120_000)
   }
 )
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.4)
+// ---------------------------------------------------------------------------------------------
+
+const GENIEX_MIRROR = 'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex'
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
+  'GenieX builds through the core (task 4.4)',
+  () => {
+    it('installs lib/** of the SDK zip from a file:// manifest, checked by geniex-host probe whose devices it records, and leaves nothing when the host refuses it', async () => {
+      const folder = ctx.dataFolder
+      const name = 'geniex-sdk-windows-arm64-v0.9.3.zip'
+      const body = makeZip([
+        { name: 'sdk-windows-arm64/lib/geniex.dll', data: Buffer.from('core') },
+        { name: 'sdk-windows-arm64/lib/llama_cpp/geniex_plugin.dll', data: Buffer.from('plugin') },
+        { name: 'sdk-windows-arm64/lib/llama_cpp/libggml-htp-v73.so', data: Buffer.from('htp') },
+        { name: 'sdk-windows-arm64/lib/qairt/htp-files/libQnnHtpV73Skel.so', data: Buffer.from('skel') },
+        { name: 'sdk-windows-arm64/bin/geniex-bench.exe', data: Buffer.from('bench') },
+        { name: 'sdk-windows-arm64/include/geniex.h', data: Buffer.from('h') },
+      ])
+      mirror.serve(`/qai-hub-geniex/${name}`, body)
+      const manifest = join(folder, 'geniex-manifest.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          schema_version: 1,
+          releases: [
+            {
+              version: '0.9.3',
+              published_at: '2026-10-19T23:09:06Z',
+              min_core_version: '0.1.0',
+              abi: 1,
+              notes_url: 'https://github.com/qualcomm/GenieX/releases/tag/v0.9.3',
+              assets: [
+                {
+                  platform: 'win-arm64',
+                  url: `${GENIEX_MIRROR}/${name}`,
+                  name,
+                  size: body.length,
+                  sha256: createHash('sha256').update(body).digest('hex'),
+                },
+              ],
+            },
+          ],
+        })
+      )
+      // The host stand-in: records its argv, answers like `geniex-host probe` unless told to fail.
+      const argvFile = join(folder, 'host.argv')
+      const failFlag = join(folder, 'host.fail')
+      const host = join(folder, 'fake-geniex-host')
+      await writeFile(
+        host,
+        [
+          '#!/bin/sh',
+          `echo "$@" >> ${JSON.stringify(argvFile)}`,
+          `if [ -f ${JSON.stringify(failFlag)} ]; then echo "LoadLibraryW geniex.dll: error 126" >&2; exit 3; fi`,
+          `echo '{"version":"0.9.3","abi":1,"plugins":["llama_cpp","qairt"],"devices":["HTP0","GPUOpenCL","CPU"]}'`,
+        ].join('\n'),
+        { mode: 0o755 }
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_GENIEX_MANIFEST_URL: pathToFileURL(manifest).href,
+        ...geniexTestEnv(host),
+      })
+      const proxy = mirror.proxy
+
+      const catalog = await json<Catalog>(await post(ready, '/engine-builds/geniex/catalog', { force: true }))
+      expect(catalog.manifest).toMatchObject({ tag: '0.9.3', source: 'remote' })
+      expect(catalog.host_backend_id).toBe('win-arm64')
+
+      const installed = await json(
+        await post(ready, '/engine-builds/geniex/install', { task_id: 'gx-1', proxy })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: '0.9.3', backend_id: 'win-arm64' } })
+      const dir = join(folder, 'geniex', 'backends', '0.9.3', 'win-arm64')
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+      expect((await readdir(dir)).sort()).toEqual(['.atomic-owned', 'install.json', 'lib'])
+      expect((await readdir(join(dir, 'lib'))).sort()).toEqual(['geniex.dll', 'llama_cpp', 'qairt'])
+      expect(existsSync(join(dir, 'lib', 'qairt', 'htp-files', 'libQnnHtpV73Skel.so'))).toBe(true)
+      expect(existsSync(join(dir, 'sdk-windows-arm64'))).toBe(false)
+      expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+        tag: '0.9.3',
+        abi: 1,
+        libraryVersion: '0.9.3',
+        devices: ['HTP0', 'GPUOpenCL', 'CPU'],
+      })
+      expect((await readFile(argvFile, 'utf8')).trim()).toMatch(
+        /^probe --lib .*0\.9\.3\/win-arm64\.incoming-\d+$/
+      )
+
+      // The host refuses a forced reinstall: the install fails with what it printed, the build stays.
+      await writeFile(failFlag, '')
+      const refused = await post(ready, '/engine-builds/geniex/install', {
+        task_id: 'gx-2',
+        proxy,
+        force: true,
+      })
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'ENGINE_INSTALL_FAILED', details: expect.stringContaining('error 126') },
+      })
+      expect((await readdir(join(folder, 'geniex', 'backends', '0.9.3'))).sort()).toEqual(['win-arm64'])
+      expect(existsSync(join(dir, '.atomic-owned'))).toBe(true)
+    }, 120_000)
+
+    it('registers the provider only with the chip stand-in, and never on this machine by itself', async () => {
+      const folder = ctx.dataFolder
+      const host = await writeFakeGeniexHost(join(folder, 'fake-geniex-host'))
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_GENIEX_HOST_TEST_COMMAND: host,
+      })
+      const versions = await json<{ engines: Array<{ engine: string }> }>(
+        await post(ready, '/engines/versions', {})
+      )
+      expect(versions.engines.map((entry) => entry.engine)).not.toContain('geniex')
+      const catalog = await post(ready, '/engine-builds/geniex/catalog', {})
+      expect(await json<Catalog>(catalog)).toMatchObject({
+        host_backend_id: null,
+        host_reason: expect.stringMatching(/Windows arm64 only/),
+      })
+    }, 60_000)
+  }
+)
+
+// ---------------------------------------------------------------------------------------------
+// audio.cpp
+// ---------------------------------------------------------------------------------------------
+
+/** Every id a host of the CI matrix picks; the fake answers as a Metal build, so a CPU build passes anywhere. */
+const AUDIO_HOST_IDS = ['macos-arm64', 'linux-cpu-x64', 'linux-cpu-arm64', 'linux-vulkan-x64']
+/** conf's bootstrap manifest has no arm64 Linux build: upstream publishes none. */
+const AUDIO_BOOTSTRAP_HOST = !(process.platform === 'linux' && process.arch === 'arm64')
+const AUDIOCPP_STAGING = fileURLToPath(
+  new URL('../fixtures/audiocpp/conf/audiocpp-manifest.staging.json', import.meta.url)
+)
+
+/** What `install.json` says the build was made for. */
+const AUDIO_KIND: Record<string, string> = {
+  'macos-arm64': 'metal',
+  'linux-cpu-x64': 'cpu',
+  'linux-cpu-arm64': 'cpu',
+  'linux-vulkan-x64': 'vulkan',
+}
+
+describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('audio.cpp builds through the core', () => {
+  async function audioRelease(tag: string, manifestFile: string) {
+    const archive = await launcherArchive(ctx.dataFolder, `audio-${tag}.tar.gz`, {
+      audiocpp_server: fakeAudiocppServer(),
+    })
+    mirror.serve(`/releases/${tag}/audio.tar.gz`, archive.body)
+    await writeFile(
+      manifestFile,
+      JSON.stringify({
+        upstream_repo: 'AtomicBot-ai/audio.cpp',
+        tag_name: tag,
+        download_base: MIRROR,
+        assets: AUDIO_HOST_IDS.map((backend) => ({
+          backend,
+          name: 'audio.tar.gz',
+          sha256: archive.sha256,
+          size: archive.size,
+        })),
+      })
+    )
+  }
+
+  it('lists, installs, offers the fork build of the same version as an update, keeps both and removes the old one', async () => {
+    const folder = ctx.dataFolder
+    const manifest = join(folder, 'audiocpp-manifest.json')
+    await audioRelease('v0.9.3', manifest)
+    const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+      ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+    })
+    const proxy = mirror.proxy
+
+    const before = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog', { force: true }))
+    expect(before.manifest).toMatchObject({ tag: 'v0.9.3', source: 'remote' })
+    expect(AUDIO_HOST_IDS).toContain(before.host_backend_id)
+    expect(before.host_download_bytes).toBeGreaterThan(0)
+    expect(before.installed).toEqual([])
+
+    const events = await sd.collectEvents(ctx, ready)
+    const first = await json<{ installed: boolean; build: { tag: string; backend_id: string } }>(
+      await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-first', proxy })
+    )
+    expect(first).toMatchObject({ installed: true, build: { tag: 'v0.9.3', origin: 'downloaded' } })
+    // A Vulkan host walks down to the CPU build: the fake carries no Vulkan backend.
+    const host = first.build.backend_id
+    expect(AUDIO_HOST_IDS).toContain(host)
+    const oldDir = join(folder, 'audio', 'backends', 'v0.9.3', host)
+    expect((await readdir(oldDir)).sort()).toEqual(['.atomic-owned', 'audiocpp_server', 'install.json'])
+    expect(JSON.parse(await readFile(join(oldDir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: 'v0.9.3',
+      backendId: host,
+      backend: AUDIO_KIND[host],
+      engine: 'audio-cpp',
+    })
+    await waitFor(
+      () =>
+        events.some(
+          (e) =>
+            e.event === 'engine-build:changed' &&
+            e.data['engine'] === 'audio-cpp' &&
+            e.data['reason'] === 'install'
+        ),
+      'engine-build:changed install for audio-cpp'
+    )
+    expect(events.some((e) => e.event === 'download:progress' && e.data['taskId'] === 'audio-first')).toBe(
+      true
+    )
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/updates', { force: true, proxy }))
+    ).toMatchObject({ update_needed: false, current: { tag: 'v0.9.3', backend_id: host } })
+
+    // conf publishes the fork's build of the same version: newer, offered, installed beside the old one.
+    await audioRelease('v0.9.3-a1b2c3d4', manifest)
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/updates', { force: true, proxy }))
+    ).toMatchObject({ update_needed: true, target: { tag: 'v0.9.3-a1b2c3d4' } })
+    expect(
+      await json(await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-update', proxy }))
+    ).toMatchObject({ installed: true, build: { tag: 'v0.9.3-a1b2c3d4', backend_id: host } })
+    const catalog = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog'))
+    expect(catalog.active).toMatchObject({ tag: 'v0.9.3-a1b2c3d4', origin: 'downloaded' })
+    expect(catalog.installed.map((build) => [build.tag, build.active, build.removable])).toEqual([
+      ['v0.9.3-a1b2c3d4', true, true],
+      ['v0.9.3', false, true],
+    ])
+
+    // Removal of the old build; a folder the core did not mark is refused.
+    const foreign = join(folder, 'audio', 'backends', 'v0.9.0', 'hand-made')
+    await mkdir(foreign, { recursive: true })
+    const unowned = await control(ctx, ready, '/engine-builds/audio-cpp/v0.9.0/hand-made', {
+      method: 'DELETE',
+    })
+    expect(unowned.status).toBe(400)
+    expect(existsSync(foreign)).toBe(true)
+    expect(
+      await json(await control(ctx, ready, `/engine-builds/audio-cpp/v0.9.3/${host}`, { method: 'DELETE' }))
+    ).toEqual({ removed: true })
+    expect(existsSync(oldDir)).toBe(false)
+    const after = await json<Catalog>(await post(ready, '/engine-builds/audio-cpp/catalog'))
+    expect(after.installed.map((build) => build.tag)).toEqual(['v0.9.3-a1b2c3d4'])
+    expect(mirror.seen.filter((path) => path.endsWith('/audio.tar.gz'))).toEqual([
+      '/releases/v0.9.3/audio.tar.gz',
+      '/releases/v0.9.3-a1b2c3d4/audio.tar.gz',
+    ])
+  }, 120_000)
+
+  it.skipIf(!AUDIO_BOOTSTRAP_HOST)(
+    "installs from conf's bootstrap manifest: upstream 0xShug0/audio.cpp's flat .tar.gz, its tools/ and model_specs/ kept",
+    async () => {
+      const folder = ctx.dataFolder
+      const staging = JSON.parse(await readFile(AUDIOCPP_STAGING, 'utf8')) as {
+        upstream_repo: string
+        tag_name: string
+        assets: Array<{ backend: string; name: string; sha256: string; size: number }>
+      }
+      expect(staging).toMatchObject({ upstream_repo: '0xShug0/audio.cpp', tag_name: 'v0.9.3' })
+      expect(staging).not.toHaveProperty('download_base')
+      // Each upstream name serves one archive of upstream's layout, pinned by its own hash.
+      const archive = await audiocppUpstreamArchive(folder, 'upstream.tar.gz')
+      for (const asset of staging.assets)
+        mirror.serve(`/0xShug0/audio.cpp/releases/download/v0.9.3/${asset.name}`, archive.body)
+      const manifest = join(folder, 'audiocpp-manifest.staging.json')
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          ...staging,
+          assets: staging.assets.map((asset) => ({ ...asset, sha256: archive.sha256, size: archive.size })),
+        })
+      )
+      const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+        ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(manifest).href,
+      })
+
+      const catalog = await json<Catalog>(
+        await post(ready, '/engine-builds/audio-cpp/catalog', { force: true })
+      )
+      expect(catalog.manifest).toMatchObject({ tag: 'v0.9.3', source: 'remote' })
+      const installed = await json<{ installed: boolean; build: { backend_id: string } }>(
+        await post(ready, '/engine-builds/audio-cpp/install', {
+          task_id: 'audio-bootstrap',
+          proxy: mirror.proxy,
+        })
+      )
+      expect(installed).toMatchObject({ installed: true, build: { tag: 'v0.9.3' } })
+      const host = installed.build.backend_id
+      const name = staging.assets.find((asset) => asset.backend === host)?.name as string
+      expect(name).toMatch(/\.tar\.gz$/)
+      expect(mirror.seen).toEqual([`/0xShug0/audio.cpp/releases/download/v0.9.3/${name}`])
+      const dir = join(folder, 'audio', 'backends', 'v0.9.3', host)
+      expect((await readdir(dir)).sort()).toEqual([
+        '.atomic-owned',
+        'LICENSE',
+        'audiocpp_cli',
+        'audiocpp_server',
+        'install.json',
+        'model_specs',
+        'tools',
+      ])
+    },
+    120_000
+  )
+
+  it('answers "no manifest" for audio.cpp when the source has none, and installs nothing', async () => {
+    const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons, [], {
+      ATOMIC_AUDIOCPP_MANIFEST_URL: pathToFileURL(join(ctx.dataFolder, 'missing.json')).href,
+    })
+    expect(await json(await post(ready, '/engine-builds/audio-cpp/catalog', { force: true }))).toMatchObject({
+      engine: 'audio-cpp',
+      manifest: null,
+      manifest_error: expect.stringMatching(/^audio\.cpp manifest from file:/),
+      host_backend_id: null,
+      host_reason: 'The audio.cpp manifest is unavailable.',
+      installed: [],
+    })
+    const install = await post(ready, '/engine-builds/audio-cpp/install', { task_id: 'audio-none' })
+    expect(await install.json()).toMatchObject({ error: { code: 'UPSTREAM_ERROR' } })
+  }, 60_000)
+})

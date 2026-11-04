@@ -5,7 +5,8 @@
  * on SIGTERM or stdin end as `src/runtime/foundry-local/host/run.ts` with a real library.
  *
  *   FAKE_FOUNDRY_MODE  ready (default) | crash-after-ready | hang | exit-3 | exit-5
- *   FAKE_FOUNDRY_ARGV  a file each start appends {argv, ort_telemetry_disabled, ci} to
+ *   FAKE_FOUNDRY_ARGV  a file each start appends {argv, ort_telemetry_disabled,
+ *                      ort_enable_cudnn_flash_attention, ci} to
  */
 import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -21,6 +22,7 @@ if (process.env.FAKE_FOUNDRY_ARGV)
     `${JSON.stringify({
       argv,
       ort_telemetry_disabled: process.env.ORT_TELEMETRY_DISABLED ?? null,
+      ort_enable_cudnn_flash_attention: process.env.ORT_ENABLE_CUDNN_FLASH_ATTENTION ?? null,
       ci: process.env.CI ?? null,
     })}\n`
   )

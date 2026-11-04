@@ -24,11 +24,46 @@ describe('configureOpencode', () => {
     expect(JSON.parse(tree[PATH] ?? '')['$schema']).toBe('https://opencode.ai/config.json')
   })
 
-  it('refuses comments, unlike Kilo — this file is strict JSON', async () => {
+  it('reads comments and trailing commas as OpenCode does, and drops them on write', async () => {
     home = await makeAgentHome()
-    await home.seed(PATH, '{\n  // a comment\n  "theme": "nord"\n}\n')
-    await expect(configureOpencode(agentInput(home.fs))).rejects.toThrow(/Failed to parse/)
-    expect(await home.read(PATH)).toContain('// a comment')
+    await home.seed(PATH, '{\n  // a comment\n  "theme": "nord",\n}\n')
+    await configureOpencode(agentInput(home.fs))
+    const written = (await home.read(PATH)) ?? ''
+    expect(written).not.toContain('// a comment')
+    expect(JSON.parse(written).theme).toBe('nord')
+  })
+
+  it('writes the opencode.jsonc that would override opencode.json, and clears ours from the latter', async () => {
+    home = await makeAgentHome()
+    await home.seed(
+      PATH,
+      '{"theme":"x","model":"atomic/old","provider":{"atomic":{"name":"Atomic Chat"},"ollama":{}}}'
+    )
+    await home.seed(
+      '.config/opencode/opencode.jsonc',
+      '{\n  // seeded\n  "$schema": "https://opencode.ai/config.json",\n}\n'
+    )
+    await configureOpencode(agentInput(home.fs))
+    const tree = await home.tree()
+    expect(JSON.parse(tree['.config/opencode/opencode.jsonc'] ?? '').model).toBe(
+      'atomic/AtomicChat/Qwen3.5-9B-GGUF'
+    )
+    expect(JSON.parse(tree[PATH] ?? '')).toEqual({ theme: 'x', provider: { ollama: {} } })
+  })
+
+  it('writes where $OPENCODE_CONFIG_DIR or $OPENCODE_CONFIG points', async () => {
+    home = await makeAgentHome()
+    const dir = `${home.path}/oc-dir`
+    await configureOpencode(
+      agentInput(home.fs, { env: { OPENCODE_CONFIG_DIR: dir, OPENCODE_CONFIG: `${home.path}/x.json` } })
+    )
+    await configureOpencode(agentInput(home.fs, { env: { OPENCODE_CONFIG: `${home.path}/custom.json` } }))
+    await configureOpencode(agentInput(home.fs, { env: { XDG_CONFIG_HOME: `${home.path}/xdg` } }))
+    expect(Object.keys(await home.tree())).toEqual([
+      'custom.json',
+      'oc-dir/opencode.json',
+      'xdg/opencode/opencode.json',
+    ])
   })
 
   it('reports a truncated file and writes nothing', async () => {

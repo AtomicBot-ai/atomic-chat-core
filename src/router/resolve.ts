@@ -30,6 +30,8 @@ export type LocalProvider =
   | 'vllm'
   | 'sglang'
   | 'foundry-local'
+  | 'litert-lm'
+  | 'geniex'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
@@ -37,7 +39,9 @@ export type LocalProvider =
  * `tensorrt-llm`, `atomic-prism`, `vllm` and `sglang` come last, in the order they were added, for
  * exactly that reason: adding a provider moves nothing that already resolved (`vllm` after
  * `atomic-prism`, which core 0.10.0 already shipped; change `add-vllm-runtime`, D11; `sglang` after
- * `vllm`, change `add-sglang-runtime`, D8; `foundry-local` after `sglang`, change `add-foundry-local`, D5). A Prism-only file never loads
+ * `vllm`, change `add-sglang-runtime`, D8; `foundry-local` after `sglang`, change `add-foundry-local`, D5;
+ * `litert-lm` after `foundry-local`, change `add-litert-lm-runtime`, task 6.1; `geniex` after `litert-lm`,
+ * change `add-geniex-runtime`, task 6.1). A Prism-only file never loads
  * under another engine (the compatibility gate), so its sessions are found here even near the end of
  * the list; one store model is never loaded in two managed providers at once, so their order never
  * decides between two live sessions of one id.
@@ -51,11 +55,15 @@ export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'vllm',
   'sglang',
   'foundry-local',
+  'litert-lm',
+  'geniex',
 ]
 
 /**
- * The remote provider that owns `modelId`, if any. Remote wins over local — a model id the user
- * enabled for a cloud provider is never served by a local session of the same name.
+ * The remote provider that owns `modelId`, if any. For an id the app selected no provider for
+ * (`resolveSelectedRoute`), remote wins over local — a model id the user enabled for a cloud
+ * provider is never served by a local session of the same name. An id with a selection goes to the
+ * selected provider only (ADR 2026-10-21-route-a-selected-model-id-to-its-selected-provider-only).
  *
  * Three rules, in order, exactly as the proxy applies them:
  * 1. a provider that lists the model id;
@@ -75,6 +83,40 @@ export function resolveRemoteProvider(
     if (byPrefix) return byPrefix
   }
   return providers.get(modelId)
+}
+
+/** Where a model id the app selected a provider for is served. */
+export type SelectedRoute =
+  { kind: 'remote'; provider: RemoteProvider } | { kind: 'local'; provider: LocalProvider }
+
+/**
+ * The provider the app selected to serve `modelId` (`PUT /atomic/v1/server/selection`), when this
+ * core can route to it: a registered remote provider, or a local engine. The id is matched with the
+ * proxy's `.`/`_` rule. `undefined` — no selection, or one naming a provider this core does not know
+ * (an unregistered cloud provider, Apple Foundation Models) — leaves the id to the rules without one.
+ * A selected remote provider is strict. A selected local engine means "local": the caller asks that
+ * engine first, then any other local session of the id (the app and the core may name the engine
+ * differently), and refuses the request rather than send it to a remote provider that lists it.
+ */
+export function resolveSelectedRoute(
+  modelId: string,
+  selection: ReadonlyMap<string, string>,
+  providers: ReadonlyMap<string, RemoteProvider>
+): SelectedRoute | undefined {
+  let selected = selection.get(modelId)
+  if (selected === undefined) {
+    for (const [id, provider] of selection) {
+      if (modelIdsMatch(id, modelId)) {
+        selected = provider
+        break
+      }
+    }
+  }
+  if (selected === undefined) return undefined
+  const remote = providers.get(selected)
+  if (remote) return { kind: 'remote', provider: remote }
+  const local = LOCAL_SEARCH_ORDER.find((provider) => provider === selected)
+  return local === undefined ? undefined : { kind: 'local', provider: local }
 }
 
 /**

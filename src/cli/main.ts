@@ -114,8 +114,18 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         return await hostStepCommand(rest, io)
       // Hidden from USAGE: the per-model host core starts for Foundry Local (change add-foundry-local, D1).
       case 'foundry-host': {
-        const host = await import('../runtime/foundry-local/index.js')
-        return await host.runFoundryHost(rest, { ...host.lineIo(io), loadLibrary: host.loadLibraryWithBun })
+        const { runFoundryHostMain } = await import('../runtime/foundry-local/foundry-host.js')
+        return await runFoundryHostMain(rest, io)
+      }
+      // Hidden from USAGE: the per-model host core starts for LiteRT-LM (change add-litert-lm-runtime, D1).
+      case 'litert-host': {
+        const { runLiteRtHostMain } = await import('../runtime/litert-lm/litert-host.js')
+        return await runLiteRtHostMain(rest, io)
+      }
+      // Hidden from USAGE: the per-model host core starts for GenieX (change add-geniex-runtime, D1).
+      case 'geniex-host': {
+        const { runGeniexHostMain } = await import('../runtime/geniex/geniex-host.js')
+        return await runGeniexHostMain(rest, io)
       }
       default:
         io.stderr(`Unknown command: ${command}\n\n${USAGE}`)

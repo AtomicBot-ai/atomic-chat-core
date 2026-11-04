@@ -62,7 +62,12 @@ describe('the ChatGPT subscription branch', () => {
     const server = await startPublic({ sessions: [localSession(port)], chatgpt: backend() })
 
     expect(
-      await (await postJson(server, '/chat/completions', { model: 'demo', messages: [] })).json()
+      await (
+        await postJson(server, '/chat/completions', {
+          model: 'demo',
+          messages: [{ role: 'user', content: 'hi' }],
+        })
+      ).json()
     ).toEqual({
       local: true,
     })

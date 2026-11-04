@@ -11,9 +11,31 @@ import type { CoreEvents, EngineBuildId } from '../contracts/index.js'
 import { Downloader } from '../downloads/index.js'
 import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
-import { parseFoundryLocalManifest, parseMlxManifest, parseSdcppManifest } from './manifest.js'
-import type { FoundryLocalManifest, ManifestRead, MlxManifest, SdcppManifest } from './manifest.js'
-import type { FoundryLocalHostPlatform } from './select.js'
+import { makeZip } from '../../test/helpers/make-zip.js'
+import { OWNER_MARKER } from '../diffusion/install.js'
+import { writeLiteRtLmInstallRecord } from './litert-lm.js'
+import { writeGeniexInstallRecord } from './geniex.js'
+import { ENGINE_DESCRIPTORS } from './engines.js'
+import type { Build, EngineContext, EngineProbeFacts } from './engines.js'
+import {
+  parseAudiocppManifest,
+  parseFoundryLocalManifest,
+  parseGeniexManifest,
+  parseLiteRtLmManifest,
+  parseMlxManifest,
+  parseSdcppManifest,
+} from './manifest.js'
+import type {
+  AudiocppManifest,
+  FoundryLocalManifest,
+  GeniexManifest,
+  LiteRtLmManifest,
+  ManifestRead,
+  MlxManifest,
+  SdcppManifest,
+} from './manifest.js'
+import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 
@@ -145,16 +167,27 @@ function harness(
     platform?: NodeJS.Platform
     foundryLocalHost?: FoundryLocalHostPlatform
     foundryProbe?: (dir: string) => Promise<void>
+    liteRtLmHost?: LiteRtLmHostPlatform
+    liteRtLmProbe?: (dir: string) => Promise<void>
+    geniexHost?: GeniexHostPlatform
+    /** The `geniex-host probe` stand-in: what the core's prober returns, as `hostProbes.geniex` does. */
+    geniexProbe?: (dir: string) => Promise<EngineProbeFacts | void>
   } = {}
 ) {
   const manifests: {
     'sd-cpp': ManifestRead<SdcppManifest>
     'mlx': ManifestRead<MlxManifest>
     'foundry-local': ManifestRead<FoundryLocalManifest>
+    'litert-lm': ManifestRead<LiteRtLmManifest>
+    'geniex': ManifestRead<GeniexManifest>
+    'audio-cpp': ManifestRead<AudiocppManifest>
   } = {
     'sd-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'geniex': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'audio-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
   const events: Array<{ name: string; payload: unknown }> = []
   const changed: Array<CoreEvents['engine-build:changed']> = []
@@ -164,6 +197,12 @@ function harness(
       .replace(MIRROR, server.url('/releases'))
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
       .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
+      .replace('https://github.com/0xShug0/audio.cpp/releases/download', server.url('/releases'))
+      .replace('https://files.pythonhosted.org/packages', server.url('/releases'))
+      .replace(
+        'https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex',
+        server.url('/releases')
+      )
     return fetch(url, init)
   }
   const downloader = new Downloader({
@@ -178,6 +217,9 @@ function harness(
     'sd-cpp': new FakeHost(),
     'mlx': new FakeHost(),
     'foundry-local': new FakeHost(),
+    'litert-lm': new FakeHost(),
+    'geniex': new FakeHost(),
+    'audio-cpp': new FakeHost(),
   }
   let clock = 1_000
   const service = new EngineBuildsService({
@@ -186,8 +228,14 @@ function harness(
       'sd-cpp': data.layout.diffusion.backendsDir,
       'mlx': data.layout.provider('mlx').backendsDir,
       'foundry-local': FOUNDRY_ROOT(),
+      'litert-lm': LITERT_ROOT(),
+      'geniex': GENIEX_ROOT(),
+      'audio-cpp': data.layout.audio.backendsDir,
     },
-    failedBackendsFile: join(data.layout.diffusion.root, 'failed-backends.json'),
+    failedBackendsFiles: {
+      'sd-cpp': join(data.layout.diffusion.root, 'failed-backends.json'),
+      'audio-cpp': data.layout.audio.failedBackendsFile,
+    },
     resourcesDir: opts.resourcesDir,
     platform: opts.platform ?? 'linux',
     downloader,
@@ -195,9 +243,22 @@ function harness(
       'sd-cpp': { read: async () => manifests['sd-cpp'] },
       'mlx': { read: async () => manifests.mlx },
       'foundry-local': { read: async () => manifests['foundry-local'] },
+      'litert-lm': { read: async () => manifests['litert-lm'] },
+      'geniex': { read: async () => manifests.geniex },
+      'audio-cpp': { read: async () => manifests['audio-cpp'] },
     },
-    foundryLocalHost: opts.foundryLocalHost ?? { platform: 'linux-x64' },
-    ...(opts.foundryProbe ? { probe: { 'foundry-local': opts.foundryProbe } } : {}),
+    hostPlatforms: {
+      'foundry-local': opts.foundryLocalHost ?? { platform: 'linux-x64' },
+      'litert-lm': opts.liteRtLmHost ?? { platform: 'linux-x64' },
+      'geniex': opts.geniexHost ?? { platform: 'win-arm64', chip: 'x-elite' },
+    },
+    hostProbes: {
+      ...(opts.geniexProbe ? { geniex: opts.geniexProbe } : {}),
+    },
+    probe: {
+      ...(opts.foundryProbe ? { 'foundry-local': opts.foundryProbe } : {}),
+      ...(opts.liteRtLmProbe ? { 'litert-lm': opts.liteRtLmProbe } : {}),
+    },
     hardware: async () => opts.facts ?? LINUX_VULKAN,
     hosts,
     availableSpace: async () => opts.space,
@@ -216,10 +277,35 @@ function harness(
   const setFoundry = (manifest: FoundryLocalManifest) => {
     manifests['foundry-local'] = { manifest, source: 'remote', fetched_at: 1, error: null }
   }
-  return { service, downloader, events, changed, engineChanged, hosts, setSd, setMlx, setFoundry, manifests }
+  const setLiteRtLm = (manifest: LiteRtLmManifest) => {
+    manifests['litert-lm'] = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
+  const setGeniex = (manifest: GeniexManifest) => {
+    manifests.geniex = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
+  const setAudio = (manifest: AudiocppManifest) => {
+    manifests['audio-cpp'] = { manifest, source: 'remote', fetched_at: 1, error: null }
+  }
+  return {
+    service,
+    downloader,
+    events,
+    changed,
+    engineChanged,
+    hosts,
+    setSd,
+    setMlx,
+    setFoundry,
+    setLiteRtLm,
+    setGeniex,
+    setAudio,
+    manifests,
+  }
 }
 
 const FOUNDRY_ROOT = () => join(data.root, 'foundry-local', 'backends')
+const LITERT_ROOT = () => join(data.root, 'litert-lm', 'backends')
+const GENIEX_ROOT = () => join(data.root, 'geniex', 'backends')
 
 /** A Foundry Local archive: the libraries as plain files, plus the debug symbols Microsoft ships. */
 async function foundryArchive(name: string, files: Record<string, string>): Promise<Buffer> {
@@ -280,9 +366,11 @@ describe('IDLE_ENGINE_HOST', () => {
 })
 
 describe('parseEngineBuildId', () => {
-  it('knows sd-cpp, mlx and foundry-local only', () => {
+  it('knows the engine-build ids only', () => {
     expect(parseEngineBuildId('mlx')).toBe('mlx')
+    expect(parseEngineBuildId('audio-cpp')).toBe('audio-cpp')
     expect(parseEngineBuildId('foundry-local')).toBe('foundry-local')
+    expect(parseEngineBuildId('litert-lm')).toBe('litert-lm')
     expect(() => parseEngineBuildId('llamacpp')).toThrow(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' })
     )
@@ -645,6 +733,93 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
+
+describe('EngineBuildsService.catalog host_download_bytes', () => {
+  const PIN = '0'.repeat(64)
+  const WIN_CUDA: typeof LINUX_VULKAN = {
+    osType: 'windows',
+    arch: 'x86_64',
+    cpuExtensions: [],
+    gpus: [
+      {
+        name: 'GeForce',
+        vendor: 'NVIDIA',
+        total_memory: 8192,
+        uuid: 'gpu-0',
+        driver_version: '560.94',
+        nvidia_info: { index: 0, compute_capability: '8.9' },
+        vulkan_info: null,
+      } as never,
+    ],
+  }
+
+  it('sizes the MLX build this host would install with nothing installed, which the update check does not', async () => {
+    const h = harness({ facts: MAC_ARM })
+    h.setMlx(
+      mlxManifest('mlxvlm-macos-arm64-1234567', '2026-10-02T00:00:00Z', [
+        { backend: 'macos-arm64', name: 'mlx.tar.gz', sha256: PIN, size: 210_000_000 },
+      ])
+    )
+    expect(await h.service.catalog('mlx')).toMatchObject({
+      host_backend_id: 'macos-arm64',
+      host_download_bytes: 210_000_000,
+      installed: [],
+      active: null,
+    })
+    expect(await h.service.checkUpdates('mlx')).toEqual({ update_needed: false, current: null, target: null })
+  })
+
+  it('counts the cudart companion with the Windows CUDA build of sd.cpp', async () => {
+    const h = harness({ facts: WIN_CUDA })
+    h.setSd(
+      parseSdcppManifest({
+        tag_name: 'master-900-aaaaaaa',
+        download_base: MIRROR,
+        assets: [
+          { backend: 'win-cuda12-x64', name: 'sd-cuda.zip', sha256: PIN, size: 300 },
+          { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: PIN, size: 200, companion: true },
+          { backend: 'win-cpu-x64', name: 'sd-cpu.zip', sha256: PIN, size: 50 },
+        ],
+      })
+    )
+    expect(await h.service.catalog('sd-cpp')).toMatchObject({
+      host_backend_id: 'win-cuda12-x64',
+      host_download_bytes: 500,
+    })
+  })
+
+  it('is null without a manifest, without a host build, or when the manifest leaves a size out', async () => {
+    expect(await harness().service.catalog('mlx')).toMatchObject({
+      manifest: null,
+      host_backend_id: null,
+      host_download_bytes: null,
+    })
+
+    const intel = harness({ facts: { osType: 'macos', arch: 'x86_64', cpuExtensions: [], gpus: [] } })
+    intel.setMlx(
+      mlxManifest('mlxvlm-macos-arm64-1234567', '2026-10-02T00:00:00Z', [
+        { backend: 'macos-arm64', name: 'mlx.tar.gz', sha256: PIN, size: 210_000_000 },
+      ])
+    )
+    expect(await intel.service.catalog('mlx')).toMatchObject({
+      host_backend_id: null,
+      host_download_bytes: null,
+    })
+
+    const unsized = harness()
+    unsized.setSd(
+      parseSdcppManifest({
+        tag_name: 'master-900-aaaaaaa',
+        download_base: MIRROR,
+        assets: [{ backend: 'linux-vulkan-x64', name: 'sd.tar.gz', sha256: PIN }],
+      })
+    )
+    expect(await unsized.service.catalog('sd-cpp')).toMatchObject({
+      host_backend_id: 'linux-vulkan-x64',
+      host_download_bytes: null,
+    })
+  })
+})
 
 describe('MLX from two origins (task 3.3)', () => {
   const resources = () => join(data.root, 'resources')
@@ -1143,5 +1318,712 @@ describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
     await expect(h.service.install('foundry-local', { task_id: 't' })).rejects.toMatchObject({
       code: 'UNSUPPORTED_BACKEND',
     })
+  })
+})
+
+const LITERT_WHEEL = 'litert_lm_api-0.18.1-py3-none-manylinux_2_27_x86_64.whl'
+const litertWheel = (): Buffer =>
+  makeZip([
+    { name: 'litert_lm/__init__.py', data: Buffer.from('py') },
+    { name: 'litert_lm/liblitert-lm.so', data: Buffer.from('so'), mode: 0o777 },
+    { name: 'litert_lm_api-0.18.1.dist-info/RECORD', data: Buffer.from('record') },
+  ])
+
+/** Serve one wheel per release under `/releases/<version>/` and describe the releases as conf does. */
+function litertManifest(
+  releases: Array<{ version: string; published_at: string; body: Buffer; sha256?: string }>
+): LiteRtLmManifest {
+  return parseLiteRtLmManifest(
+    {
+      schema_version: 1,
+      releases: releases.map((release) => {
+        server.files.set(`/releases/${release.version}/${LITERT_WHEEL}`, { body: release.body })
+        return {
+          version: release.version,
+          published_at: release.published_at,
+          min_core_version: '0.1.0',
+          abi: 1,
+          assets: [
+            {
+              platform: 'linux-x64',
+              url: `https://files.pythonhosted.org/packages/${release.version}/${LITERT_WHEEL}`,
+              name: LITERT_WHEEL,
+              size: release.body.length,
+              sha256: release.sha256 ?? sha(release.body),
+            },
+          ],
+        }
+      }),
+    },
+    { coreVersion: '9.9.9', abis: [1] }
+  )
+}
+
+describe('LiteRT-LM builds (task 4.4)', () => {
+  it('installs the host wheel: native files under lib/, probed in staging, recorded with its ABI, activated', async () => {
+    const probed: string[] = []
+    const h = harness({ liteRtLmProbe: async (dir) => void probed.push(dir) })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+
+    const result = await h.service.install('litert-lm', { task_id: 'litert-lm-engine' })
+
+    const dir = join(LITERT_ROOT(), '0.18.1', 'linux-x64')
+    expect(result).toMatchObject({ installed: true, build: { tag: '0.18.1', backend_id: 'linux-x64' } })
+    expect(probed).toEqual([expect.stringMatching(/linux-x64\.incoming-\d+$/)])
+    expect((await ls(dir)).sort()).toEqual([OWNER_MARKER, 'install.json', 'lib'].sort())
+    expect(await ls(join(dir, 'lib'))).toEqual(['liblitert-lm.so'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: '0.18.1',
+      backendId: 'linux-x64',
+      publishedAt: '2026-10-19T22:44:33Z',
+      abi: 1,
+    })
+    expect(h.hosts['litert-lm'].calls).toEqual([`activate ${dir} false`])
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog.manifest).toMatchObject({ tag: '0.18.1', published_at: '2026-10-19T22:44:33Z' })
+    expect(catalog.active).toMatchObject({ tag: '0.18.1', backend_id: 'linux-x64', removable: true })
+  })
+
+  it('refuses a wheel whose sha256 differs from conf and leaves nothing behind, unprobed', async () => {
+    const probed: string[] = []
+    const h = harness({ liteRtLmProbe: async (dir) => void probed.push(dir) })
+    h.setLiteRtLm(
+      litertManifest([
+        {
+          version: '0.18.1',
+          published_at: '2026-10-19T22:44:33Z',
+          body: litertWheel(),
+          sha256: 'a'.repeat(64),
+        },
+      ])
+    )
+    await expect(h.service.install('litert-lm', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(probed).toEqual([])
+    expect(await ls(join(LITERT_ROOT(), '0.18.1'))).toEqual([])
+  })
+
+  it('deletes the staging tree when the probe fails, the error carrying what the host printed', async () => {
+    const h = harness({
+      liteRtLmProbe: async () => {
+        throw new AtomicCoreError(
+          'ENGINE_INSTALL_FAILED',
+          'litert-host probe failed.',
+          'dlopen: no such file'
+        )
+      },
+    })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+    await expect(h.service.install('litert-lm', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: 'dlopen: no such file',
+    })
+    expect(await ls(join(LITERT_ROOT(), '0.18.1'))).toEqual([])
+    expect(h.hosts['litert-lm'].calls).toEqual([])
+  })
+
+  it('activates the newest build by published_at among those whose ABI this core binds', async () => {
+    const h = harness()
+    const make = async (version: string, publishedAt: string, abi: number) => {
+      const dir = join(LITERT_ROOT(), version, 'linux-x64')
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'lib', 'liblitert-lm.so'), 'so')
+      await writeLiteRtLmInstallRecord(dir, {
+        tag: version,
+        backendId: 'linux-x64',
+        sha256: null,
+        installedAtMs: 1,
+        publishedAt,
+        abi,
+      })
+    }
+    await make('0.17.0', '2026-08-01T00:00:00Z', 1)
+    await make('0.18.1', '2026-10-19T22:44:33Z', 1)
+    await make('0.19.0', '2026-12-01T00:00:00Z', 2)
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog.installed.map((build) => build.tag).sort()).toEqual(['0.17.0', '0.18.1', '0.19.0'])
+    expect(catalog.active).toMatchObject({ tag: '0.18.1' })
+  })
+
+  it('offers nothing on a host without a LiteRT-LM wheel, saying why', async () => {
+    const h = harness({ liteRtLmHost: { platform: null, reason: 'LiteRT-LM runs on Windows x64 only.' } })
+    h.setLiteRtLm(
+      litertManifest([{ version: '0.18.1', published_at: '2026-10-19T22:44:33Z', body: litertWheel() }])
+    )
+    const catalog = await h.service.catalog('litert-lm')
+    expect(catalog).toMatchObject({
+      host_backend_id: null,
+      host_reason: 'LiteRT-LM runs on Windows x64 only.',
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// GenieX (change add-geniex-runtime, task 4.4)
+// ---------------------------------------------------------------------------------------------
+
+const GENIEX_ZIP = (version: string) => `geniex-sdk-windows-arm64-v${version}.zip`
+const geniexSdk = (): Buffer =>
+  makeZip([
+    { name: 'sdk-windows-arm64/lib/geniex.dll', data: Buffer.from('core') },
+    { name: 'sdk-windows-arm64/lib/llama_cpp/geniex_plugin.dll', data: Buffer.from('plugin') },
+    { name: 'sdk-windows-arm64/lib/llama_cpp/libggml-htp-v73.so', data: Buffer.from('htp') },
+    { name: 'sdk-windows-arm64/bin/geniex-bench.exe', data: Buffer.from('bench') },
+    { name: 'sdk-windows-arm64/include/geniex.h', data: Buffer.from('h') },
+  ])
+
+/** Serve one zip per release under `/releases/<version>/` and describe the releases as conf does. */
+function geniexManifest(
+  releases: Array<{ version: string; published_at: string; body: Buffer; sha256?: string; abi?: number }>
+): GeniexManifest {
+  return parseGeniexManifest(
+    {
+      schema_version: 1,
+      releases: releases.map((release) => {
+        server.files.set(`/releases/${release.version}/${GENIEX_ZIP(release.version)}`, {
+          body: release.body,
+        })
+        return {
+          version: release.version,
+          published_at: release.published_at,
+          min_core_version: '0.1.0',
+          abi: release.abi ?? 1,
+          assets: [
+            {
+              platform: 'win-arm64',
+              url: `https://qaihub-public-assets.s3.us-west-2.amazonaws.com/qai-hub-geniex/${release.version}/${GENIEX_ZIP(release.version)}`,
+              name: GENIEX_ZIP(release.version),
+              size: release.body.length,
+              sha256: release.sha256 ?? sha(release.body),
+            },
+          ],
+        }
+      }),
+    },
+    { coreVersion: '9.9.9', abis: [1] }
+  )
+}
+
+describe('GenieX builds (task 4.4)', () => {
+  it('installs the SDK: lib/** under the build, probed in staging, recorded with its ABI and the devices the probe found, activated', async () => {
+    const probed: string[] = []
+    const h = harness({
+      geniexProbe: async (dir) => {
+        probed.push(dir)
+        return { libraryVersion: '0.9.3', devices: ['HTP0', 'GPUOpenCL', 'CPU'] }
+      },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+
+    const result = await h.service.install('geniex', { task_id: 'geniex-engine' })
+
+    const dir = join(GENIEX_ROOT(), '0.9.3', 'win-arm64')
+    expect(result).toMatchObject({ installed: true, build: { tag: '0.9.3', backend_id: 'win-arm64' } })
+    expect(probed).toEqual([expect.stringMatching(/win-arm64\.incoming-\d+$/)])
+    expect((await ls(dir)).sort()).toEqual([OWNER_MARKER, 'install.json', 'lib'].sort())
+    expect((await ls(join(dir, 'lib'))).sort()).toEqual(['geniex.dll', 'llama_cpp'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({
+      tag: '0.9.3',
+      backendId: 'win-arm64',
+      publishedAt: '2026-10-19T23:09:06Z',
+      abi: 1,
+      libraryVersion: '0.9.3',
+      devices: ['HTP0', 'GPUOpenCL', 'CPU'],
+    })
+    expect(h.hosts.geniex.calls).toEqual([`activate ${dir} false`])
+    const catalog = await h.service.catalog('geniex')
+    expect(catalog.manifest).toMatchObject({ tag: '0.9.3', published_at: '2026-10-19T23:09:06Z' })
+    expect(catalog.active).toMatchObject({ tag: '0.9.3', backend_id: 'win-arm64', removable: true })
+  })
+
+  it('refuses a zip whose sha256 differs from conf and leaves nothing behind, unprobed', async () => {
+    const probed: string[] = []
+    const h = harness({ geniexProbe: async (dir) => void probed.push(dir) })
+    h.setGeniex(
+      geniexManifest([
+        { version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk(), sha256: 'a'.repeat(64) },
+      ])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(probed).toEqual([])
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+  })
+
+  it('deletes the staging tree when the probe fails, the error carrying what the host printed', async () => {
+    const h = harness({
+      geniexProbe: async () => {
+        throw new AtomicCoreError('ENGINE_INSTALL_FAILED', 'geniex-host probe failed.', 'LoadLibraryW: 126')
+      },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      details: 'LoadLibraryW: 126',
+    })
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+    expect(h.hosts.geniex.calls).toEqual([])
+  })
+
+  it('refuses to install without a host of its own to probe with', async () => {
+    const h = harness()
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    await expect(h.service.install('geniex', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: expect.stringMatching(/no GenieX host/),
+    })
+    expect(await ls(join(GENIEX_ROOT(), '0.9.3'))).toEqual([])
+  })
+
+  it('activates the newest build by published_at among those whose ABI this core binds', async () => {
+    const h = harness()
+    const make = async (version: string, publishedAt: string, abi: number) => {
+      const dir = join(GENIEX_ROOT(), version, 'win-arm64')
+      await mkdir(join(dir, 'lib'), { recursive: true })
+      await writeFile(join(dir, 'lib', 'geniex.dll'), 'dll')
+      await writeGeniexInstallRecord(dir, {
+        tag: version,
+        backendId: 'win-arm64',
+        sha256: null,
+        installedAtMs: 1,
+        publishedAt,
+        abi,
+        libraryVersion: version,
+        devices: ['CPU'],
+      })
+    }
+    await make('0.9.2', '2026-09-01T00:00:00Z', 1)
+    await make('0.9.3', '2026-10-19T23:09:06Z', 1)
+    await make('0.10.0', '2026-12-01T00:00:00Z', 2)
+    const catalog = await h.service.catalog('geniex')
+    expect(catalog.installed.map((build) => build.tag).sort()).toEqual(['0.10.0', '0.9.2', '0.9.3'])
+    expect(catalog.active).toMatchObject({ tag: '0.9.3' })
+    expect(await h.service.activeDir('geniex')).toBe(join(GENIEX_ROOT(), '0.9.3', 'win-arm64'))
+  })
+
+  it('offers nothing on a host without a Snapdragon X, saying why', async () => {
+    const h = harness({
+      geniexHost: { platform: null, reason: 'GenieX runs on Windows arm64 only, not darwin arm64.' },
+    })
+    h.setGeniex(
+      geniexManifest([{ version: '0.9.3', published_at: '2026-10-19T23:09:06Z', body: geniexSdk() }])
+    )
+    expect(await h.service.catalog('geniex')).toMatchObject({
+      host_backend_id: null,
+      host_reason: 'GenieX runs on Windows arm64 only, not darwin arm64.',
+    })
+    expect(parseEngineBuildId('geniex')).toBe('geniex')
+  })
+})
+
+// --- audio.cpp -------------------------------------------------------------------------------------
+
+/** `audiocpp_server` answering the install probe as v0.9.3 does, built with `backends` and seeing `devices`. */
+const audioServer = (backends: string, devices: string[]) => ({
+  audiocpp_server: [
+    'case "$1" in',
+    `  --version) printf 'audio.cpp 0.9.3\\ngit: 41c1f8ff 2026-10-26\\nbuild: Release\\nbackends: ${backends}\\n' ;;`,
+    `  --list-devices) printf 'available_devices=${devices.length + 1}\\n${devices.join('\\n')}\\nCPU:0 "cpu" [CPU]\\n' ;;`,
+    '  *) exit 1 ;;',
+    'esac',
+  ].join('\n'),
+})
+const AUDIO_VULKAN = audioServer('cpu,vulkan', ['Vulkan:0 "Radeon" [GPU]'])
+/** A Vulkan build on a machine whose driver shows it no GPU. */
+const AUDIO_VULKAN_BLIND = audioServer('cpu,vulkan', [])
+const AUDIO_CPU = audioServer('cpu', [])
+
+function audioManifest(tag: string, assets: ReturnType<typeof serve>): AudiocppManifest {
+  return parseAudiocppManifest({
+    tag_name: tag,
+    upstream_repo: 'AtomicBot-ai/audio.cpp',
+    download_base: MIRROR,
+    assets,
+  })
+}
+
+const AUDIO_ROOT = () => data.layout.audio.backendsDir
+
+describe.skipIf(!POSIX)('audio.cpp builds', () => {
+  it('installs the host build under <data>/audio/backends, probed, recorded and activated', async () => {
+    const h = harness()
+    const tag = 'v0.9.3-a1b2c3d4'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-vulkan-x64': { name: 'audio-vulkan.tar.gz', body: await archive('av', AUDIO_VULKAN) },
+          'linux-cpu-x64': { name: 'audio-cpu.tar.gz', body: await archive('ac', AUDIO_CPU) },
+        })
+      )
+    )
+    expect(await h.service.catalog('audio-cpp')).toMatchObject({
+      engine: 'audio-cpp',
+      manifest: { tag, source: 'remote' },
+      host_backend_id: 'linux-vulkan-x64',
+      installed: [],
+      active: null,
+    })
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-backend-1' })
+
+    const dir = join(AUDIO_ROOT(), tag, 'linux-vulkan-x64')
+    expect(result).toEqual({
+      installed: true,
+      build: { tag, backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+      retired: [],
+      kept_in_use: [],
+    })
+    expect((await ls(dir)).sort()).toEqual(['.atomic-owned', 'audiocpp_server', 'install.json'])
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toEqual({
+      tag,
+      backendId: 'linux-vulkan-x64',
+      backend: 'vulkan',
+      engine: 'audio-cpp',
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      installedAtMs: expect.any(Number),
+    })
+    expect(h.hosts['audio-cpp'].calls).toEqual([`activate ${dir} false`])
+    expect(h.hosts['sd-cpp'].calls).toEqual([])
+    expect(h.changed).toEqual([{ engine: 'audio-cpp', reason: 'install' }])
+    expect(h.engineChanged).toEqual([{ engine: 'audio-cpp', reason: 'install' }])
+    expect((await h.service.catalog('audio-cpp')).active).toMatchObject({
+      tag,
+      backend_id: 'linux-vulkan-x64',
+    })
+    expect(await h.service.activeDir('audio-cpp')).toBe(dir)
+  })
+
+  it('walks down the ladder when the GPU build sees no device, remembering it in <data>/audio only', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-vulkan-x64': { name: 'audio-vulkan.tar.gz', body: await archive('ab', AUDIO_VULKAN_BLIND) },
+          'linux-cpu-x64': { name: 'audio-cpu.tar.gz', body: await archive('ac', AUDIO_CPU) },
+        })
+      )
+    )
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-ladder' })
+
+    expect(result).toMatchObject({
+      installed: true,
+      build: { backend_id: 'linux-cpu-x64' },
+      failed_backend_ids: ['linux-vulkan-x64'],
+    })
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual(['linux-cpu-x64'])
+    expect(JSON.parse(await readFile(data.layout.audio.failedBackendsFile, 'utf8'))).toEqual([
+      `${tag}/linux-vulkan-x64`,
+    ])
+    expect(await ls(data.layout.diffusion.root)).not.toContain('failed-backends.json')
+    expect((await h.service.catalog('audio-cpp')).host_backend_id).toBe('linux-cpu-x64')
+    // sd.cpp's ladder on the same tag-shaped key is untouched.
+    h.setSd(
+      sdManifest(
+        'master-900-aaaaaaa',
+        serve('master-900-aaaaaaa', {
+          'linux-vulkan-x64': { name: 'sd.tar.gz', body: await archive('sv', SD_OK) },
+        })
+      )
+    )
+    expect((await h.service.catalog('sd-cpp')).host_backend_id).toBe('linux-vulkan-x64')
+  })
+
+  it('fails with the probe output when the last build is not audio.cpp, leaving nothing behind', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, {
+          'linux-cpu-x64': {
+            name: 'audio-cpu.tar.gz',
+            body: await archive('ax', { audiocpp_server: 'echo "stable-diffusion.cpp"' }),
+          },
+        })
+      )
+    )
+    await expect(h.service.install('audio-cpp', { task_id: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'The downloaded binary is not audio.cpp.',
+      details: expect.stringContaining('stable-diffusion.cpp'),
+    })
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual([])
+    expect(h.hosts['audio-cpp'].calls).toEqual([])
+  })
+
+  it("installs conf's bootstrap build from upstream 0xShug0/audio.cpp: a flat .tar.gz with tools/ and model_specs/", async () => {
+    const h = harness()
+    const src = join(data.root, 'archive-src', 'upstream')
+    await mkdir(join(src, 'tools', 'models'), { recursive: true })
+    await mkdir(join(src, 'model_specs'), { recursive: true })
+    await writeFile(join(src, 'audiocpp_server'), `#!/bin/sh\n${AUDIO_CPU.audiocpp_server}\n`, {
+      mode: 0o755,
+    })
+    await writeFile(join(src, 'audiocpp_cli'), '#!/bin/sh\nexit 0\n', { mode: 0o644 })
+    await writeFile(join(src, 'LICENSE'), 'MIT')
+    await writeFile(join(src, 'tools', 'models', 'prepare_kokoro_gguf.py'), 'py')
+    await writeFile(join(src, 'model_specs', 'kokoro_tts.json'), '{}')
+    const name = 'audio-v0.9.3-bin-ubuntu-x64-cpu-portable.tar.gz'
+    const out = join(data.root, 'archive-src', name)
+    // Upstream packs `./`-prefixed entries.
+    await tarCreate({ gzip: true, cwd: src, file: out }, ['.'])
+    const body = await readFile(out)
+    server.files.set(`/releases/v0.9.3/${name}`, { body })
+    h.setAudio(
+      parseAudiocppManifest({
+        upstream_repo: '0xShug0/audio.cpp',
+        tag_name: 'v0.9.3',
+        assets: [{ backend: 'linux-cpu-x64', name, sha256: sha(body), size: body.length }],
+      })
+    )
+
+    const result = await h.service.install('audio-cpp', { task_id: 'audio-bootstrap' })
+
+    expect(result).toMatchObject({ installed: true, build: { tag: 'v0.9.3', backend_id: 'linux-cpu-x64' } })
+    expect(archiveRequests().map((r) => r.path)).toEqual([`/releases/v0.9.3/${name}`])
+    const dir = join(AUDIO_ROOT(), 'v0.9.3', 'linux-cpu-x64')
+    expect((await ls(dir)).sort()).toEqual([
+      '.atomic-owned',
+      'LICENSE',
+      'audiocpp_cli',
+      'audiocpp_server',
+      'install.json',
+      'model_specs',
+      'tools',
+    ])
+    // The probe made the CLI beside the server executable too.
+    expect((await lstat(join(dir, 'audiocpp_cli'))).mode & 0o111).not.toBe(0)
+    expect(JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))).toMatchObject({ backend: 'cpu' })
+  })
+
+  it('offers the fork build of the same version as an update, keeps the old one and removes it on request', async () => {
+    const h = harness()
+    const first = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        first,
+        serve(first, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a1', AUDIO_VULKAN) } })
+      )
+    )
+    await h.service.install('audio-cpp', { task_id: 'a1' })
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({ update_needed: false })
+
+    const rebuild = 'v0.9.3-a1b2c3d4'
+    h.setAudio(
+      audioManifest(
+        rebuild,
+        serve(rebuild, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a2', AUDIO_VULKAN) } })
+      )
+    )
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({
+      update_needed: true,
+      current: { tag: first, backend_id: 'linux-vulkan-x64', origin: 'downloaded' },
+      target: { tag: rebuild, backend_id: 'linux-vulkan-x64' },
+    })
+    expect(await h.service.install('audio-cpp', { task_id: 'a2' })).toMatchObject({ installed: true })
+    expect(await ls(AUDIO_ROOT())).toEqual([first, rebuild])
+    const catalog = await h.service.catalog('audio-cpp')
+    expect(catalog.active).toMatchObject({ tag: rebuild })
+    expect(catalog.installed.map((build) => [build.tag, build.active, build.removable])).toEqual([
+      [rebuild, true, true],
+      [first, false, true],
+    ])
+
+    // conf rolled back to the bare tag: neither offered nor installed.
+    h.setAudio(
+      audioManifest(
+        first,
+        serve(first, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('a3', AUDIO_VULKAN) } })
+      )
+    )
+    expect(await h.service.checkUpdates('audio-cpp')).toMatchObject({ update_needed: false })
+    expect(await h.service.install('audio-cpp', { task_id: 'a3', force: true })).toMatchObject({
+      installed: false,
+      reason: 'active-is-newer',
+    })
+
+    await expect(
+      h.service.remove('audio-cpp', rebuild, 'linux-vulkan-x64', { refuseActive: true })
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST', details: 'active' })
+    expect(await h.service.remove('audio-cpp', first, 'linux-vulkan-x64')).toEqual({ removed: true })
+    expect(await ls(AUDIO_ROOT())).toEqual([rebuild])
+    expect(h.changed.at(-1)).toEqual({ engine: 'audio-cpp', reason: 'uninstall' })
+  })
+
+  it('sizes the Windows CUDA 12 build with its cudart companion, and offers no ROCm build to an AMD card', async () => {
+    const cuda = harness({
+      facts: {
+        osType: 'windows',
+        arch: 'x86_64',
+        cpuExtensions: [],
+        gpus: [
+          {
+            name: 'GeForce',
+            vendor: 'NVIDIA',
+            total_memory: 8192,
+            uuid: 'gpu-0',
+            driver_version: '560.94',
+            nvidia_info: { index: 0, compute_capability: '8.9' },
+            vulkan_info: null,
+          } as never,
+        ],
+      },
+    })
+    const PIN = '0'.repeat(64)
+    const assets = [
+      { backend: 'win-cuda12-x64', name: 'audio-cuda.zip', sha256: PIN, size: 300 },
+      { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: PIN, size: 200, companion: true },
+      { backend: 'win-rocm-7.14-x64', name: 'audio-rocm.zip', sha256: PIN, size: 100 },
+      { backend: 'win-cpu-x64', name: 'audio-cpu.zip', sha256: PIN, size: 50 },
+    ]
+    cuda.setAudio(audioManifest('v0.9.3', assets))
+    expect(await cuda.service.catalog('audio-cpp')).toMatchObject({
+      host_backend_id: 'win-cuda12-x64',
+      host_download_bytes: 500,
+    })
+  })
+
+  it('says why there is nothing to install without a manifest', async () => {
+    expect(await harness().service.catalog('audio-cpp')).toMatchObject({
+      manifest: null,
+      manifest_error: 'offline',
+      host_backend_id: null,
+      host_reason: 'The audio.cpp manifest is unavailable.',
+    })
+    await expect(harness().service.install('audio-cpp', { task_id: 't' })).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+    })
+  })
+
+  it('clears the leftovers of an interrupted install under <data>/audio/backends at start, never a build', async () => {
+    const h = harness()
+    const tag = 'v0.9.3'
+    h.setAudio(
+      audioManifest(
+        tag,
+        serve(tag, { 'linux-vulkan-x64': { name: 'a.tar.gz', body: await archive('al', AUDIO_VULKAN) } })
+      )
+    )
+    await h.service.install('audio-cpp', { task_id: 'al' })
+    const build = join(AUDIO_ROOT(), tag, 'linux-vulkan-x64')
+    await mkdir(`${build}.incoming-9`, { recursive: true })
+    await mkdir(`${build}.incoming-9.download`, { recursive: true })
+    await mkdir(join(AUDIO_ROOT(), 'v0.9.4', 'linux-cpu-x64.retired-3'), { recursive: true })
+    h.changed.length = 0
+
+    await h.service.startupCleanup()
+
+    expect(await ls(join(AUDIO_ROOT(), tag))).toEqual(['linux-vulkan-x64'])
+    expect(await ls(join(AUDIO_ROOT(), 'v0.9.4'))).toEqual([])
+    expect(h.changed).toEqual([])
+  })
+})
+
+describe('the audio-cpp row of ENGINE_DESCRIPTORS', () => {
+  const row = ENGINE_DESCRIPTORS['audio-cpp']
+  const manifest = parseAudiocppManifest({
+    upstream_repo: '0xShug0/audio.cpp',
+    tag_name: 'v0.9.3-a1b2c3d4',
+    assets: [
+      { backend: 'win-cuda12-x64', name: 'cuda.zip', sha256: 'a'.repeat(64), size: 3 },
+      { backend: 'win-cudart-cu12', name: 'cudart.zip', sha256: 'b'.repeat(64), size: 2, companion: true },
+      { backend: 'win-cpu-x64', name: 'cpu.zip' },
+    ],
+  })
+  const ctx = (): EngineContext => ({
+    root: data.layout.audio.backendsDir,
+    failedBackendsFile: undefined,
+    platform: 'linux',
+    hardware: async () => LINUX_VULKAN,
+    hostPlatform: { platform: null, reason: 'unused' },
+  })
+
+  it('releases the manifest tag, unordered by date, and downloads the CUDA 12 build with its cudart', () => {
+    expect(row.release(manifest)).toEqual({ tag: 'v0.9.3-a1b2c3d4', published_at: null })
+    expect(row.archives(manifest, 'win-cuda12-x64')).toEqual([
+      {
+        url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cuda.zip',
+        name: 'cuda.zip',
+        sha256: 'a'.repeat(64),
+        size: 3,
+      },
+      {
+        url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cudart.zip',
+        name: 'cudart.zip',
+        sha256: 'b'.repeat(64),
+        size: 2,
+      },
+    ])
+    // Unpinned: listed for the catalog, refused by the install.
+    expect(row.archives(manifest, 'win-cpu-x64')).toEqual([
+      { url: 'https://github.com/0xShug0/audio.cpp/releases/download/v0.9.3/cpu.zip', name: 'cpu.zip' },
+    ])
+    expect(row.archives(manifest, 'linux-cpu-x64')).toEqual([])
+  })
+
+  it('refuses to probe or record a build audio.cpp has no backend for', async () => {
+    await expect(row.probe(data.root, ctx(), 'win-rocm-7.14-x64')).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'audio.cpp has no build for win-rocm-7.14-x64.',
+    })
+    const info = {
+      tag: 'v0.9.3',
+      backendId: 'win-cudart-cu12',
+      sha256: null,
+      installedAtMs: 1,
+      publishedAt: null,
+      cApiVersion: null,
+      abi: null,
+      probe: null,
+    }
+    await expect(row.record(data.root, info)).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
+  })
+
+  it('without a failed-backends file remembers nothing and skips nothing', async () => {
+    await row.rememberFailedRung?.(ctx(), 'v0.9.3-a1b2c3d4', 'linux-vulkan-x64')
+    const vulkan = parseAudiocppManifest({
+      tag_name: 'v0.9.3-a1b2c3d4',
+      assets: [
+        { backend: 'linux-vulkan-x64', name: 'v.zip' },
+        { backend: 'linux-cpu-x64', name: 'c.zip' },
+      ],
+    })
+    expect(await row.hostChoice(ctx(), vulkan)).toEqual({
+      ladder: ['linux-vulkan-x64', 'linux-cpu-x64'],
+      backend_id: 'linux-vulkan-x64',
+      reason: null,
+    })
+    expect(await row.hostChoice(ctx(), null)).toMatchObject({
+      reason: 'The audio.cpp manifest is unavailable.',
+    })
+  })
+
+  it('makes the newest install active', () => {
+    const build = (tag: string, at: number): Build => ({
+      tag,
+      backend_id: 'linux-cpu-x64',
+      origin: 'downloaded',
+      dir: `/b/${tag}`,
+      installed_at_ms: at,
+      published_at: null,
+    })
+    expect(row.active([build('v0.9.4', 2), build('v0.9.3', 1)])?.tag).toBe('v0.9.4')
+    expect(row.active([])).toBeUndefined()
   })
 })

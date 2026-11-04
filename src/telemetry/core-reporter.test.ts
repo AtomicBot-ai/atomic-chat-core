@@ -78,7 +78,8 @@ describe('createCoreReporter', () => {
         device: { arch: 'x64', memory_size: 65536 * 1024 * 1024 },
       },
     })
-    expect(event.exception.values[0].value).toBe('EACCES <data>/atomic-core/lock')
+    expect(event.exception.values[0].value).toBe('core startup: unknown')
+    expect(JSON.stringify(event)).not.toContain(dir)
     expect((await createCoreReporter(base)).state()).toMatchObject({ enabled: true })
     expect(JSON.parse(await readFile(telemetryFile, 'utf8')).install_id).toBe(installId)
   })

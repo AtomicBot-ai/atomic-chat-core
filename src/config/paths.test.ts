@@ -47,6 +47,18 @@ describe('dataLayout', () => {
       logsDir: native('/data/foundry-local/logs'),
     })
   })
+  it('gives litert-lm its builds, accelerators, models, library cache, host data and logs under <data>/litert-lm', () => {
+    expect(layout.provider('litert-lm')).toEqual({
+      root: native('/data/litert-lm'),
+      backendsDir: native('/data/litert-lm/backends'),
+      acceleratorsDir: native('/data/litert-lm/accelerators'),
+      modelsDir: native('/data/litert-lm/models'),
+      cacheDir: native('/data/litert-lm/cache'),
+      runtimeDir: native('/data/litert-lm/runtime'),
+      tmpDir: native('/data/litert-lm/tmp'),
+      logsDir: native('/data/litert-lm/logs'),
+    })
+  })
   it('gives atomic-prism its own packs and the shared GGUF tree', () => {
     const prism = layout.provider('atomic-prism')
     expect(prism.modelsDir).toBe(native('/data/llamacpp/models'))
@@ -107,6 +119,18 @@ describe('dataLayout', () => {
       defaultOutputDir: join('/data', 'images'),
       defaultVideoOutputDir: join('/data', 'videos'),
       remoteJobsFile: join('/data', 'diffusion', 'remote-jobs.json'),
+    })
+  })
+  it('puts audio generation under <data>/audio and its gallery in <data>/audios', () => {
+    expect(layout.audio).toEqual({
+      root: join('/data', 'audio'),
+      backendsDir: join('/data', 'audio', 'backends'),
+      modelsDir: join('/data', 'audio', 'models'),
+      runDir: join('/data', 'audio', 'run'),
+      tmpDir: join('/data', 'audio', 'tmp'),
+      manifestCache: join('/data', 'audio', 'audiocpp-manifest.cache.json'),
+      failedBackendsFile: join('/data', 'audio', 'failed-backends.json'),
+      defaultOutputDir: join('/data', 'audios'),
     })
   })
 })

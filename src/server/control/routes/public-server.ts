@@ -1,6 +1,7 @@
 /** The public `/v1` listener: status, start, stop, and the inspector toggle. */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
+import type { ServedModelSelection } from '../../../contracts/index.js'
 import { readJsonBody, sendError, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
 import type { ControlRouteContext, ControlServerDeps } from '../types.js'
@@ -50,4 +51,39 @@ export function registerPublicServerRoutes(
     deps.publicServer.setInspecting(body.enabled)
     sendJson(res, 200, { enabled: body.enabled })
   })
+
+  router.get(p('/server/selection'), (_req, res) =>
+    sendJson(res, 200, { models: deps.publicServer.selection() })
+  )
+
+  // The whole selection, replaced: the app sends what its server page shows after every change.
+  router.put(p('/server/selection'), async (req, res) => {
+    const models = parseSelection(await readJsonBody<unknown>(req))
+    if (!models)
+      return sendError(
+        res,
+        new AtomicCoreError(
+          'INVALID_ARGUMENT',
+          'selection needs {"models": [{"model": "<id>", "provider": "<provider>"}]} with non-empty strings'
+        )
+      )
+    deps.publicServer.setSelection(models)
+    sendJson(res, 200, { models: deps.publicServer.selection() })
+  })
+}
+
+function parseSelection(body: unknown): ServedModelSelection[] | undefined {
+  const models = typeof body === 'object' && body !== null ? (body as { models?: unknown }).models : undefined
+  if (!Array.isArray(models)) return undefined
+  const parsed: ServedModelSelection[] = []
+  for (const entry of models) {
+    const { model, provider } = (typeof entry === 'object' && entry !== null ? entry : {}) as {
+      model?: unknown
+      provider?: unknown
+    }
+    if (typeof model !== 'string' || typeof provider !== 'string' || model === '' || provider === '')
+      return undefined
+    parsed.push({ model, provider })
+  }
+  return parsed
 }

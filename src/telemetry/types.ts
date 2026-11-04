@@ -1,9 +1,10 @@
-import type { TelemetryState } from '../contracts/index.js'
+import type { FailureDiagnostic, TelemetryState } from '../contracts/index.js'
 
 export type ReportLevel = 'fatal' | 'error' | 'warning'
 
 /** Where a report comes from; it becomes the `source` tag and the exception mechanism. */
 export type ReportSource =
+  | 'operation'
   | 'uncaught_exception'
   | 'unhandled_rejection'
   | 'startup'
@@ -14,11 +15,14 @@ export type ReportSource =
   | 'model_load'
   | 'diffusion_load'
   | 'diffusion_job'
+  | 'audio_load'
+  | 'audio_job'
   | 'inference'
 
 /** One failure worth an issue, before scrubbing: what the rest of the core hands the reporter. */
 export interface ErrorReport {
   source: ReportSource
+  diagnostic?: FailureDiagnostic
   level: ReportLevel
   /** The thrown value: its type, headline and stack. */
   error?: unknown

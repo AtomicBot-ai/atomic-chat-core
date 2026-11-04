@@ -35,6 +35,8 @@ export interface HostExecOptions {
   terminateGraceMs?: number
   /** Tests only: stands in for `child_process.spawn`. */
   spawnProcess?: typeof spawn
+  /** Tests only: whose rules for environment names apply (case-insensitive on `win32`). */
+  platform?: NodeJS.Platform
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000
@@ -58,12 +60,23 @@ export type HostExec = (
  * strips it, and every other key of `base` passes through untouched. This is the "merge, not
  * replace" semantics `LinuxProbeDeps.exec`'s own `env` parameter documents (round 2, item 10): a
  * caller stripping `DOCKER_HOST` for one call must not also lose `PATH` for it.
+ *
+ * On Windows a name means the same in any case, so an overlaid key replaces or strips the base's
+ * key in every case. Otherwise `spawn` would get both, and Node passes on only the first of them in
+ * sorted order — `PSMODULEPATH` before `PSModulePath`, the inherited one over the caller's.
  */
-function overlayEnv(base: NodeJS.ProcessEnv, overlay: Record<string, string | undefined>): NodeJS.ProcessEnv {
+function overlayEnv(
+  base: NodeJS.ProcessEnv,
+  overlay: Record<string, string | undefined>,
+  windows: boolean
+): NodeJS.ProcessEnv {
   const merged: NodeJS.ProcessEnv = { ...base }
   for (const [key, value] of Object.entries(overlay)) {
-    if (value === undefined) delete merged[key]
-    else merged[key] = value
+    if (windows) {
+      for (const name of Object.keys(merged))
+        if (name.toUpperCase() === key.toUpperCase()) delete merged[name]
+    } else delete merged[key]
+    if (value !== undefined) merged[key] = value
   }
   return merged
 }
@@ -128,7 +141,13 @@ export function hostExec(options: HostExecOptions = {}): HostExec {
       // No overlay for this call and no configured base: `spawn` gets no `env` key at all, which is
       // how Node inherits `process.env` on its own — the same as before this parameter existed.
       const spawnEnv =
-        envOverlay === undefined ? options.env : overlayEnv(options.env ?? process.env, envOverlay)
+        envOverlay === undefined
+          ? options.env
+          : overlayEnv(
+              options.env ?? process.env,
+              envOverlay,
+              (options.platform ?? process.platform) === 'win32'
+            )
 
       try {
         child = (options.spawnProcess ?? spawn)(command, args, {

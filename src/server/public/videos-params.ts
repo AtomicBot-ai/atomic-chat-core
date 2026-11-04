@@ -252,7 +252,12 @@ export function videoObjectFromItem(item: GalleryVideoItem): OpenAiVideo {
     prompt: item.recipe.prompt,
     remixed_from_video_id: null,
     error: null,
-    atomic: { job_id: item.id, seed: item.recipe.seed, path: item.path, poster_path: item.posterPath },
+    atomic: {
+      job_id: item.id,
+      seed: item.recipe.seed ?? null,
+      path: item.path,
+      poster_path: item.posterPath,
+    },
   }
 }
 

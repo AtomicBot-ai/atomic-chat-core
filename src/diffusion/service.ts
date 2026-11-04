@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * The image-generation service: the twenty operations of the app's `DiffusionService`, one method
  * each, over the module's state. The command surface of `commands.rs` in
@@ -36,7 +37,7 @@ import type { EngineHost } from '../engine-builds/service.js'
 import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'
-import { VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
+import { DIFFUSION_BACKEND_ENV, loadExtraArgs, VIDEO_VAE_TILING_PIXEL_FRAMES } from './args.js'
 import { diffusionError, errorBody, ioError, modelNotLoadedError } from './errors.js'
 import { Gallery } from './gallery.js'
 import { createSdHttpClient } from './http.js'
@@ -91,6 +92,8 @@ import { historyMultiplier, VideoHistory } from './video-history.js'
 import { VIDEO_JOB_KIND } from './video-job.js'
 
 export interface DiffusionServiceDeps {
+  onFailure?: FailureObserver
+
   paths: DiffusionPaths
   /** The core's data folder, which `configure` must name. */
   dataFolder: string
@@ -143,6 +146,7 @@ export class DiffusionService {
   private readonly history: VideoHistory
   private readonly systemInfo: (() => Promise<SystemInfo>) | undefined
   private readonly platform: NodeJS.Platform
+  private readonly env: NodeJS.ProcessEnv
   private readonly dataFolder: string
   private readonly idleTickMs: number | undefined
   private idle: { stop(): void } | undefined
@@ -166,6 +170,7 @@ export class DiffusionService {
     const http = options.http ?? createSdHttpClient()
     const log = options.log
     this.platform = platform
+    this.env = options.env ?? process.env
     this.dataFolder = options.dataFolder
     this.idleTickMs = options.idleTickMs
     this.state = new DiffusionState(options.paths, now)
@@ -201,6 +206,7 @@ export class DiffusionService {
             : {}),
         }))
     this.deps = {
+      ...(options.onFailure ? { onFailure: options.onFailure } : {}),
       state: this.state,
       emit: options.emit,
       log,
@@ -409,7 +415,7 @@ export class DiffusionService {
           ? { offloadFallback: request.offloadFallback }
           : {}),
         ...(request.threads !== undefined ? { threads: request.threads } : {}),
-        extraArgs: [],
+        extraArgs: loadExtraArgs(this.env[DIFFUSION_BACKEND_ENV]),
         startupTimeoutMs:
           (request.startupTimeoutSecs !== undefined && request.startupTimeoutSecs > 0
             ? request.startupTimeoutSecs

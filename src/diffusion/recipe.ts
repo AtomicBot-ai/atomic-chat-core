@@ -36,18 +36,20 @@ export function fmtFloat(value: number): string {
   return expandExponent(String(value))
 }
 
-/** The Automatic1111 `parameters` string, so other tools show the settings. */
+/**
+ * The Automatic1111 `parameters` string, so other tools show the settings. A knob a provider's
+ * model was not sent has no field.
+ */
 export function a1111Parameters(recipe: ImageRecipe): string {
   let out = `${recipe.prompt}\n`
   if (recipe.negativePrompt) out += `Negative prompt: ${recipe.negativePrompt}\n`
-  const fields = [
-    `Steps: ${recipe.steps}`,
-    `Sampler: ${recipe.samplingMethod ?? 'default'}`,
-    `CFG scale: ${fmtFloat(recipe.cfgScale)}`,
-  ]
+  const fields: string[] = []
+  if (recipe.steps !== undefined) fields.push(`Steps: ${recipe.steps}`)
+  fields.push(`Sampler: ${recipe.samplingMethod ?? 'default'}`)
+  if (recipe.cfgScale !== undefined) fields.push(`CFG scale: ${fmtFloat(recipe.cfgScale)}`)
   if (recipe.guidance !== null) fields.push(`Distilled Guidance: ${fmtFloat(recipe.guidance)}`)
+  if (recipe.seed !== undefined) fields.push(`Seed: ${recipe.seed}`)
   fields.push(
-    `Seed: ${recipe.seed}`,
     `Size: ${recipe.width}x${recipe.height}`,
     // A remote model has no file: its id stands in.
     `Model: ${recipe.model.filename || recipe.model.modelId}`
@@ -57,7 +59,11 @@ export function a1111Parameters(recipe: ImageRecipe): string {
   return out + fields.join(', ')
 }
 
-/** The recipe as it is embedded: every key present, in the plugin's order, absent values as `null`. */
+/**
+ * The recipe as it is embedded: every key present, in the plugin's order, absent values as `null`.
+ * A remote recipe leaves out the knobs its model was not sent (`steps`, `cfgScale`, `seed`,
+ * `batchSeed`); the others keep their places.
+ */
 export function serializeRecipe(recipe: ImageRecipe): string {
   const ordered: ImageRecipe = {
     jobId: recipe.jobId,
@@ -66,11 +72,11 @@ export function serializeRecipe(recipe: ImageRecipe): string {
     negativePrompt: recipe.negativePrompt,
     width: recipe.width,
     height: recipe.height,
-    steps: recipe.steps,
-    cfgScale: recipe.cfgScale,
+    ...(recipe.steps === undefined ? {} : { steps: recipe.steps }),
+    ...(recipe.cfgScale === undefined ? {} : { cfgScale: recipe.cfgScale }),
     guidance: recipe.guidance,
-    seed: recipe.seed,
-    batchSeed: recipe.batchSeed,
+    ...(recipe.seed === undefined ? {} : { seed: recipe.seed }),
+    ...(recipe.batchSeed === undefined ? {} : { batchSeed: recipe.batchSeed }),
     batchSize: recipe.batchSize,
     samplingMethod: recipe.samplingMethod,
     flowShift: recipe.flowShift,
@@ -164,6 +170,20 @@ function optional<T>(value: unknown, check: (v: unknown) => v is T): T | null | 
 }
 
 /**
+ * Whether a generation knob (`steps`, `cfgScale`, a seed) is acceptable: a value that passes, or, in
+ * a remote recipe only, no key at all — a provider's model is sent only the knobs it takes. A local
+ * recipe has every knob, as the plugin wrote it.
+ */
+export function knobOk(value: unknown, remote: boolean, check: (v: unknown) => v is number): boolean {
+  return remote && value === undefined ? true : check(value)
+}
+
+/** `{ [key]: value }` for a knob that is there, `{}` for one a remote recipe leaves out. */
+export function knob<K extends string>(key: K, value: unknown): { [P in K]?: number } {
+  return value === undefined ? {} : ({ [key]: value as number } as { [P in K]?: number })
+}
+
+/**
  * A recipe's engine, or `undefined` when it is neither a local engine the plugin knew nor a remote
  * provider through an adapter this core has.
  */
@@ -224,16 +244,17 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
   const strength = optional(raw['strength'], isNumber)
   const parsedEngine = parseRecipeEngine(engine)
   const remote = parseRemoteImage(raw['remote'])
+  const fromProvider = parsedEngine?.kind === 'remote'
   const ok =
     isString(raw['jobId']) &&
     isWhole(raw['index']) &&
     isString(raw['prompt']) &&
     isWhole(raw['width']) &&
     isWhole(raw['height']) &&
-    isWhole(raw['steps']) &&
-    isNumber(raw['cfgScale']) &&
-    isI64(raw['seed']) &&
-    isI64(raw['batchSeed']) &&
+    knobOk(raw['steps'], fromProvider, isWhole) &&
+    knobOk(raw['cfgScale'], fromProvider, isNumber) &&
+    knobOk(raw['seed'], fromProvider, isI64) &&
+    knobOk(raw['batchSeed'], fromProvider, isI64) &&
     isWhole(raw['batchSize']) &&
     among<ImageWorkflowId>(raw['workflow'], IMAGE_WORKFLOWS) &&
     isString(model['modelId']) &&
@@ -257,11 +278,11 @@ export function parseRecipe(text: string): ImageRecipe | undefined {
     negativePrompt,
     width: raw['width'] as number,
     height: raw['height'] as number,
-    steps: raw['steps'] as number,
-    cfgScale: raw['cfgScale'] as number,
+    ...knob('steps', raw['steps']),
+    ...knob('cfgScale', raw['cfgScale']),
     guidance,
-    seed: raw['seed'] as number,
-    batchSeed: raw['batchSeed'] as number,
+    ...knob('seed', raw['seed']),
+    ...knob('batchSeed', raw['batchSeed']),
     batchSize: raw['batchSize'] as number,
     samplingMethod,
     flowShift,

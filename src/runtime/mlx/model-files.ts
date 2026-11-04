@@ -10,6 +10,8 @@ import { readdir, readFile, rename, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import type { ModelRegistry, ModelYmlDocument } from '../../models/index.js'
+import { readKvCacheShape } from '../managed-models/compatibility.js'
+import type { JsonObject } from '../managed-models/quant-format.js'
 import { planMlxShardRepair, repointLegacyWeightPath } from './shard-repair.js'
 
 /** A model path's folder: the path itself when it is a folder, its parent otherwise. */
@@ -35,6 +37,35 @@ export async function readMlxMaxCtxTrain(modelPath: string): Promise<number | un
   } catch {
     return undefined
   }
+}
+
+/**
+ * What the small-Mac default window is sized by: the weights on disk (every `*.safetensors` of the
+ * folder) and the KV cache a token takes, `2 × attention layers × KV heads × head dim` at 16 bits, or
+ * at `kvBits` when the KV cache is quantized — `undefined` when `config.json` does not say.
+ */
+export async function readMlxMemoryFacts(
+  modelPath: string,
+  kvBits: number
+): Promise<{ weightsBytes: number; kvBytesPerToken: number | undefined }> {
+  const dir = await mlxModelDir(modelPath)
+  let weightsBytes = 0
+  for (const name of await readdir(dir).catch(() => [] as string[])) {
+    if (!name.endsWith('.safetensors')) continue
+    weightsBytes += (await stat(join(dir, name)).catch(() => undefined))?.size ?? 0
+  }
+  let kvBytesPerToken: number | undefined
+  try {
+    const shape = readKvCacheShape(JSON.parse(await readFile(join(dir, 'config.json'), 'utf8')) as JsonObject)
+    const bits = kvBits > 0 ? kvBits : 16
+    if (shape)
+      kvBytesPerToken = Math.ceil(
+        (2 * shape.numHiddenLayers * shape.numKeyValueHeads * shape.headDim * bits) / 8
+      )
+  } catch {
+    kvBytesPerToken = undefined
+  }
+  return { weightsBytes, kvBytesPerToken }
 }
 
 /**

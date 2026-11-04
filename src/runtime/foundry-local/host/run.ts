@@ -170,7 +170,7 @@ export const loadLibraryWithBun: LoadFoundryLibrary = async (libDir) => {
     throw new FoundryLibraryError(
       'load',
       0,
-      `foundry-host runs inside the compiled atomic-chat-core binaries only (${error instanceof Error ? error.message : String(error)})`
+      `foundry-host runs only inside a compiled binary (${error instanceof Error ? error.message : String(error)})`
     )
   }
   return module.loadBunFoundryLibrary(libDir)

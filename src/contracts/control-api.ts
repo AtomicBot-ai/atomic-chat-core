@@ -52,6 +52,16 @@ export interface LocalApiServerState {
 
 export const LOCAL_API_SERVER_STATE_FILE = 'local-api-server.json'
 
+/**
+ * One entry of `PUT`/`GET /atomic/v1/server/selection`: the provider the app selected to serve a
+ * model id on the public server — a local engine id (`llamacpp-upstream`) or a registered cloud
+ * provider id. Such an id goes to that provider only; ids without an entry keep the rules without one.
+ */
+export interface ServedModelSelection {
+  model: string
+  provider: string
+}
+
 /** `GET /atomic/v1/telemetry`: whether the core reports its errors, and why. Never the DSN. */
 export interface TelemetryState {
   enabled: boolean

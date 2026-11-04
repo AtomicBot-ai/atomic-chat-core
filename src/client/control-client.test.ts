@@ -27,6 +27,7 @@ import { ClientRegistry } from '../server/clients.js'
 import { ControlServer } from '../server/control/index.js'
 import { CoreClient } from './control-client.js'
 import { fakeDiffusionControl } from '../../test/helpers/fake-diffusion-control.js'
+import { fakeAudioControl } from '../../test/helpers/fake-audio-control.js'
 import { fakeSettingsControl } from '../../test/helpers/fake-settings-control.js'
 import { HardwareService } from '../hardware/index.js'
 import { HARNESS_SYSTEM_INFO } from '../../test/helpers/control-harness.js'
@@ -36,6 +37,8 @@ const TOKEN = 'client-test-token'
 
 let server: ControlServer
 let client: CoreClient
+/** The bodies the core's backend catalog received, as it parsed them. */
+const catalogBodies: Array<[string, BackendCatalogRequest]> = []
 let emitter: CoreEmitter
 let clients: ClientRegistry
 let sessions: Array<SessionInfo & { provider: 'llamacpp-upstream' }>
@@ -43,8 +46,10 @@ let serverState: LocalApiServerState
 let shutdowns: number
 let loadFailure: Error | undefined
 let inspecting = false
+let selection: Array<{ model: string; provider: string }> = []
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
+const audioCalls: string[] = []
 const engineBuildCalls: string[] = []
 const engineCalls: string[] = []
 const environmentCalls: string[] = []
@@ -227,10 +232,12 @@ beforeEach(async () => {
       getOptimal: async () => ({ revision: 0, optimal: null }),
       setOptimal: async () => ({ status: 'updated', current: { revision: 1, optimal: null } }),
       optimalSnapshot: () => ({}),
-      catalog: async (provider: string, request: BackendCatalogRequest) => ({
-        ...fakeCatalog(provider),
-        recommended: request.force ? 'b99999/win-cpu-x64' : null,
-      }),
+      catalog: async (provider: string, request: BackendCatalogRequest) => {
+        catalogBodies.push([provider, request])
+        if ((request.min_build ?? 0) > 20_000)
+          throw new AtomicCoreError('BACKEND_BUILD_UNAVAILABLE', 'No engine build meets the model file')
+        return { ...fakeCatalog(provider), recommended: request.force ? 'b99999/win-cpu-x64' : null }
+      },
       recommend: async (provider: string, request: BackendRecommendationRequest) => ({
         provider: provider as 'llamacpp-upstream' | 'llamacpp',
         mode: request.mode,
@@ -324,8 +331,26 @@ beforeEach(async () => {
       },
     },
     diffusion: fakeDiffusionControl(diffusionCalls),
+    audio: fakeAudioControl(audioCalls),
     engineBuilds: fakeEngineBuildsControl(engineBuildCalls),
     engines: fakeEnginesControl(engineCalls),
+    liteRtLm: {
+      accelerators: async () => ({
+        installed: true,
+        build: '0.18.1/win-x64',
+        npu: 'intel-lnl',
+        accelerators: [
+          { name: 'openvino', device: 'npu', version: '2026.4.1', size_bytes: 1, prepared: false },
+        ],
+        error: null,
+      }),
+      prepare: async (request) => ({
+        accelerators: (request.accelerators ?? ['openvino']).map((name) => ({ name, prepared: true })),
+      }),
+    },
+    nativeModelChecks: {
+      'litert-lm': async (body) => ({ verdict: 'ok', reason: null, echo: body }),
+    },
     foundryLocal: {
       accelerators: async (force) => ({
         installed: true,
@@ -352,6 +377,10 @@ beforeEach(async () => {
     publicServer: {
       setInspecting: (enabled: boolean) => {
         inspecting = enabled
+      },
+      selection: () => [...selection],
+      setSelection: (models) => {
+        selection = [...models]
       },
       status: () => ({ ...serverState }),
       start: async (options) => {
@@ -454,6 +483,12 @@ describe('sessions and public server', () => {
       port: 8081,
     })
     expect(await client.stopServer()).toMatchObject({ running: false })
+  })
+
+  it('replaces and reads the provider selected for each model id', async () => {
+    const models = [{ model: 'qwen', provider: 'llamacpp-upstream' }]
+    expect(await client.setServerSelection(models)).toEqual({ models })
+    expect(await client.serverSelection()).toEqual({ models })
   })
 
   it('asks the core to shut down', async () => {
@@ -608,6 +643,59 @@ describe('recreate', () => {
       ok: false,
       reason: 'not-loaded',
     })
+  })
+})
+
+describe('audio generation', () => {
+  it('drives the operations, unwrapping the lists and the lookups', async () => {
+    audioCalls.length = 0
+    expect((await client.audioStatus()).outputDir).toBe('/tmp/data/audios')
+    expect((await client.configureAudio({ idleUnloadSecs: 0 })).idleUnloadSecs).toBe(0)
+    expect((await client.setAudioOutputDir('/sounds')).outputDir).toBe('/sounds')
+    expect((await client.listAudioModelFiles()).map((f) => f.relativePath)).toEqual(['kokoro/k.gguf'])
+    await client.deleteAudioModelFile('kokoro/k.gguf')
+    const loaded = await client.loadAudioModel({
+      modelId: 'kokoro-82m:q8_0',
+      displayName: 'Kokoro 82M',
+      mode: 'speech',
+      file: 'kokoro/k.gguf',
+      family: 'kokoro_tts',
+      task: 'tts',
+    })
+    expect(loaded.pid).toBe(778)
+    expect((await client.audioCapabilities()).voices).toEqual(['af_heart'])
+    await client.touchAudioIdle()
+    const job = await client.generateAudio('speech', { text: 'hello', voice: 'af_heart' })
+    expect(job).toMatchObject({ id: 'ajob-1', mode: 'speech', request: { text: 'hello', voice: 'af_heart' } })
+    expect((await client.audioJob(job.id))?.state).toBe('queued')
+    expect(await client.audioJob('gone/with/slashes')).toBeNull()
+    expect(await client.cancelAudioJob(job.id)).toEqual({ cancelled: true, serverStopped: true })
+    const page = await client.audioGallery({ offset: 0, limit: 20 })
+    expect(page.items[0]?.recipe.engine.kind).toBe('audio-cpp')
+    await client.deleteAudioGalleryItem(page.items[0]?.id as string)
+    await client.unloadAudioModel()
+    expect(audioCalls).toEqual([
+      'audio config {"idleUnloadSecs":0}',
+      'audio setOutputDir /sounds',
+      'audio deleteModelFile kokoro/k.gguf',
+      'audio loadModel kokoro-82m:q8_0 speech',
+      'audio touchIdle',
+      'audio generate speech hello',
+      'audio cancelJob ajob-1',
+      'audio gallery {"offset":0,"limit":20}',
+      `audio deleteGalleryItem ${page.items[0]?.id}`,
+      'audio unloadModel',
+    ])
+  })
+
+  it('surfaces a refusal with the audio code', async () => {
+    await expect(
+      client.generateAudio('lullabies' as unknown as 'speech', { text: 'hello' })
+    ).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      details: 'mode: expected one of speech, music, effects',
+    })
+    await expect(client.loadAudioModel({} as never)).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 })
 
@@ -783,6 +871,19 @@ describe('backend advisor', () => {
       code: 'INVALID_ARGUMENT',
     })
   })
+
+  // Change close-cli-core-gaps, task 2.3: the file's requirements travel in the body as given.
+  it('sends requires and min_build in the PrismML catalog body and surfaces BACKEND_BUILD_UNAVAILABLE', async () => {
+    catalogBodies.length = 0
+    await client.backendCatalog('atomic-prism', { requires: ['pq2_0'] })
+    await expect(
+      client.backendCatalog('atomic-prism', { requires: ['pq2_0'], min_build: 99_999 })
+    ).rejects.toMatchObject({ code: 'BACKEND_BUILD_UNAVAILABLE' })
+    expect(catalogBodies).toEqual([
+      ['atomic-prism', { requires: ['pq2_0'] }],
+      ['atomic-prism', { requires: ['pq2_0'], min_build: 99_999 }],
+    ])
+  })
 })
 
 describe('engine builds', () => {
@@ -827,6 +928,26 @@ describe('foundry local accelerators (task 6.4)', () => {
     expect(await client.prepareFoundryLocalAccelerators({ accelerators: ['CUDAExecutionProvider'] })).toEqual(
       { accelerators: [{ name: 'CUDAExecutionProvider', prepared: true }] }
     )
+  })
+})
+
+describe('litert-lm accelerator and check (tasks 6.4–6.5)', () => {
+  it('reads what is offered, prepares through a proxy, and checks a variant', async () => {
+    expect(await client.liteRtLmAccelerators()).toMatchObject({ npu: 'intel-lnl', build: '0.18.1/win-x64' })
+    expect(await client.prepareLiteRtLmAccelerators()).toEqual({
+      accelerators: [{ name: 'openvino', prepared: true }],
+    })
+    expect(
+      await client.prepareLiteRtLmAccelerators({
+        accelerators: ['openvino'],
+        proxy: { url: 'http://p:3128' },
+      })
+    ).toEqual({ accelerators: [{ name: 'openvino', prepared: true }] })
+    expect(await client.checkLiteRtLmModel({ backend: 'npu', npu: 'intel-lnl' })).toEqual({
+      verdict: 'ok',
+      reason: null,
+      echo: { backend: 'npu', npu: 'intel-lnl' },
+    })
   })
 })
 

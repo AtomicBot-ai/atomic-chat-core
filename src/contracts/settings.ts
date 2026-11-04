@@ -35,6 +35,11 @@ export interface LlamacppConfig {
   llamacpp_env: string
   extra_args: string
   reasoning_preserve: boolean
+  /**
+   * `--reasoning-budget`: thinking tokens a request that names no budget may spend; -1 unbounded, 0 no
+   * thinking. Not in Rust `LlamacppConfig` (absent means -1 there).
+   */
+  reasoning_budget: number
   mtp: boolean
   mtp_draft_path: string
   dflash: boolean
@@ -101,6 +106,28 @@ export interface FoundationModelsConfig {
 
 /** `foundry-local` (change `add-foundry-local`): seconds a model may take to load in its host. */
 export interface FoundryLocalConfig {
+  timeout: number
+}
+
+/** `litert-lm` (change `add-litert-lm-runtime`, design D6). */
+export interface LiteRtLmConfig {
+  /** Tokens; `0` takes `model.yml`'s length. Always cut to the file's maximum. */
+  ctx_len: number
+  /** On when the file carries a draft model. */
+  speculative_decoding: boolean
+  /** Seconds a model may take to load in its host. */
+  timeout: number
+}
+
+/** `geniex` (change `add-geniex-runtime`, design D7). */
+export interface GeniexConfig {
+  /** `npu`, `gpu`, `cpu` or `hybrid`; `''` takes `model.yml`'s default device. A `qairt` bundle runs on `npu` only. */
+  device: string
+  /** Tokens; `0` takes `model.yml`'s length. Always cut to the model's maximum. */
+  ctx_len: number
+  /** The NPU power mode (`geniex_PowerMode`); `burst` is Qualcomm's default. Ignored off the NPU. */
+  power_mode: string
+  /** Seconds a model may take to load in its host. */
   timeout: number
 }
 
@@ -197,7 +224,11 @@ export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
           ? SglangProviderConfig
           : P extends 'foundry-local'
             ? FoundryLocalConfig
-            : LlamacppConfig
+            : P extends 'litert-lm'
+              ? LiteRtLmConfig
+              : P extends 'geniex'
+                ? GeniexConfig
+                : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

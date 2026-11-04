@@ -123,6 +123,18 @@ export function cpuBackendExtraArgs(extraArgs: readonly string[]): string[] {
   return [...withoutDeviceBackendFlags(extraArgs), '--backend', 'cpu']
 }
 
+/**
+ * `cpu` starts every load on the CPU backend. The engine candidate check sets it through the live
+ * test: a macOS CI runner's GPU is a paravirtual device that ggml's Metal kernels crash on. No
+ * other value does anything.
+ */
+export const DIFFUSION_BACKEND_ENV = 'ATOMIC_DIFFUSION_BACKEND'
+
+/** The `extraArgs` a load starts with: the CPU backend under `ATOMIC_DIFFUSION_BACKEND=cpu`, else none. */
+export function loadExtraArgs(envValue: string | undefined): string[] {
+  return (envValue ?? '').trim().toLowerCase() === 'cpu' ? cpuBackendExtraArgs([]) : []
+}
+
 const GGML_UNSUPPORTED_OP_MARKERS = ['unsupported op', 'ggml_abort']
 
 /**

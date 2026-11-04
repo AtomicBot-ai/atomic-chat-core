@@ -29,6 +29,8 @@ const LOCAL_PROVIDERS = new Set([
   'vllm',
   'sglang',
   'foundry-local',
+  'litert-lm',
+  'geniex',
 ])
 
 export interface CustomHeader {

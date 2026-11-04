@@ -2,24 +2,56 @@
  * `scripts/lib/engine-pin.mjs` decides which llama.cpp release the candidate check compares against:
  * the one this core takes today. It re-implements the TypeScript catalog in plain JS for the
  * scripts, so it is held here to the same answers as `upstreamRemoteBackends` — on the bundled
- * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only.
+ * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only —
+ * and, for PrismML, as `prismCatalogToBackends`; for sd.cpp, as `parseSdcppManifest` and the host
+ * ladder of `sdcppHostChoice`; for audio.cpp, as `parseAudiocppManifest` and `audiocppHostChoice`.
  */
 import { describe, expect, it } from 'vitest'
 import {
+  AUDIOCPP_PIN_PLATFORMS,
+  audiocppTagParts,
+  engineTagBuild,
+  parseAudiocppPinManifest,
   PIN_PLATFORMS,
+  PRISM_PIN_PLATFORMS,
+  parsePrismManifest as parsePrismMjs,
+  parseSdcppPinManifest,
   parseUpstreamReleases as parseMjs,
+  prismCatalogToBackends as prismBackendsMjs,
+  resolveAudiocppPins,
   resolvePins,
+  resolvePrismPins,
+  resolveSdcppPins,
+  SDCPP_PIN_PLATFORMS,
+  sdcppTagBuild,
+  sdcppTagParts,
   upstreamCatalogFromLegacyManifest as legacyMjs,
   upstreamRemoteBackends as remoteMjs,
 } from '../../scripts/lib/engine-pin.mjs'
 import {
+  determinePrismSupportedBackends,
   determineSupportedBackends,
   normalizeFeatures,
+  parsePrismManifest,
   parseUpstreamReleases,
+  prismCatalogToBackends,
   upstreamCatalogFromLegacyManifest,
   upstreamRemoteBackends,
 } from '../../src/backend/index.js'
+import {
+  assetInstallable,
+  audiocppBuildKey,
+  audiocppHostChoice,
+  parseAudiocppManifest,
+  parseSdcppManifest,
+  sdcppHostChoice,
+} from '../../src/engine-builds/index.js'
 import baseline from '../../src/backend/catalog/upstream-releases-baseline.json' with { type: 'json' }
+import sdcppLive from '../fixtures/sdcpp/conf/sdcpp-manifest.json' with { type: 'json' }
+import sdcppStaging from '../fixtures/sdcpp/conf/sdcpp-manifest.staging.json' with { type: 'json' }
+import prismBaseline from '../../src/backend/catalog/prism-manifest-baseline.json' with { type: 'json' }
+import audiocppMirror from '../fixtures/audiocpp/conf/audiocpp-manifest.json' with { type: 'json' }
+import audiocppBootstrap from '../fixtures/audiocpp/conf/audiocpp-manifest.staging.json' with { type: 'json' }
 
 const sha = (n: number) => n.toString(16).padStart(64, '0')
 const asset = (tag: string, infix: string, validation: 'approved' | 'candidate' = 'approved') => ({
@@ -164,5 +196,271 @@ describe('resolvePins', () => {
     expect(pins.list.readable).toBe(false)
     expect(pins.per_platform['windows-x64']?.tag).toBe('b11400')
     expect(pins.per_platform['linux-x64']?.tag).toBeNull()
+  })
+})
+
+const prismTag = (build: number) => `prism-b${build}-${(build % 0xfffffff).toString(16).padStart(7, '0')}`
+const prismAsset = (
+  tag: string,
+  backend: string,
+  validation: 'approved' | 'candidate' = 'approved',
+  extra: object = {}
+) => ({
+  backend,
+  name: `llama-${tag}-bin-${backend}.tar.gz`,
+  size: 1000,
+  sha256: sha(backend.length),
+  validation,
+  ...extra,
+})
+const prismRelease = (
+  build: number,
+  extra: object = {},
+  validation: 'approved' | 'candidate' = 'approved'
+) => {
+  const tag = prismTag(build)
+  return {
+    tag,
+    commit: `${tag.slice(-7)}${'0'.repeat(33)}`,
+    published_at: '2026-10-19T00:00:00Z',
+    min_core_version: '0.10.0',
+    notes_url: `https://example.invalid/${tag}`,
+    capabilities: ['pq2_0'],
+    assets: [
+      ...PRISM_PIN_PLATFORMS.map((p) => prismAsset(tag, p.backend, validation)),
+      prismAsset(tag, 'win-cuda-12.4-x64', validation, { companion_backend: 'win-cudart-12.4-x64' }),
+      prismAsset(tag, 'win-cudart-12.4-x64', 'candidate', { companion: true }),
+    ],
+    ...extra,
+  }
+}
+const prismManifests: Record<string, unknown> = {
+  'baseline': prismBaseline,
+  'a withdrawn newest release': {
+    schema_version: 1,
+    releases: [prismRelease(10787, { withdrawn: { reason: 'crashes' } }), prismRelease(10754)],
+  },
+  'the newest release needs a newer core': {
+    schema_version: 1,
+    releases: [prismRelease(10787, { min_core_version: '99.0.0' }), prismRelease(10754)],
+  },
+  'the newest release only a candidate': {
+    schema_version: 1,
+    releases: [prismRelease(10787, {}, 'candidate'), prismRelease(10754)],
+  },
+  'a newer schema': { schema_version: 2, releases: [prismRelease(10787)] },
+  'malformed entries': {
+    schema_version: 1,
+    releases: [{ tag: 'b11617', assets: [] }, prismRelease(10754), 7],
+  },
+}
+
+describe('engine-pin.mjs reads the PrismML manifest as the core does', () => {
+  for (const [name, raw] of Object.entries(prismManifests)) {
+    it(`${name}: same offered packs`, () => {
+      const ts = parsePrismManifest(raw)
+      const mjs = parsePrismMjs(raw)
+      expect(mjs === null).toBe(ts === null)
+      if (!ts || !mjs) return
+      for (const coreVersion of ['0.17.0', '99.0.0'])
+        for (const allowCandidates of [false, true])
+          expect(prismBackendsMjs(mjs, { coreVersion, allowCandidates })).toEqual(
+            prismCatalogToBackends(ts, { coreVersion, allowCandidates })
+          )
+    })
+  }
+
+  it('names the CPU pack core installs on each platform PrismML builds for', () => {
+    for (const p of PRISM_PIN_PLATFORMS) {
+      const arch = p.arch === 'x64' ? 'x86_64' : 'aarch64'
+      expect(determinePrismSupportedBackends(p.os, arch, normalizeFeatures(null))[0]).toBe(p.backend)
+    }
+  })
+
+  it('pins each platform to the newest release whose CPU pack is approved', () => {
+    const pins = resolvePrismPins({
+      manifest: {
+        schema_version: 1,
+        releases: [
+          { ...prismRelease(10787), assets: [prismAsset(prismTag(10787), 'macos-arm64')] },
+          prismRelease(10754),
+        ],
+      },
+      coreVersion: '0.18.5',
+    })
+    expect(pins.source).toBe('prism-manifest')
+    expect(pins.per_platform['macos-arm64']?.tag).toBe(prismTag(10787))
+    expect(pins.per_platform['linux-x64']?.tag).toBe(prismTag(10754))
+    expect(pins.legacy.tag).toBeNull()
+    const none = resolvePrismPins({ manifest: undefined, coreVersion: '0.18.5' })
+    expect(none.source).toBe('none')
+    expect(Object.values(none.per_platform).every((p) => p.tag === null)).toBe(true)
+  })
+
+  it("reads the build of either engine's tags", () => {
+    expect(engineTagBuild('b11617')).toBe(11617)
+    expect(engineTagBuild('prism-b10787-73bfe6c')).toBe(10787)
+    expect(engineTagBuild('b10018-1.3.0')).toBeNull()
+    expect(engineTagBuild('prism-b10787')).toBeNull()
+  })
+})
+
+describe('engine-pin.mjs reads the sd.cpp manifest as the core does', () => {
+  const manifests: Record<string, unknown> = {
+    'conf live (master-883-137f740-a36f1b1a)': sdcppLive,
+    'conf staging (master-883-137f740)': sdcppStaging,
+    'a rebuild tag with its own rev': { ...sdcppLive, tag_name: 'master-975-95b3090-a0123456' },
+    'no sha256 on the CPU archives': {
+      ...sdcppLive,
+      assets: sdcppLive.assets.map(({ sha256: _sha256, ...a }) => a),
+    },
+    'an asset name with a path in it, and a backend listed twice': {
+      tag_name: 'master-883-137f740',
+      assets: [
+        { backend: 'linux-cpu-x64', name: '../x.zip', sha256: sha(1), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'a.zip', sha256: sha(2), size: 2 },
+        { backend: 'linux-cpu-x64', name: 'b.zip', sha256: sha(3), size: 3 },
+      ],
+    },
+    'a tag without its upstream commit': { ...sdcppLive, tag_name: 'master-883' },
+    'a rev of eight characters': { ...sdcppLive, tag_name: 'master-883-137f740-a36f1b1aa' },
+    'no assets': { tag_name: 'master-883-137f740', assets: [] },
+    'not an object': 'master-883-137f740',
+  }
+  const ts = (raw: unknown) => {
+    try {
+      return parseSdcppManifest(raw)
+    } catch {
+      return null
+    }
+  }
+
+  for (const [name, raw] of Object.entries(manifests))
+    it(`${name}: the same document, the pin the core would install on each platform`, () => {
+      const core = ts(raw)
+      const mjs = parseSdcppPinManifest(raw)
+      expect(mjs).toEqual(core)
+      const pins = resolveSdcppPins({ manifest: raw, coreVersion: '0.18.6' })
+      expect(pins.source).toBe(core ? 'sdcpp-manifest' : 'none')
+      for (const p of SDCPP_PIN_PLATFORMS) {
+        // A CPU-only host: the bottom rung of the ladder, which is the archive the check runs.
+        const choice = core
+          ? sdcppHostChoice({ os: p.os, arch: p.arch, features: {}, gpus: [] }, core, new Set())
+          : null
+        const archive = core?.assets.find((a) => a.backend === choice?.backend_id)
+        expect(pins.per_platform[p.platform], p.platform).toEqual({
+          backend: p.backend,
+          tag: archive && assetInstallable(archive) ? core?.tag_name : null,
+        })
+        if (archive) expect(choice?.backend_id).toBe(p.backend)
+      }
+    })
+
+  it('splits a tag into its build, the upstream commit and tag, and the fork rev', () => {
+    expect(sdcppTagParts('master-883-137f740-a36f1b1a')).toEqual({
+      build: 883,
+      sha7: '137f740',
+      upstream_tag: 'master-883-137f740',
+      atomic_rev: '36f1b1a',
+    })
+    expect(sdcppTagParts('master-975-95b3090')).toMatchObject({
+      upstream_tag: 'master-975-95b3090',
+      atomic_rev: null,
+    })
+    for (const tag of ['master-883', 'master-883-137F740', 'b11617', 'master-883-137f740-atomic'])
+      expect(sdcppTagParts(tag), tag).toBeNull()
+    expect(sdcppTagBuild('master-883-137f740-a36f1b1a')).toBe(883)
+    expect(engineTagBuild('master-975-95b3090')).toBe(975)
+  })
+})
+
+describe('engine-pin.mjs reads the audio.cpp manifest as the core does', () => {
+  const manifests: Record<string, unknown> = {
+    'conf bootstrap staging (upstream v0.9.3)': audiocppBootstrap,
+    'a fork build on conf’s mirror (v0.9.3-a1b2c3d4)': audiocppMirror,
+    'a later rebuild': { ...audiocppMirror, tag_name: 'v0.10.0-a0123456' },
+    'no sha256 on the CPU archives': {
+      ...audiocppMirror,
+      assets: audiocppMirror.assets.map(({ sha256: _sha256, ...a }) => a),
+    },
+    'an asset name with a path in it, and a backend listed twice': {
+      tag_name: 'v0.9.3',
+      assets: [
+        { backend: 'linux-cpu-x64', name: '../x.zip', sha256: sha(1), size: 1 },
+        { backend: 'linux-cpu-x64', name: 'a.zip', sha256: sha(2), size: 2 },
+        { backend: 'linux-cpu-x64', name: 'b.zip', sha256: sha(3), size: 3 },
+      ],
+    },
+    'an upstream side tag': { ...audiocppBootstrap, tag_name: 'v0.9.2-drama3-base-small' },
+    'a rev of six characters': { ...audiocppMirror, tag_name: 'v0.9.3-a1b2c3' },
+    'an sd.cpp tag': { ...audiocppMirror, tag_name: 'master-883-137f740' },
+    'no assets': { tag_name: 'v0.9.3', assets: [] },
+    'not an object': 'v0.9.3',
+  }
+  const ts = (raw: unknown) => {
+    try {
+      return parseAudiocppManifest(raw)
+    } catch {
+      return null
+    }
+  }
+
+  for (const [name, raw] of Object.entries(manifests))
+    it(`${name}: the same document, the pin the core would install on each platform`, () => {
+      const core = ts(raw)
+      const mjs = parseAudiocppPinManifest(raw)
+      expect(mjs).toEqual(core)
+      const pins = resolveAudiocppPins({ manifest: raw, coreVersion: '0.21.0' })
+      expect(pins.source).toBe(core ? 'audiocpp-manifest' : 'none')
+      for (const p of AUDIOCPP_PIN_PLATFORMS) {
+        // A CPU-only host: the bottom rung of the ladder, which is the archive the check runs.
+        const choice = core
+          ? audiocppHostChoice({ os: p.os, arch: p.arch, features: {}, gpus: [] }, core, new Set())
+          : null
+        const archive = core?.assets.find((a) => a.backend === choice?.backend_id)
+        expect(pins.per_platform[p.platform], p.platform).toEqual({
+          backend: p.backend,
+          tag: archive && assetInstallable(archive) ? core?.tag_name : null,
+        })
+        if (archive) expect(choice?.backend_id).toBe(p.backend)
+      }
+    })
+
+  it('has no pin anywhere until conf approves a first build, and none on arm64 for the upstream bootstrap', () => {
+    expect(resolveAudiocppPins({ manifest: undefined, coreVersion: '0.21.0' }).source).toBe('none')
+    const bootstrap = resolveAudiocppPins({ manifest: audiocppBootstrap, coreVersion: '0.21.0' })
+    expect(Object.fromEntries(Object.entries(bootstrap.per_platform).map(([k, v]) => [k, v.tag]))).toEqual({
+      'linux-x64': 'v0.9.3',
+      'linux-arm64': null,
+      'macos-arm64': 'v0.9.3',
+      'windows-x64': 'v0.9.3',
+      'windows-arm64': null,
+    })
+  })
+
+  it('splits a tag into its version, the upstream tag and the fork rev, as the core orders them', () => {
+    expect(audiocppTagParts('v0.9.3-a1b2c3d4')).toEqual({
+      version: '0.9.3',
+      upstream_tag: 'v0.9.3',
+      atomic_rev: '1b2c3d4',
+    })
+    expect(audiocppTagParts('v0.10.0')).toEqual({
+      version: '0.10.0',
+      upstream_tag: 'v0.10.0',
+      atomic_rev: null,
+    })
+    for (const tag of ['v0.9.2-drama3-base-small', 'v0.8.2-audio8-perf-hotfix', '0.9.3', 'v0.9', 'b11617'])
+      expect(audiocppTagParts(tag), tag).toBeNull()
+    for (const tag of ['v0.9.3', 'v0.9.3-a1b2c3d4', 'v12.0.1-a0000000', 'v0.9.2-drama3-base-small']) {
+      const key = audiocppBuildKey(tag)
+      const parts = audiocppTagParts(tag)
+      expect(parts === null, tag).toBe(key === null)
+      if (key && parts) {
+        expect(parts.version, tag).toBe(key.slice(0, 3).join('.'))
+        expect(parts.atomic_rev !== null, tag).toBe(key[3] === 1)
+      }
+    }
+    // audio.cpp has no build number: llama.cpp's build gates never apply to it.
+    expect(engineTagBuild('v0.9.3')).toBeNull()
   })
 })

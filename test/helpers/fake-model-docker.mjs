@@ -14,6 +14,9 @@
  * before it is ready with vLLM's out-of-memory traceback. Every container keeps the `docker create`
  * arguments it was made with (`args`), so a test can inspect its env, argv and mounts.
  *
+ * Every engine `start` spawns ends on its own once this state file is gone, or after a few minutes at
+ * most (`fake-engine-lifetime.mjs`): a test run that dies before its `afterEach` leaves none behind.
+ *
  * A container whose command is `python3 -m sglang.launch_server …` (change `add-sglang-runtime`) runs
  * `fake-sglang-engine.mjs` and logs SGLang's start-up lines; one for a model whose folder name contains
  * `oom` exits before it is ready because its weights left no memory for the KV cache, and one whose

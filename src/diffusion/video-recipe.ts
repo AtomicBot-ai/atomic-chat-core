@@ -11,7 +11,7 @@ import type {
   VideoRecipe,
   VideoWorkflowId,
 } from '../contracts/index.js'
-import { orderedEngine, parseRecipeEngine } from './recipe.js'
+import { knob, knobOk, orderedEngine, parseRecipeEngine } from './recipe.js'
 import { VIDEO_WORKFLOWS } from './workflow.js'
 
 export const RECIPE_SIDECAR_SUFFIX = '.json'
@@ -39,7 +39,10 @@ function optional<T>(value: unknown, check: (v: unknown) => v is T): T | null | 
   return check(value) ? value : undefined
 }
 
-/** The sidecar's text: every key, fixed order, `null`s, two-space indent like the flags file. */
+/**
+ * The sidecar's text: every key, fixed order, `null`s, two-space indent like the flags file. A
+ * provider's clip leaves out the steps and CFG it is never sent, and the seed its model did not take.
+ */
 export function serializeVideoRecipe(recipe: VideoRecipe): string {
   const ordered: VideoRecipe = {
     jobId: recipe.jobId,
@@ -50,10 +53,10 @@ export function serializeVideoRecipe(recipe: VideoRecipe): string {
     frames: recipe.frames,
     frameCount: recipe.frameCount,
     fps: recipe.fps,
-    steps: recipe.steps,
-    cfgScale: recipe.cfgScale,
+    ...(recipe.steps === undefined ? {} : { steps: recipe.steps }),
+    ...(recipe.cfgScale === undefined ? {} : { cfgScale: recipe.cfgScale }),
     guidance: recipe.guidance,
-    seed: recipe.seed,
+    ...(recipe.seed === undefined ? {} : { seed: recipe.seed }),
     samplingMethod: recipe.samplingMethod,
     flowShift: recipe.flowShift,
     workflow: recipe.workflow,
@@ -122,6 +125,7 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
   const flowShift = optional(raw['flowShift'], isNumber)
   const parsedEngine = parseRecipeEngine(engine)
   const remote = parseRemoteVideo(raw['remote'])
+  const fromProvider = parsedEngine?.kind === 'remote'
   const ok =
     isString(raw['jobId']) &&
     isString(raw['prompt']) &&
@@ -130,9 +134,9 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
     isWhole(raw['frames']) &&
     isWhole(raw['frameCount']) &&
     isWhole(raw['fps']) &&
-    isWhole(raw['steps']) &&
-    isNumber(raw['cfgScale']) &&
-    isI64(raw['seed']) &&
+    knobOk(raw['steps'], fromProvider, isWhole) &&
+    knobOk(raw['cfgScale'], fromProvider, isNumber) &&
+    knobOk(raw['seed'], fromProvider, isI64) &&
     among<VideoWorkflowId>(raw['workflow'], VIDEO_WORKFLOWS) &&
     among(raw['outputFormat'], OUTPUT_FORMATS) &&
     isString(model['modelId']) &&
@@ -157,10 +161,10 @@ export function parseVideoRecipe(text: string): VideoRecipe | undefined {
     frames: raw['frames'] as number,
     frameCount: raw['frameCount'] as number,
     fps: raw['fps'] as number,
-    steps: raw['steps'] as number,
-    cfgScale: raw['cfgScale'] as number,
+    ...knob('steps', raw['steps']),
+    ...knob('cfgScale', raw['cfgScale']),
     guidance,
-    seed: raw['seed'] as number,
+    ...knob('seed', raw['seed']),
     samplingMethod,
     flowShift,
     workflow: raw['workflow'] as VideoWorkflowId,

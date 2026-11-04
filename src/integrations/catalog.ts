@@ -80,7 +80,9 @@ export const AGENTS: readonly Agent[] = [
     requiresModel: true,
     endpointWithPrefix: true,
     docsUrl: 'https://github.com/openai/codex',
-    runArgs: [],
+    // The model and provider live in our own profile file (`configure/codex.ts`), which Codex reads
+    // only when asked to; the shared `config.toml` is the user's.
+    runArgs: ['--profile', 'atomic-chat'],
     runMode: 'terminal',
   },
   {
@@ -217,7 +219,7 @@ export const AGENTS: readonly Agent[] = [
     detectBin: 'goose',
     aliases: [],
     requiresModel: true,
-    // Goose appends its own path via OPENAI_BASE_PATH.
+    // Handed the bare host like Claude Code; `childEnv` adds the server's prefix to OPENAI_BASE_URL.
     endpointWithPrefix: false,
     docsUrl: 'https://block.github.io/goose/',
     // A bare `goose` only prints help.
@@ -291,6 +293,9 @@ export function apiUrlFor(agent: Agent, baseUrl: string, prefix: string): string
 export const CONFLICTING_PROVIDER_ENV: readonly string[] = [
   'OPENAI_API_KEY',
   'OPENAI_BASE_URL',
+  // Goose reads an OPENAI_HOST from the environment before OPENAI_BASE_URL, and its base path with it.
+  'OPENAI_HOST',
+  'OPENAI_BASE_PATH',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_OAUTH_TOKEN',
@@ -301,36 +306,52 @@ export const CONFLICTING_PROVIDER_ENV: readonly string[] = [
   'OPENROUTER_API_KEY',
 ]
 
+/** What `childEnv` may need beyond the endpoint: the served window and the server's API prefix. */
+export interface ChildEnvOptions {
+  /** The window the served model was loaded with, when known. */
+  contextLength?: number | undefined
+  /** The API prefix for an agent handed the bare host (Goose); `/v1` when not given. */
+  apiPrefix?: string | undefined
+}
+
 /**
- * Environment the spawned agent needs on top of its config file. Five agents are configured purely
- * through environment variables that `configure_*` persists to the user's shell rc — that file is
- * not live in a process we are about to spawn, so the same variables are set on the child.
+ * Environment the spawned agent needs on top of its config file. Six agents are configured purely
+ * through environment variables, only ever on the process we start and never for the user: Goose,
+ * OpenHands, Poolside, Muse Code, Copilot (selecting its providers.json entry) and Codex. Codex's
+ * profile names the variable its key is read from (`env_key`) but never holds the key, so the key goes
+ * on the child — only when there is one, as the profile names the variable only then.
+ * `options.contextLength`, the served window when known, tells Goose and Poolside when to compact.
  */
 export function childEnv(
   agent: Agent,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  options: ChildEnvOptions = {}
 ): Record<string, string> {
   const key = apiKey || 'atomic'
   switch (agent.id) {
     case 'copilot':
-      return {
-        COPILOT_PROVIDER_BASE_URL: apiUrl,
-        COPILOT_PROVIDER_TYPE: 'openai',
-        COPILOT_MODEL: model,
-        COPILOT_OFFLINE: 'true',
-        // Copilot is the one that omits the key entirely when there is none.
-        ...(apiKey ? { COPILOT_PROVIDER_API_KEY: apiKey } : {}),
-      }
-    case 'goose':
+      // The endpoint, key and limits are our entry in Copilot's providers.json
+      // (`configure/copilot.ts`); this selects it for the run, as `--model` would.
+      return { COPILOT_MODEL: `atomic-chat/${model}` }
+    case 'goose': {
+      // Goose derives its chat path from OPENAI_BASE_URL, prefix included; with the window and output
+      // cap it compacts before the server refuses.
+      const ctx = options.contextLength !== undefined && options.contextLength > 0 ? options.contextLength : 0
       return {
         GOOSE_PROVIDER: 'openai',
         GOOSE_MODEL: model,
-        OPENAI_HOST: apiUrl,
-        OPENAI_BASE_PATH: 'v1/chat/completions',
+        OPENAI_BASE_URL: `${apiUrl}${options.apiPrefix ?? '/v1'}`,
         OPENAI_API_KEY: key,
+        ...(ctx
+          ? {
+              GOOSE_CONTEXT_LIMIT: String(ctx),
+              GOOSE_MAX_TOKENS: String(Math.min(8192, Math.floor(ctx / 4))),
+            }
+          : {}),
       }
+    }
     case 'openhands':
       // The litellm `openai/` prefix is required for a custom OpenAI-compatible base_url.
       return { LLM_MODEL: `openai/${model}`, LLM_BASE_URL: apiUrl, LLM_API_KEY: key }
@@ -339,26 +360,41 @@ export function childEnv(
         POOLSIDE_STANDALONE_BASE_URL: poolsideStandaloneBaseUrl(apiUrl),
         POOLSIDE_API_KEY: key,
         POOLSIDE_STANDALONE_MODEL: model,
+        ...(options.contextLength && options.contextLength > 0
+          ? { POOLSIDE_STANDALONE_CONTEXT_LENGTH: String(options.contextLength) }
+          : {}),
       }
     case 'muse':
       return { META_API_KEY: key }
+    case 'codex':
+      return apiKey ? { ATOMIC_CHAT_API_KEY: apiKey } : {}
     default:
       return {}
   }
 }
 
-/** Poolside wants the root without `/v1`; it appends its own paths. */
+/**
+ * The arguments that start `agent` on `model`: its fixed `runArgs`, plus `--model atomic/<id>` for
+ * Kilo, which otherwise opens on the model it last used before the one its config selects.
+ */
+export function runArgsFor(agent: Agent, model: string): string[] {
+  return agent.id === 'kilo' && model ? ['--model', `atomic/${model}`, ...agent.runArgs] : [...agent.runArgs]
+}
+
+/**
+ * Poolside's docs give the standalone base URL with its API prefix (`/v1`), so it is kept; only
+ * surrounding whitespace and trailing slashes go.
+ */
 export function poolsideStandaloneBaseUrl(apiUrl: string): string {
-  const trimmed = apiUrl.trim().replace(/\/+$/, '')
-  const withoutV1 = trimmed.endsWith('/v1') ? trimmed.slice(0, -'/v1'.length) : trimmed
-  return withoutV1.replace(/\/+$/, '')
+  return apiUrl.trim().replace(/\/+$/, '')
 }
 
 /**
  * Launchers that installers drop outside PATH. OpenClaw's installer writes into `~/.openclaw/bin`
  * or `~/.local/bin` (or `$OPENCLAW_PREFIX`), which a login shell may not have on PATH yet. ZCode is a
  * desktop app that puts nothing on PATH outside Linux, so its candidates are the executables its
- * installers write. Every other agent installs onto PATH, and guessing would only produce false
+ * installers write. Zed's DMG links no `zed` CLI, and its install script's `~/.local/bin` is often
+ * not on PATH. Every other agent installs onto PATH, and guessing would only produce false
  * positives.
  */
 export function offPathCandidates(
@@ -370,6 +406,7 @@ export function offPathCandidates(
   const separator = platform === 'win32' ? '\\' : '/'
   const join = (...parts: string[]) => parts.map((p) => p.replace(/[\\/]+$/, '')).join(separator)
   if (bin === 'zcode') return zcodeAppCandidates(home, env, platform, join)
+  if (bin === 'zed') return zedLauncherCandidates(home, env, platform, join)
   if (bin !== 'openclaw' || !home) return []
   const roots: string[] = []
   const prefix = env['OPENCLAW_PREFIX']
@@ -382,10 +419,17 @@ export function offPathCandidates(
   return out
 }
 
+/** ZCode's two builds: product name and Linux executable. */
+const ZCODE_FLAVORS = [
+  ['ZCode', 'zcode'],
+  ['ZCode Preview', 'zcode-preview'],
+] as const
+
 /**
- * Where each ZCode installer puts the desktop app's executable (`zcode_app_candidates` in the app's
- * `core/system/commands.rs`, commit `ec1fd3ea7`). The Linux deb/rpm packages also link
- * `/usr/bin/zcode`, which the PATH probe finds first.
+ * Where each ZCode installer puts the desktop app's executable, the "ZCode Preview" build included
+ * (`zcode_app_candidates_for` in the app's `core/system/commands.rs`, which also scans for AppImages
+ * and the Windows uninstall list). The Linux deb/rpm packages also link `/usr/bin/zcode`, which the
+ * PATH probe finds first.
  */
 function zcodeAppCandidates(
   home: string | undefined,
@@ -393,24 +437,66 @@ function zcodeAppCandidates(
   platform: NodeJS.Platform,
   join: (...parts: string[]) => string
 ): string[] {
+  const out: string[] = []
   if (platform === 'darwin') {
-    const out = ['/Applications/ZCode.app/Contents/MacOS/ZCode']
-    if (home) out.push(join(home, 'Applications/ZCode.app/Contents/MacOS/ZCode'))
+    const roots = ['/Applications', ...(home ? [join(home, 'Applications')] : [])]
+    for (const root of roots)
+      for (const [product] of ZCODE_FLAVORS) out.push(join(root, `${product}.app/Contents/MacOS/${product}`))
     return out
   }
   if (platform === 'win32') {
     // NSIS installs per user under `%LOCALAPPDATA%\Programs` and for all users under `%ProgramFiles%`.
-    const out: string[] = []
-    for (const [variable, sub] of [
-      ['LOCALAPPDATA', 'Programs\\ZCode'],
-      ['ProgramFiles', 'ZCode'],
-    ] as const) {
-      const root = env[variable]
-      if (root) out.push(join(root, sub, 'ZCode.exe'))
-    }
+    const roots = [
+      env['LOCALAPPDATA'] ? join(env['LOCALAPPDATA'], 'Programs') : undefined,
+      env['ProgramFiles'],
+    ]
+    for (const root of roots)
+      if (root) for (const [product] of ZCODE_FLAVORS) out.push(join(root, product, `${product}.exe`))
     return out
   }
-  return ['/opt/ZCode/zcode']
+  for (const [product, exe] of ZCODE_FLAVORS) {
+    out.push(`/opt/${product}/${exe}`)
+    if (exe !== 'zcode') out.push(`/usr/bin/${exe}`)
+  }
+  return out
+}
+
+/**
+ * Zed's launchers off PATH (`zed_cli_candidates` and `zed_app_candidates` in the app's
+ * `core/system/commands.rs`): its CLI, then the editor itself.
+ */
+function zedLauncherCandidates(
+  home: string | undefined,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+  join: (...parts: string[]) => string
+): string[] {
+  if (!home) return []
+  if (platform === 'darwin') {
+    const roots = ['/Applications', join(home, 'Applications')]
+    return [
+      join(home, '.local/bin/zed'),
+      ...roots.flatMap((root) => [
+        join(root, 'Zed.app/Contents/MacOS/cli'),
+        join(root, 'Zed Preview.app/Contents/MacOS/cli'),
+      ]),
+      ...roots.map((root) => join(root, 'Zed.app/Contents/MacOS/zed')),
+    ]
+  }
+  if (platform === 'win32') {
+    // The installer's `{autopf}\Zed`: per user unless run elevated.
+    const local = env['LOCALAPPDATA'] || join(home, 'AppData\\Local')
+    const dirs = [
+      join(local, 'Programs\\Zed'),
+      ...(env['ProgramFiles'] ? [join(env['ProgramFiles'], 'Zed')] : []),
+    ]
+    return [...dirs.map((dir) => join(dir, 'bin\\zed.exe')), ...dirs.map((dir) => join(dir, 'Zed.exe'))]
+  }
+  return [
+    join(home, '.local/bin/zed'),
+    join(home, '.local/zed.app/bin/zed'),
+    join(home, '.local/zed-preview.app/bin/zed'),
+  ]
 }
 
 /**

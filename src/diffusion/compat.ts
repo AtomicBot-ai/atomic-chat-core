@@ -1,7 +1,7 @@
 /**
  * Which installed engine build may serve a model family. `check_engine_compatibility` and
  * `select_model_install` in `session.rs` of `tauri-plugin-atomic-diffusion` (app commit
- * `ec1fd3ea7`); messages verbatim.
+ * `ec1fd3ea7`); messages verbatim. FLUX.3 Klein's floor came after the plugin.
  */
 
 import type { DiffusionBackendInstallRecord, DiffusionEngineId } from '../contracts/index.js'
@@ -9,10 +9,16 @@ import { diffusionError } from './errors.js'
 
 /** The first upstream build that runs Qwen Image 2.1 (and its Turbo) and Krea 2 Turbo. */
 export const MIN_MODERN_FAMILY_BUILD = 883
-const MODERN_FAMILIES: ReadonlySet<string> = new Set([
-  'qwen-image-2.1',
-  'qwen-image-2.1-turbo',
-  'krea-2-turbo',
+
+type EngineFloor = { build: number; tag: string }
+const MODERN: EngineFloor = { build: MIN_MODERN_FAMILY_BUILD, tag: 'master-883-137f740' }
+/** The first upstream build that runs FLUX.3 Image Klein (leejet/stable-diffusion.cpp#2143). */
+const FLUX3: EngineFloor = { build: 968, tag: 'master-968-8cd731e' }
+const ENGINE_FLOORS: ReadonlyMap<string, EngineFloor> = new Map([
+  ['qwen-image-2.1', MODERN],
+  ['qwen-image-2.1-turbo', MODERN],
+  ['krea-2-turbo', MODERN],
+  ['flux.3-klein', FLUX3],
 ])
 
 /** `master-<build>-<hash>` → the build number; anything else → undefined. */
@@ -26,17 +32,18 @@ function buildOf(tag: string): number | undefined {
 }
 
 /**
- * Qwen Image 2.1 and Krea 2 Turbo need build 883 or newer; a tag that does not parse fails closed.
- * Every other family keeps whatever engine it has.
+ * Qwen Image 2.1 and Krea 2 Turbo need build 883 or newer, FLUX.3 Klein 968; a tag that does not
+ * parse fails closed. Every other family keeps whatever engine it has.
  */
 export function checkEngineCompatibility(family: string, tag: string): void {
-  if (!MODERN_FAMILIES.has(family)) return
+  const floor = ENGINE_FLOORS.get(family)
+  if (!floor) return
   const build = buildOf(tag)
-  if (build !== undefined && build >= MIN_MODERN_FAMILY_BUILD) return
+  if (build !== undefined && build >= floor.build) return
   throw diffusionError(
     'ENGINE_UPDATE_REQUIRED',
     `${family} requires an image engine update. Update the engine, then retry loading the model.`,
-    `installed=${tag}; required=master-883-137f740 or newer`
+    `installed=${tag}; required=${floor.tag} or newer`
   )
 }
 

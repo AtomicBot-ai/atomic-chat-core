@@ -236,6 +236,8 @@ async function probeOnce(
 export interface HelpProbeOptions {
   platform: NodeJS.Platform
   timeoutMs: number
+  /** What to run the binary with; `--help` by default (audio.cpp answers `--version` more usefully). */
+  args?: readonly string[]
   deps: Pick<InstallDeps, 'env' | 'spawnRetryDelayMs' | 'log'>
   /** The `ENGINE_INSTALL_FAILED` message for a binary that never answers, and for one that never starts. */
   noResponse: string
@@ -243,9 +245,10 @@ export interface HelpProbeOptions {
 }
 
 /**
- * Run `<binary> --help` from its own folder and answer how it exited and what it printed. A spawn
- * failure is retried (a scanner may still be holding the freshly written file); a binary that never
- * answers is killed. Shared by every engine probe (sd.cpp here, `mlx-server` in `engine-builds/`).
+ * Run `<binary> --help` (or `options.args`) from its own folder and answer how it exited and what it
+ * printed. A spawn failure is retried (a scanner may still be holding the freshly written file); a
+ * binary that never answers is killed. Shared by every engine probe (sd.cpp here, `mlx-server` in
+ * `engine-builds/`, audio.cpp in `audio/`).
  */
 export async function runHelpProbe(
   binary: string,
@@ -260,7 +263,7 @@ export async function runHelpProbe(
     userEnv: {},
   })
   for (let attempt = 1; ; attempt++) {
-    const proc = spawnManaged({ exe: binary, args: ['--help'], env, cwd })
+    const proc = spawnManaged({ exe: binary, args: [...(options.args ?? ['--help'])], env, cwd })
     let timer: NodeJS.Timeout | undefined
     const timedOut = new Promise<'timeout'>((resolve) => {
       timer = setTimeout(() => resolve('timeout'), timeoutMs)
@@ -341,11 +344,16 @@ const isEmptyDir = (dir: string): Promise<boolean> =>
  * Regular files under the models root, recursively, with `/`-separated relative paths. Hidden files
  * and in-flight downloads are skipped.
  */
+const PARTIAL_SUFFIXES = ['.tmp', '.part', '.download', '.url', '.parts', '.ranges', '.ranges.next']
+
 export async function listModelFiles(modelsRoot: string): Promise<DiffusionModelFile[]> {
   const out: DiffusionModelFile[] = []
   const walk = async (dir: string): Promise<void> => {
     for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
       if (entry.name.startsWith('.')) continue
+      // A download in progress: its partial and the clients' sidecars beside it (the app's `.url` and
+      // `.parts`, atc's `.url` and `.ranges`), files or folders, are not models.
+      if (PARTIAL_SUFFIXES.some((suffix) => entry.name.endsWith(suffix))) continue
       const path = join(dir, entry.name)
       const meta = await stat(path).catch(() => undefined)
       if (!meta) continue
@@ -355,7 +363,6 @@ export async function listModelFiles(modelsRoot: string): Promise<DiffusionModel
       }
       // A link to a file is not a model file of ours (the plugin read the entry itself, not its target).
       if (entry.isSymbolicLink() || !meta.isFile()) continue
-      if (['.tmp', '.part', '.download'].some((suffix) => entry.name.endsWith(suffix))) continue
       out.push({ path, relativePath: relative(modelsRoot, path).split(sep).join('/'), bytes: meta.size })
     }
   }

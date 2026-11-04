@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * How the owner builds the image-generation service: the child journal adapter (an `sd-server` is
  * journalled like any backend, under `provider: 'diffusion'`, right after it spawns) and the event
@@ -14,6 +15,8 @@ import type { RemoteMediaGateway } from './remote-job.js'
 import type { DiffusionServiceDeps } from './service.js'
 
 export interface WireDiffusionOptions {
+  onFailure?: FailureObserver
+
   layout: DataLayout
   journal: Pick<ProcessJournal, 'add' | 'remove'>
   instanceId: string
@@ -70,6 +73,7 @@ export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
     paths: options.layout.diffusion,
     dataFolder: options.layout.root,
     emit: options.emit,
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     log: options.log,
     journal: diffusionJournal(options.journal, options.instanceId),
     ...(options.hardware ? { systemInfo: hardwareSystemInfo(options.hardware) } : {}),

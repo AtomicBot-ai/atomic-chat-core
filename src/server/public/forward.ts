@@ -28,25 +28,34 @@ import {
   isJsonObject,
   serdeToString,
 } from '../shims/index.js'
-import type { JsonValue } from '../shims/index.js'
-import { LOCAL_SEARCH_ORDER, resolveRemoteProvider } from '../../router/index.js'
-import type { LocalProvider, RemoteProvider } from '../../router/index.js'
+import type { JsonObject, JsonValue } from '../shims/index.js'
+import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
+import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
 import { autoIncreaseCtx } from './ctx.js'
+import { sessionWindow } from './context-window.js'
 import { SseLineReader } from './sse.js'
 import { StreamTelemetry, isUsageOnlyChunk, maybeInjectStreamUsage } from './telemetry.js'
 import { endpointFromPath } from './trace.js'
 import {
+  anthropicPromptTooLong,
   bodyIndicatesOom,
   computeErrorEnvelope,
+  emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
+  isLlamaContextOverflow,
   isContextOverflowFinishLength,
+  modelNotFoundJson,
+  selectedProviderUnavailableJson,
   structureBackendErrorBody,
   structuredErrorJson,
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { placedSystemMessages } from './system-messages.js'
+import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
+import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
 import type { LocalTarget } from './types.js'
 import {
@@ -61,6 +70,49 @@ import {
 import type { HeaderPairs, UpstreamResponse } from './wire.js'
 
 export type Backend = { kind: 'remote'; provider: RemoteProvider } | { kind: 'local'; session: LocalTarget }
+
+const NO_SELECTION: ReadonlyMap<string, string> = new Map()
+
+/**
+ * The provider the app selected to serve `modelId`, when the core can route to it; `undefined`
+ * leaves the id to the rules without a selection (remote first, then the local search order).
+ */
+export function selectedRoute(ex: Exchange, modelId: string): SelectedRoute | undefined {
+  return resolveSelectedRoute(modelId, ex.deps.selection?.() ?? NO_SELECTION, ex.deps.providers())
+}
+
+/**
+ * The remote provider a request for `modelId` goes to: the selected one, or with no selection the
+ * one that owns the id. A selected local engine means no remote provider at all.
+ */
+export function routedRemote(
+  ex: Exchange,
+  modelId: string,
+  selected: SelectedRoute | undefined
+): RemoteProvider | undefined {
+  if (selected) return selected.kind === 'remote' ? selected.provider : undefined
+  return resolveRemoteProvider(modelId, ex.deps.providers())
+}
+
+/**
+ * The session a request for a model selected on a local engine goes to: that engine's, or else any
+ * other local engine's in search order — the app and the core may name the engine differently (both
+ * llama.cpp providers list one models folder). `undefined` only when no local engine has it; it never
+ * goes to a remote provider.
+ */
+export function findSelectedLocalSession(
+  ex: Exchange,
+  modelId: string,
+  provider: LocalProvider
+): LocalTarget | undefined {
+  return ex.deps.findLocal(provider, modelId) ?? findLocalSession(ex, modelId)
+}
+
+/** The 503 for a model selected on a local engine that no local engine has a session of. */
+export function answerSelectedUnavailable(ex: Exchange, modelId: string, provider: LocalProvider): void {
+  ex.trace.errorKind = 'not_found'
+  answer(ex, 503, selectedProviderUnavailableJson(modelId, provider), [['Content-Type', 'application/json']])
+}
 
 /** The first local session serving `modelId`, in the proxy's provider order. */
 export function findLocalSession(ex: Exchange, modelId: string): LocalTarget | undefined {
@@ -153,7 +205,8 @@ export async function serveForward(ex: Exchange): Promise<void> {
   let backend: Backend
   let url: string | undefined
   let key: string | undefined
-  const remote = resolveRemoteProvider(modelId, ex.deps.providers())
+  const selected = selectedRoute(ex, modelId)
+  const remote = routedRemote(ex, modelId, selected)
   const trace = ex.trace
   if (remote) {
     backend = { kind: 'remote', provider: remote }
@@ -164,25 +217,57 @@ export async function serveForward(ex: Exchange): Promise<void> {
       url = isMessages ? `${remote.baseUrl.replace(/\/+$/, '')}/messages` : `${remote.baseUrl}${ex.path}`
     }
   } else {
-    // "Nothing is loaded" (503) and "that model is not loaded" (404) are told apart so a client can
-    // tell a cold server from a typo. `/messages` has always answered 404 for both.
-    if (!isMessages && ex.deps.listLocal().length === 0) {
-      trace.errorKind = 'not_found'
-      answer(ex, 503, 'No models are available')
-      return
-    }
-    const session = findLocalSession(ex, modelId)
-    if (!session) {
-      trace.errorKind = 'not_found'
-      answer(ex, 404, `No running session found for model '${modelId}'`)
-      return
+    let session: LocalTarget | undefined
+    if (selected?.kind === 'local') {
+      session = findSelectedLocalSession(ex, modelId, selected.provider)
+      if (!session) {
+        answerSelectedUnavailable(ex, modelId, selected.provider)
+        return
+      }
+    } else {
+      // "Nothing is loaded" (503) and "that model is not loaded" (404) are told apart so a client can
+      // tell a cold server from a typo. `/messages` has always answered 404 for both.
+      const hasEmbeddingModel = ex.path === '/embeddings' && ex.deps.embedding?.modelId() != null
+      if (!isMessages && !hasEmbeddingModel && ex.deps.listLocal().length === 0) {
+        trace.errorKind = 'not_found'
+        answer(ex, 503, 'No models are available')
+        return
+      }
+      session = findLocalSession(ex, modelId)
+      if (!session) {
+        trace.errorKind = 'not_found'
+        answer(ex, 404, modelNotFoundJson(modelId), [['Content-Type', 'application/json']])
+        return
+      }
     }
     backend = { kind: 'local', session }
     trace.backend = session.provider
+    trace.recordWindow(() => sessionWindow(ex.deps, session))
     const refused = session.policy && policyRefusal(session.policy, ex.path, modelId, json)
     if (refused) {
       trace.errorKind = 'bad_request'
       answer(ex, refused.status, refused.body, [['Content-Type', 'application/json']])
+      return
+    }
+    // A local engine answers an empty conversation with a completion nobody asked for; a remote
+    // provider validates its own requests.
+    const empty = ex.path === '/chat/completions' || isMessages ? emptyMessagesRefusal(json) : undefined
+    if (empty !== undefined) {
+      trace.errorKind = 'bad_request'
+      answer(ex, 400, empty, [['Content-Type', 'application/json']])
+      return
+    }
+    // A chat template drops a message whose role it does not know and answers the rest; llama.cpp
+    // reads a mixed embeddings `input` (`["a", 7]`) as one prompt. Neither reaches an engine.
+    const malformed =
+      ex.path === '/chat/completions'
+        ? messageRolesRefusal(json)
+        : ex.path === '/embeddings'
+          ? embeddingInputRefusal(json)
+          : undefined
+    if (malformed !== undefined) {
+      trace.errorKind = 'bad_request'
+      answer(ex, 400, malformed, [['Content-Type', 'application/json']])
       return
     }
     key = session.apiKey
@@ -194,6 +279,18 @@ export async function serveForward(ex: Exchange): Promise<void> {
     return
   }
 
+  // An Anthropic request that asks for no thinking gets none from a llama.cpp chat template either
+  // (QA B08): on `/v1/messages` and on the chat-completions fallback alike.
+  const noThinking =
+    isMessages && backend.kind === 'local'
+      ? noThinkingTemplateKwargs(backend.session.provider, json)
+      : undefined
+  // System messages inside the conversation stay where they are, as reminders in a user turn, before a
+  // strict llama.cpp template sees them (QA B08, audit S1): on `/v1/messages` and on the fallback.
+  const placed =
+    isMessages && backend.kind === 'local' ? placedSystemMessages(backend.session.provider, json) : undefined
+  const messagesJson: JsonValue = placed !== undefined && isJsonObject(json) ? { ...json, ...placed } : json
+
   // A session that declares its routes and has no `/v1/messages` of its own goes straight to the
   // chat-completions translation: asking it first would only be refused (findings-2.14-r1.md item 4).
   if (
@@ -202,7 +299,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     backend.session.policy &&
     !backend.session.policy.routes.some((r) => r.method === 'POST' && r.path === '/v1/messages')
   ) {
-    await messagesFallback(ex, backend, url, key, json)
+    await messagesFallback(ex, backend, url, key, messagesJson, noThinking)
     return
   }
 
@@ -212,6 +309,15 @@ export async function serveForward(ex: Exchange): Promise<void> {
     trace.inspecting && stream && ex.path === '/chat/completions' && backend.kind === 'local'
       ? maybeInjectStreamUsage(raw)
       : undefined
+  const rewritten =
+    (noThinking !== undefined || placed !== undefined) && isJsonObject(messagesJson)
+      ? Buffer.from(
+          serdeToString({
+            ...messagesJson,
+            ...(noThinking !== undefined ? { chat_template_kwargs: noThinking } : {}),
+          })
+        )
+      : undefined
 
   const signal = clientGone(ex)
   let response: UpstreamResponse
@@ -219,7 +325,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     response = await sendUpstream(url, {
       method: ex.method,
       headers: outboundHeaders(ex, ['host', 'authorization'], backend, key),
-      body: injected ?? raw,
+      body: injected ?? rewritten ?? raw,
       connectTimeoutMs: connectTimeoutMs(ex),
       signal,
     })
@@ -230,7 +336,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
   }
 
   if (!isSuccess(response.status)) {
-    if (isMessages) await messagesFallback(ex, backend, url, key, json, response)
+    if (isMessages) await messagesFallback(ex, backend, url, key, messagesJson, noThinking, response)
     else await upstreamError(ex, backend, modelId, raw, response)
     return
   }
@@ -246,9 +352,11 @@ export async function serveForward(ex: Exchange): Promise<void> {
 const NON_SSE_CAPTURE_LIMIT = 256 * 1024
 
 /**
- * Relay the upstream answer; while the inspector watches, fold what streams past into telemetry and
- * drop the usage-only trailer this proxy asked for itself — the client never opted into an extra chunk
- * with empty `choices`, and some clients throw on one. The bytes otherwise pass unchanged.
+ * Relay the upstream answer, folding what streams past into telemetry whenever the request is
+ * reported (time to first token, token counts from `usage` or llama.cpp's final `timings`; the reply
+ * text only while the inspector watches), and drop the usage-only trailer this proxy asked for
+ * itself — the client never opted into an extra chunk with empty `choices`, and some clients throw on
+ * one. The bytes otherwise pass unchanged.
  */
 async function relayObserved(
   ex: Exchange,
@@ -369,6 +477,24 @@ async function growAndRetry(
   return true
 }
 
+/** Only a terminal failure from a local engine belongs to this core. Inspect its body here only. */
+function reportInferenceFailure(ex: Exchange, backend: Backend, status: number, body: string): void {
+  if (backend.kind !== 'local' || status < 500) return
+  const oom = bodyIndicatesOom(body)
+  const compute = isComputeBackendError(status, body)
+  if (!oom && !compute && isLlamaContextOverflow(body)) return
+  captureReport(
+    ex.deps.errors,
+    inferenceFailureReport({
+      provider: backend.session.provider,
+      modelId: backend.session.modelId,
+      status,
+      compute,
+      oom,
+    })
+  )
+}
+
 async function upstreamError(
   ex: Exchange,
   backend: Backend,
@@ -394,17 +520,7 @@ async function upstreamError(
       // it started. An error it knows (a context overflow) gets its own OpenAI body; any other is
       // wrapped like every local engine's.
       recordFailure()
-      captureReport(
-        ex.deps.errors,
-        inferenceFailureReport({
-          provider,
-          modelId,
-          status,
-          body: errorBody,
-          compute: false,
-          oom: trace.oomDetected,
-        })
-      )
+      reportInferenceFailure(ex, backend, status, errorBody)
       const mapped = policy.mapError(status, errorBody)
       if (mapped !== null) {
         answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
@@ -430,26 +546,13 @@ async function upstreamError(
       trace.oomDetected = true
       trace.ctxOverflowDetected = false
       const oom = bodyIndicatesOom(errorBody)
-      captureReport(
-        ex.deps.errors,
-        inferenceFailureReport({ provider, modelId, status, body: errorBody, compute: true, oom })
-      )
+      reportInferenceFailure(ex, backend, status, errorBody)
       answer(ex, 400, computeErrorEnvelope(oom))
       return
     }
 
     recordFailure()
-    captureReport(
-      ex.deps.errors,
-      inferenceFailureReport({
-        provider,
-        modelId,
-        status,
-        body: errorBody,
-        compute: false,
-        oom: trace.oomDetected,
-      })
-    )
+    reportInferenceFailure(ex, backend, status, errorBody)
     answer(ex, status, structureBackendErrorBody(errorBody, trace.oomDetected, trace.ctxOverflowDetected))
     return
   }
@@ -476,8 +579,9 @@ async function inspectFinish(
   } catch {
     parsed = undefined
   }
-  if (parsed !== undefined && ex.trace.inspecting) {
-    const telemetry = new StreamTelemetry()
+  if (parsed !== undefined) {
+    // Already parsed for the cut-off check: its usage and timings cost nothing more to report.
+    const telemetry = new StreamTelemetry({ previews: ex.trace.inspecting })
     telemetry.onJson(parsed, performance.now())
     ex.trace.stash(telemetry.finishFields(0))
   }
@@ -504,14 +608,38 @@ async function messagesFallback(
   url: string,
   key: string | undefined,
   json: JsonValue,
+  /** `chat_template_kwargs` that keep a llama.cpp template from thinking the request did not ask for. */
+  noThinking: JsonObject | undefined,
   /** The engine's own answer to `/messages`; absent when the session is known not to serve it. */
   response?: UpstreamResponse
 ): Promise<void> {
   const errorBody = response === undefined ? undefined : await readUpstreamText(response)
   const trace = ex.trace
-  trace.anthropicFallback = true
   const errorKind = backend.kind === 'local' ? 'local_model_error' : 'remote_provider_error'
+  // A prompt the engine's window cannot hold would not fit as chat completions either: the client is
+  // told in the Anthropic API's own words, which make Claude Code compact the conversation (audit X1).
+  if (
+    response !== undefined &&
+    errorBody !== undefined &&
+    answeredPromptTooLong(ex, backend, response.status, errorBody)
+  )
+    return
+  trace.anthropicFallback = true
   const chat = anthropicRequestToChat(json)
+  if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
+  // llama.cpp's own `/v1/messages` stops at the request's `max_tokens`; the translation keeps that
+  // cap, or an engine started with `n_predict -1` writes until its context is full. Other engines
+  // keep the translation as the Rust proxy shipped it, without the cap.
+  const maxTokens = isJsonObject(json) ? json['max_tokens'] : undefined
+  if (
+    isJsonObject(chat) &&
+    backend.kind === 'local' &&
+    isLlamaCppServer(backend.session.provider) &&
+    typeof maxTokens === 'number' &&
+    maxTokens > 0
+  ) {
+    chat['max_tokens'] = maxTokens
+  }
   if (chat !== null) {
     let base = url
     while (base.endsWith('/messages')) base = base.slice(0, -'/messages'.length)
@@ -536,10 +664,12 @@ async function messagesFallback(
       })
       if (!isSuccess(fallback.status)) {
         const fallbackError = await readUpstreamText(fallback)
+        if (answeredPromptTooLong(ex, backend, fallback.status, fallbackError)) return
         trace.errorKind = errorKind
         trace.upstreamStatus = fallback.status
         trace.oomDetected = bodyIndicatesOom(fallbackError)
         trace.ctxOverflowDetected = isContextLimitError(fallback.status, fallbackError)
+        reportInferenceFailure(ex, backend, fallback.status, fallbackError)
         // A declared session's own error wording (its context overflow) reads the same here as on
         // the chat route itself.
         const policy = backend.kind === 'local' ? backend.session.policy : undefined
@@ -597,7 +727,25 @@ async function messagesFallback(
   trace.upstreamStatus = response.status
   trace.oomDetected = bodyIndicatesOom(errorBody)
   trace.ctxOverflowDetected = isContextLimitError(response.status, errorBody)
+  reportInferenceFailure(ex, backend, response.status, errorBody)
   answer(ex, response.status, errorBody)
+}
+
+/**
+ * Answer a local engine's context overflow on `/messages` as Anthropic's `prompt is too long`; `false`
+ * for any other error, which the caller handles as before. A remote provider words its own errors.
+ */
+function answeredPromptTooLong(ex: Exchange, backend: Backend, status: number, errorBody: string): boolean {
+  if (backend.kind !== 'local') return false
+  const tooLong = anthropicPromptTooLong(status, errorBody)
+  if (tooLong === undefined) return false
+  const trace = ex.trace
+  trace.errorKind = 'local_model_error'
+  trace.upstreamStatus = status
+  trace.oomDetected = false
+  trace.ctxOverflowDetected = true
+  answer(ex, 400, tooLong, [['Content-Type', 'application/json']])
+  return true
 }
 
 async function* anthropicStream(upstream: UpstreamResponse): AsyncGenerator<string> {

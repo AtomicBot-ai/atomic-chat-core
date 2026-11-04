@@ -9,6 +9,12 @@ import type {
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
+  GeniexAccelerators,
+  GeniexPrepareRequest,
+  GeniexPrepareResult,
+  LiteRtLmAccelerators,
+  LiteRtLmPrepareRequest,
+  LiteRtLmPrepareResult,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
   EngineBuildId,
@@ -27,6 +33,7 @@ import type {
   MediaCatalogView,
   MediaKind,
   MediaProviderModels,
+  ServedModelSelection,
 } from '../../contracts/index.js'
 import type {
   BeginOperation,
@@ -41,6 +48,18 @@ import type {
   RouterScoreResponse,
   SystemoneResponse,
   DeviceInfo,
+  AudioCancelResult,
+  AudioCapabilities,
+  AudioConfig,
+  AudioGalleryListOptions,
+  AudioGalleryPage,
+  AudioGenerateRequest,
+  AudioJob,
+  AudioMode,
+  AudioModelFile,
+  AudioStatus,
+  LoadAudioModelRequest,
+  LoadedAudioModel,
   DiffusionCancelResult,
   DownloadProgress,
   DiffusionConfig,
@@ -160,6 +179,10 @@ export interface PublicServerControl {
    * collected only while it is (ATO-113). Survives a server restart, like the app's own inspector.
    */
   setInspecting: (enabled: boolean) => void
+  /** The provider the app selected for each model id; kept until replaced, across server restarts. */
+  selection: () => ServedModelSelection[]
+  /** Replace the whole selection; an empty list routes every id by the rules without one. */
+  setSelection: (models: ServedModelSelection[]) => void
 }
 
 /**
@@ -345,6 +368,30 @@ export interface DiffusionControl {
 }
 
 /**
+ * Audio generation on audio.cpp (`src/audio/`): camelCase bodies like image generation's. The route
+ * has already parsed the body.
+ */
+export interface AudioControl {
+  config: (config: AudioConfig) => Promise<AudioStatus>
+  status: () => Promise<AudioStatus>
+  setOutputDir: (path: string) => Promise<AudioStatus>
+  listModelFiles: () => Promise<AudioModelFile[]>
+  /** A file named relative to `<data>/audio/models`. */
+  deleteModelFile: (relativePath: string) => Promise<void>
+  /** Answers once the server serves the model, which can take minutes. */
+  loadModel: (request: LoadAudioModelRequest) => Promise<LoadedAudioModel>
+  unloadModel: () => Promise<void>
+  touchIdle: () => void
+  capabilities: () => AudioCapabilities
+  /** Answers the job at once; its phases and outcome arrive as `audio:job` events. */
+  generate: (mode: AudioMode, request: AudioGenerateRequest) => Promise<AudioJob>
+  getJob: (id: string) => AudioJob | null
+  cancelJob: (id: string) => Promise<AudioCancelResult>
+  gallery: (options: AudioGalleryListOptions) => Promise<AudioGalleryPage>
+  deleteGalleryItem: (id: string) => Promise<void>
+}
+
+/**
  * The decision model (ADR 2026-09-30-the-decision-model-is-its-own-core-module). Bodies snake_case,
  * like the engine and `settings.json`. `score` and `decide` are fail-open: they answer an outcome,
  * never an error, so the app's router sees exactly what an in-core caller sees.
@@ -468,6 +515,7 @@ export interface ControlServerDeps {
   disk: DiskControl
   remoteAccess: RemoteAccessControl
   diffusion: DiffusionControl
+  audio: AudioControl
   engineBuilds: EngineBuildControl
   /** Absent in a core built without the `/engines` layer; its routes then say so. */
   engines?: EngineControl
@@ -518,6 +566,16 @@ export interface ControlServerDeps {
    * not registered, and its routes then answer `PROVIDER_NOT_FOUND`.
    */
   foundryLocal?: FoundryLocalControl
+  /**
+   * LiteRT-LM's accelerator (change `add-litert-lm-runtime`, task 6.4); absent where the provider is
+   * not registered.
+   */
+  liteRtLm?: LiteRtLmControl
+  /**
+   * GenieX's devices (change `add-geniex-runtime`, task 6.4); absent where the provider is not
+   * registered (off a Snapdragon X), and its routes then answer `PROVIDER_NOT_FOUND`.
+   */
+  geniex?: GeniexControl
   cloud: CloudControl
   chatgpt: ChatGptControl
   externalSessions: ExternalSessionControl
@@ -565,6 +623,19 @@ export interface ControlRouteContext {
   snapshot: () => ControlSnapshot
   /** The server being constructed; `undefined` until `ControlServer.start` has built it. */
   self: () => ControlServer | undefined
+}
+
+export interface LiteRtLmControl {
+  /** What this machine is offered, with what is prepared. */
+  accelerators(): Promise<LiteRtLmAccelerators>
+  /** Downloads and unpacks the accelerators named (none: all offered); one at a time. */
+  prepare(request: LiteRtLmPrepareRequest): Promise<LiteRtLmPrepareResult>
+}
+
+/** GenieX's devices and its no-op prepare (change `add-geniex-runtime`, task 6.4). */
+export interface GeniexControl {
+  accelerators(): Promise<GeniexAccelerators>
+  prepare(request: GeniexPrepareRequest): Promise<GeniexPrepareResult>
 }
 
 export interface FoundryLocalControl {

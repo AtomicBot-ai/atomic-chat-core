@@ -1,3 +1,4 @@
+import { classifyFailure } from './diagnostics.js'
 /**
  * What each failure the core observes becomes as a report — or null when it is not a defect worth
  * an issue. Pure: callers hand in what they know, the reporter scrubs and sends.
@@ -5,16 +6,8 @@
 
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreEvents, LocalProviderId } from '../contracts/index.js'
-import { RECOVERABLE_LOAD_ERROR_CODES, isCrashExit, signalNumber } from '../runtime/llamacpp/index.js'
-import {
-  ENVIRONMENT_FAILURE_CODES,
-  errorCodeOf,
-  isCancellation,
-  isClientAbort,
-  markerLines,
-  oomSubtype,
-  quantOf,
-} from './policy.js'
+import { isCrashExit, signalNumber } from '../runtime/llamacpp/index.js'
+import { errorCodeOf, isCancellation, isClientAbort, markerLines, oomSubtype, quantOf } from './policy.js'
 import { headline } from './scrub.js'
 import type { ErrorReport, ErrorSink } from './types.js'
 
@@ -47,9 +40,15 @@ export function processFailureReport(
 ): ErrorReport | null {
   // Losing the race for the instance lock is how a second launch learns an owner already runs.
   if (source === 'startup' && errorCodeOf(error) === 'CORE_ALREADY_RUNNING') return null
+  const diagnostic = classifyFailure(error, {
+    component: 'core',
+    operation: source === 'startup' ? 'startup' : 'event',
+  })
+  if (source === 'event_listener' && diagnostic.category === 'expected') return null
   return {
     source,
-    level: source === 'event_listener' ? 'error' : 'fatal',
+    level:
+      source === 'event_listener' ? (diagnostic.category === 'operational' ? 'warning' : 'error') : 'fatal',
     error,
     tags: { error_code: errorCodeOf(error), event: context.event },
   }
@@ -58,8 +57,8 @@ export function processFailureReport(
 // ── the HTTP servers ─────────────────────────────────────────────────────────
 
 /**
- * A request that failed on our side. Coded `AtomicCoreError`s are answers, not defects, and a client
- * that hung up is its own business; what is left is a bug behind the HTTP boundary.
+ * A request that failed on our side. The category distinguishes coded defects from expected
+ * answers; a disconnected client does not turn its abandoned request into a defect.
  */
 export function internalErrorReport(input: {
   source: 'control_route' | 'public_server'
@@ -67,10 +66,14 @@ export function internalErrorReport(input: {
   status: number
   route?: string
 }): ErrorReport | null {
-  if (input.status < 500 || input.error instanceof AtomicCoreError || isClientAbort(input.error)) return null
+  if (isClientAbort(input.error)) return null
+  const diagnostic = classifyFailure(input.error, { component: 'http', operation: 'request' })
+  if (diagnostic.category === 'expected' || (input.status < 500 && diagnostic.category !== 'defect'))
+    return null
   return {
     source: input.source,
-    level: 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' ? 'warning' : 'error',
     error: input.error,
     tags: { route: input.route, http_status: input.status, error_code: errorCodeOf(input.error) },
   }
@@ -139,13 +142,15 @@ export function loadFailureReport(input: {
 }): ErrorReport | null {
   if (isCancellation(input.error)) return null
   const code = errorCodeOf(input.error) ?? 'UNKNOWN'
-  if (RECOVERABLE_LOAD_ERROR_CODES.has(code) || NOT_ENGINE_FAILURES.has(code)) return null
+  const diagnostic = classifyFailure(input.error, { component: 'runtime', operation: 'load' })
+  if (diagnostic.category === 'expected' || NOT_ENGINE_FAILURES.has(code)) return null
   const details = detailsOf(input.error)
   const o = input.overrides ?? {}
   const engineErrors = markerLines(details)
   return {
     source: 'model_load',
-    level: ENVIRONMENT_FAILURE_CODES.has(code) ? 'warning' : 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' ? 'warning' : 'error',
     error: input.error,
     fingerprint: ['model-load-failure', input.provider, code],
     tags: {
@@ -198,11 +203,16 @@ export function diffusionFailureReport(input: {
 }): ErrorReport | null {
   if (isCancellation(input.error)) return null
   const code = errorCodeOf(input.error) ?? 'INTERNAL'
-  if (RECOVERABLE_DIFFUSION_CODES.has(code)) return null
+  const diagnostic = classifyFailure(input.error, {
+    component: 'diffusion',
+    operation: input.phase === 'load' ? 'load' : 'job',
+  })
+  if (diagnostic.category === 'expected') return null
   const engineErrors = markerLines(detailsOf(input.error))
   return {
     source: input.phase === 'load' ? 'diffusion_load' : 'diffusion_job',
-    level: code === 'OUT_OF_MEMORY' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
+    diagnostic,
+    level: diagnostic.category === 'operational' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
     error: input.error,
     fingerprint: [input.phase === 'load' ? 'diffusion-load-failure' : 'diffusion-failure', code],
     tags: { provider: 'diffusion', error_code: code, diffusion_family: input.family, engine: input.engine },
@@ -211,16 +221,46 @@ export function diffusionFailureReport(input: {
   }
 }
 
-function upstreamMessage(body: string): string {
-  try {
-    const parsed = JSON.parse(body) as { error?: { message?: unknown } | string; message?: unknown }
-    const message =
-      typeof parsed.error === 'string' ? parsed.error : (parsed.error?.message ?? parsed.message)
-    if (typeof message === 'string') return headline(message)
-  } catch {
-    /* not JSON: the body is the message */
+/**
+ * Audio-generation codes that name something the user or the client can fix — a missing engine or
+ * file, the wrong mode, a request audio.cpp refused, a busy engine, a full disk — rather than an
+ * engine or core defect.
+ */
+export const RECOVERABLE_AUDIO_CODES: ReadonlySet<string> = new Set([
+  'ENGINE_MISSING',
+  'MODEL_MISSING',
+  'MODEL_INCOMPATIBLE',
+  'MODEL_NOT_LOADED',
+  'UNSUPPORTED_BACKEND',
+  'UNSUPPORTED_MODE',
+  'INVALID_REQUEST',
+  'REQUEST_REJECTED',
+  'JOB_BUSY',
+  'JOB_NOT_FOUND',
+  'CANCELLED',
+  'DISK_FULL',
+  'BACKEND_IN_USE',
+])
+
+/** audio.cpp failing to load a model (`load`) or to finish a clip (`job`). */
+export function audioFailureReport(input: {
+  phase: 'load' | 'job'
+  error: unknown
+  family?: string | undefined
+}): ErrorReport | null {
+  if (isCancellation(input.error)) return null
+  const code = errorCodeOf(input.error) ?? 'INTERNAL'
+  if (RECOVERABLE_AUDIO_CODES.has(code)) return null
+  const engineErrors = markerLines(detailsOf(input.error))
+  return {
+    source: input.phase === 'load' ? 'audio_load' : 'audio_job',
+    level: code === 'OUT_OF_MEMORY' || code === 'INVALID_OUTPUT' ? 'warning' : 'error',
+    error: input.error,
+    fingerprint: [input.phase === 'load' ? 'audio-load-failure' : 'audio-failure', code],
+    tags: { provider: 'audio', error_code: code, audio_family: input.family },
+    ...(engineErrors ? { extra: { engine_errors: engineErrors } } : {}),
+    throttle: { key: `audio:${input.phase}:${input.family ?? ''}:${code}`, windowMs: ENGINE_THROTTLE_MS },
   }
-  return headline(body)
 }
 
 /**
@@ -232,25 +272,23 @@ export function inferenceFailureReport(input: {
   provider: LocalProviderId
   modelId: string
   status: number
-  body: string
   compute: boolean
   oom: boolean
 }): ErrorReport | null {
-  if (!input.compute && input.status < 500) return null
-  const kind = input.compute ? (input.oom ? 'oom' : 'compute') : String(input.status)
+  if (input.status < 500) return null
+  const kind = input.oom ? 'oom' : input.compute ? 'compute' : String(input.status)
   return {
     source: 'inference',
-    level: input.compute ? 'warning' : 'error',
+    level: input.compute || input.oom ? 'warning' : 'error',
     type: 'InferenceFailure',
-    message: upstreamMessage(input.body) || `HTTP ${input.status}`,
+    message: `HTTP ${input.status}`,
     fingerprint: ['inference-failure', input.provider, kind],
     tags: {
       provider: input.provider,
-      model_id: modelTag(input.modelId),
       quant: quantOf(input.modelId),
       http_status: input.status,
       failure_kind: kind,
     },
-    throttle: { key: `inference:${input.provider}:${input.modelId}:${kind}`, windowMs: ENGINE_THROTTLE_MS },
+    throttle: { key: `inference:${input.provider}:${kind}`, windowMs: ENGINE_THROTTLE_MS },
   }
 }

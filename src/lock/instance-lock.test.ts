@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../contracts/index.js'
+import { classifyFailure, diagnosticTags } from '../telemetry/diagnostics.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
@@ -12,6 +15,7 @@ import {
   waitForPublishedOwner,
 } from './instance-lock.js'
 import type { LockRecord } from './instance-lock.js'
+import { processStartEpoch } from './process-identity.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -101,6 +105,26 @@ describe('InstanceLock.acquire', () => {
     await lock.release()
   })
 
+  // `owner_started_at` (seconds since the epoch) means the same to every reader, unlike an older
+  // `process_start_id` printed in its writer's locale: it decides, as the desktop app's reader does.
+  it('keeps an owner whose start time matches, whatever locale its start identity was written in', async () => {
+    await write({
+      pid: process.pid,
+      process_start_id: 'darwin:понедельник, 19 октября 2026 г. 13:33:52',
+      owner_started_at: (await processStartEpoch(process.pid)) ?? null,
+    })
+    expect(await inspectLock(data.layout)).toMatchObject({ kind: 'owned', verdict: 'match' })
+  })
+
+  it('frees a lock whose start time names another process behind the same pid', async () => {
+    await write({
+      pid: process.pid,
+      process_start_id: 'darwin:понедельник, 19 октября 2026 г. 13:33:52',
+      owner_started_at: 'epoch:1',
+    })
+    expect(await inspectLock(data.layout)).toMatchObject({ kind: 'stale', verdict: 'mismatch' })
+  })
+
   it('gives exactly one owner when several starters race for a stale lock', async () => {
     await write({ pid: await deadPid() })
     const results = await Promise.allSettled([
@@ -125,6 +149,73 @@ describe('InstanceLock.acquire', () => {
     const lock = await InstanceLock.acquire(data.layout, { sleep: async () => {}, now: fakeClock() })
     expect(lock.record.pid).toBe(process.pid)
     await lock.release()
+  })
+
+  it('preserves the underlying filesystem cause on instance lock IO_ERRORs', async () => {
+    // 1. InstanceLock.acquire failing on open(path, 'wx') with a non-EEXIST filesystem error.
+    const tooLongLayout = {
+      ...data.layout,
+      core: {
+        ...data.layout.core,
+        instanceLock: join(data.layout.core.dir, 'l'.repeat(260)),
+      },
+    }
+    const acquireErr = (await InstanceLock.acquire(tooLongLayout).catch((e: unknown) => e)) as AtomicCoreError
+    expect(acquireErr).toBeInstanceOf(AtomicCoreError)
+    expect(acquireErr.code).toBe('IO_ERROR')
+    expect(acquireErr.cause).toBeInstanceOf(Error)
+    expect((acquireErr.cause as NodeJS.ErrnoException).code).toBe('ENAMETOOLONG')
+    expect(acquireErr.toJSON()).toEqual({
+      code: 'IO_ERROR',
+      message: `Cannot create the instance lock at ${tooLongLayout.core.instanceLock}`,
+      details: (acquireErr.cause as Error).message,
+    })
+    const diagnostic = classifyFailure(acquireErr, { component: 'core', operation: 'startup' })
+    expect(diagnostic).toMatchObject({
+      component: 'core',
+      operation: 'startup',
+      category: 'operational',
+      reason: 'disk_path_too_long',
+    })
+    expect(diagnosticTags(acquireErr, diagnostic).cause_code).toBe('ENAMETOOLONG')
+
+    // 2. readLockRecord failing with a non-ENOENT error (EISDIR on a directory).
+    await mkdir(data.layout.core.dir, { recursive: true })
+    const readErr = (await readLockRecord(data.layout.core.dir).catch((e: unknown) => e)) as AtomicCoreError
+    expect(readErr).toBeInstanceOf(AtomicCoreError)
+    expect(readErr.code).toBe('IO_ERROR')
+    expect((readErr.cause as NodeJS.ErrnoException).code).toBe('EISDIR')
+
+    // 3. tryRecoverStale failing on open(mutexPath, 'wx') with a non-EEXIST error.
+    const borderlineLock = join(data.layout.core.dir, 's'.repeat(250))
+    await writeFile(
+      borderlineLock,
+      JSON.stringify({
+        instance_id: 'stale-owner',
+        pid: await deadPid(),
+        process_start_id: 'linux:1',
+        protocol: 2,
+        version: '0.0.1',
+        data_folder: data.root,
+        control_host: '127.0.0.1',
+        control_port: 41_000,
+        state: 'ready',
+        acquired_at: '2026-09-15T00:00:00.000Z',
+      })
+    )
+    const takeoverLayout = {
+      ...data.layout,
+      core: {
+        ...data.layout.core,
+        instanceLock: borderlineLock,
+      },
+    }
+    const takeoverErr = (await InstanceLock.acquire(takeoverLayout).catch(
+      (e: unknown) => e
+    )) as AtomicCoreError
+    expect(takeoverErr).toBeInstanceOf(AtomicCoreError)
+    expect(takeoverErr.code).toBe('IO_ERROR')
+    expect((takeoverErr.cause as NodeJS.ErrnoException).code).toBe('ENAMETOOLONG')
   })
 })
 

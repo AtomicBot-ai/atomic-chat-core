@@ -23,6 +23,7 @@ import {
   processStartEpoch,
   processStartId,
   verifyProcessIdentity,
+  verifyStartEpoch,
 } from './process-identity.js'
 import type { IdentityDeps, IdentityVerdict } from './process-identity.js'
 
@@ -89,7 +90,14 @@ export async function readLockRecord(
       text = await readFile(path, 'utf8')
     } catch (e) {
       if (isEnoent(e)) return undefined
-      throw new AtomicCoreError('IO_ERROR', `Cannot read the instance lock at ${path}`, (e as Error).message)
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `Cannot read the instance lock at ${path}`,
+        (e as Error).message,
+        {
+          cause: e,
+        }
+      )
     }
     const parsed = parseLockRecord(text)
     if (parsed) return parsed
@@ -128,7 +136,11 @@ export async function inspectLock(layout: DataLayout, deps: LockDeps = {}): Prom
   const record = await readLockRecord(layout.core.instanceLock, deps)
   if (record === undefined) return { kind: 'free' }
   if (record === 'corrupt') return { kind: 'corrupt' }
-  const verdict = await verifyProcessIdentity(record.pid, record.process_start_id, deps)
+  // The start time decides when there is one: it reads the same for every reader (the desktop app
+  // decides the same way); the older start identity is the fallback.
+  const byEpoch = await verifyStartEpoch(record.pid, record.owner_started_at, deps)
+  const verdict =
+    byEpoch === 'unknown' ? await verifyProcessIdentity(record.pid, record.process_start_id, deps) : byEpoch
   return identityPermitsTakeover(verdict)
     ? { kind: 'stale', record, verdict: verdict as 'dead' | 'mismatch' }
     : { kind: 'owned', record, verdict: verdict as 'match' | 'unknown' }
@@ -171,7 +183,8 @@ export class InstanceLock {
         throw new AtomicCoreError(
           'IO_ERROR',
           `Cannot create the instance lock at ${path}`,
-          (e as Error).message
+          (e as Error).message,
+          { cause: e }
         )
       })
       if (handle) {
@@ -249,7 +262,9 @@ async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<bool
   const mutexPath = `${layout.core.instanceLock}.takeover`
   const mutex = await open(mutexPath, 'wx').catch(async (e: unknown) => {
     if (!isEexist(e))
-      throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message)
+      throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message, {
+        cause: e,
+      })
     const age = await stat(mutexPath).then(
       (s) => now() - s.mtimeMs,
       () => 0

@@ -69,7 +69,12 @@ const MAC_16: SystemInfo = {
 }
 
 function harness(
-  options: { idleTickMs?: number; claimGpu?: GpuClaimHook; systemInfo?: SystemInfo } = {}
+  options: {
+    idleTickMs?: number
+    claimGpu?: GpuClaimHook
+    systemInfo?: SystemInfo
+    env?: NodeJS.ProcessEnv
+  } = {}
 ): Harness {
   const events: Harness['events'] = []
   const journal: Harness['journal'] = []
@@ -91,6 +96,7 @@ function harness(
     idleTickMs: options.idleTickMs ?? 50,
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
     ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
+    ...(options.env ? { env: options.env } : {}),
   })
   service.start()
   services.push(service)
@@ -141,8 +147,14 @@ async function engineBuilds(h: Harness, tag: string) {
       'sd-cpp': layout.diffusion.backendsDir,
       'mlx': layout.provider('mlx').backendsDir,
       'foundry-local': join(dataFolder, 'foundry-local', 'backends'),
+      'litert-lm': join(dataFolder, 'litert-lm', 'backends'),
+      'geniex': join(dataFolder, 'geniex', 'backends'),
+      'audio-cpp': layout.audio.backendsDir,
     },
-    failedBackendsFile: join(layout.diffusion.root, 'failed-backends.json'),
+    failedBackendsFiles: {
+      'sd-cpp': join(layout.diffusion.root, 'failed-backends.json'),
+      'audio-cpp': layout.audio.failedBackendsFile,
+    },
     platform: process.platform,
     downloader: {
       download: async (_task: string, items: DownloadItem[]) => {
@@ -155,12 +167,24 @@ async function engineBuilds(h: Harness, tag: string) {
       'foundry-local': {
         read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
       },
+      'litert-lm': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
+      'geniex': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
+      'audio-cpp': {
+        read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
+      },
     },
     hardware: async () => ({ osType: 'macos', arch: 'arm64', cpuExtensions: [], gpus: [] }),
     hosts: {
       'sd-cpp': h.service.engineHost(),
       'mlx': h.service.engineHost(),
       'foundry-local': IDLE_ENGINE_HOST,
+      'litert-lm': IDLE_ENGINE_HOST,
+      'geniex': IDLE_ENGINE_HOST,
+      'audio-cpp': IDLE_ENGINE_HOST,
     },
     availableSpace: async () => undefined,
     emit: () => {},
@@ -388,6 +412,22 @@ describe.skipIf(!posix)('the engine and the model', () => {
     await h.service.loadModel({ ...request, files: { ...request.files, llmVision: projector } })
     await expect(h.service.deleteModelFile(projector)).rejects.toMatchObject({ code: 'BACKEND_IN_USE' })
     await h.service.unloadModel()
+  })
+
+  it('starts every load on the CPU backend under ATOMIC_DIFFUSION_BACKEND=cpu, and only then', async () => {
+    for (const [env, extraArgs] of [
+      [{ ...process.env, ATOMIC_DIFFUSION_BACKEND: 'cpu' }, ['--backend', 'cpu']],
+      [{ ...process.env, ATOMIC_DIFFUSION_BACKEND: '' }, []],
+    ] as const) {
+      const h = harness({ env })
+      await h.service.configure({ dataFolder })
+      await installFakeSdEngine(layout, { tag: 'master-883-137f740', backendId: 'fake-cpu' })
+      const loaded = await h.service.loadModel(await loadRequest())
+      expect(h.service.state.spec?.extraArgs).toEqual(extraArgs)
+      // A chosen backend is not a recovery: the job record says nothing fell back.
+      expect(loaded.cpuFallback).toBe(false)
+      await h.service.unloadModel()
+    }
   })
 
   it('reports a load that fails, and stops one that is abandoned', async () => {

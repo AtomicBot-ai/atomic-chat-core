@@ -27,6 +27,8 @@ describe('workflowsForFamily', () => {
     expect(workflowsForFamily('qwen-image-2.1')).toEqual(['create', 'reference', 'edit'])
     expect(workflowsForFamily('qwen-image-2.1-turbo')).toEqual(['create', 'reference', 'edit'])
     expect(workflowsForFamily('krea-2-turbo')).toEqual(['create'])
+    // sd.cpp runs FLUX.3 Klein's reference edits; they are not measured yet.
+    expect(workflowsForFamily('flux.3-klein')).toEqual(['create'])
     expect(workflowsForFamily('wan2.2-ti2v-5b')).toEqual(['create'])
     expect(workflowsForFamily('unknown')).toEqual(['create'])
   })

@@ -104,6 +104,14 @@ describe('spawnEmbeddingServer', () => {
     // The key is the process's own: a request without it is refused.
     const open = await fetch(`${handle.baseUrl}/v1/embeddings`, { method: 'POST', body: '{"input":"x"}' })
     expect(open.status).toBe(401)
+    const tail = handle.tail()
+    expect(tail.length).toBeGreaterThan(0)
+    tail.push('caller mutation')
+    expect(handle.tail()).not.toContain('caller mutation')
+    expect(handle.exitStatus()).toBeUndefined()
+    const exit = await handle.terminate(0)
+    await handle.exited
+    expect(handle.exitStatus()).toEqual(exit)
   })
 
   it('offers video only when ffmpeg is there to decode it, and puts it on the PATH', async () => {

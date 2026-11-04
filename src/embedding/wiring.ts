@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * How the owner builds the embedding service: the settings section, the engine gate over the data
  * folder, and the child journal (an embedding process is journalled like any backend, under
@@ -20,6 +21,8 @@ import { EmbeddingService } from './service.js'
 import type { EmbeddingServiceDeps } from './service.js'
 
 export interface WireEmbeddingOptions {
+  onFailure?: FailureObserver
+
   layout: DataLayout
   settings: {
     readonly embedding: EmbeddingSettings
@@ -122,6 +125,7 @@ export function wireEmbedding(options: WireEmbeddingOptions): EmbeddingService {
     spawn,
     http,
     emit: options.emit,
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     log: options.log,
     ...(options.overrides?.schedule ? { schedule: options.overrides.schedule } : {}),
   })

@@ -59,6 +59,10 @@ export const VLLM_CUDA_GRAPHS_MIN_VRAM_BYTES = 12 * GiB
 
 /** What core decides for a launch from the card as it stands right before the container (design D9). */
 export interface VllmLaunchPlan {
+  /** `--max-model-len`: the window setting, or the automatic one the memory rule picked (`vllmLimits`). */
+  maxModelLen: number
+  /** `--max-num-seqs`: the request count setting, or the automatic one. */
+  maxNumSeqs: number
   /** `--kv-cache-memory-bytes` from the KV cache size setting; `null` lets vLLM size it within its share. */
   kvCacheMemoryBytes: number | null
   /** `--gpu-memory-utilization`: what vLLM's start-up check compares the card's free memory against. */
@@ -73,7 +77,10 @@ export interface VllmLaunchPlan {
 function isPlan(value: unknown): value is VllmLaunchPlan {
   if (value === null || typeof value !== 'object') return false
   const plan = value as Record<string, unknown>
+  const positiveInteger = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0
   return (
+    positiveInteger(plan['maxModelLen']) &&
+    positiveInteger(plan['maxNumSeqs']) &&
     (plan['kvCacheMemoryBytes'] === null ||
       (typeof plan['kvCacheMemoryBytes'] === 'number' &&
         Number.isInteger(plan['kvCacheMemoryBytes']) &&
@@ -132,9 +139,9 @@ export function buildVllmLaunch(context: ManagedLaunchContext<VllmSettings>): Ma
     '--port',
     String(VLLM_CONTAINER_PORT),
     '--max-model-len',
-    String(settings.context_length),
+    String(context.plan.maxModelLen),
     '--max-num-seqs',
-    String(settings.max_num_seqs),
+    String(context.plan.maxNumSeqs),
     '--gpu-memory-utilization',
     String(Number(context.plan.gpuMemoryUtilization.toFixed(4))),
     // The output cap for a request that names none: vLLM's own default, so a long prompt keeps the

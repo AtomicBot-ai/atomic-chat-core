@@ -48,6 +48,77 @@ describe('Router', () => {
       match: { params: { id: 'a/b' } },
     })
   })
+
+  // Change close-cli-core-gaps, design D4: every segment of a rest parameter is decoded on its own, so
+  // `%2F` inside one never moves the boundary with the fixed tail; a broken sequence is the caller's 400.
+  describe('percent-decoding path parameters', () => {
+    const models = new Router()
+      .get('/atomic/v1/models/:provider/*modelId/capabilities', () => {})
+      .post('/atomic/v1/clients/:id/heartbeat', () => {})
+    const refusal = (method: string, path: string) => {
+      try {
+        models.find(method, path)
+      } catch (error) {
+        return error
+      }
+      return undefined
+    }
+
+    it('decodes each rest segment before joining them', () => {
+      expect(
+        models.find('GET', '/atomic/v1/models/llamacpp-upstream/imported/My%20Model-1/capabilities')
+      ).toMatchObject({
+        match: { params: { provider: 'llamacpp-upstream', modelId: 'imported/My Model-1' } },
+      })
+      expect(models.find('GET', '/atomic/v1/models/p/a%2Fb/c%25d/capabilities')).toMatchObject({
+        match: { params: { modelId: 'a/b/c%d' } },
+      })
+    })
+
+    it('leaves values without % as they are', () => {
+      expect(models.find('GET', '/atomic/v1/models/p/Owner/Repo-GGUF:Q4_K_M/capabilities')).toMatchObject({
+        match: { params: { provider: 'p', modelId: 'Owner/Repo-GGUF:Q4_K_M' } },
+      })
+    })
+
+    it('refuses a broken sequence in a rest or a named parameter as INVALID_ARGUMENT (400)', () => {
+      for (const [method, path] of [
+        ['GET', '/atomic/v1/models/llamacpp-upstream/imported/bad%E0%A4/capabilities'],
+        ['GET', '/atomic/v1/models/bad%ZZ/x/capabilities'],
+        ['POST', '/atomic/v1/clients/%E0%A4/heartbeat'],
+      ] as const) {
+        const error = refusal(method, path)
+        expect(error, path).toBeInstanceOf(AtomicCoreError)
+        expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+        expect(statusForCode((error as AtomicCoreError).code)).toBe(400)
+      }
+    })
+
+    it('refuses an encoding that decodes into a path step, and leaves a raw segment as it came', () => {
+      for (const path of [
+        '/atomic/v1/models/p/a%2F..%2F..%2Fx/capabilities',
+        '/atomic/v1/models/p/%2E%2E/x/capabilities',
+        '/atomic/v1/models/p/a%5C..%5Cx/capabilities',
+        '/atomic/v1/models/p/%2Fetc/capabilities',
+        '/atomic/v1/models/p/a%2F%2Fb/capabilities',
+        '/atomic/v1/clients/%2E/heartbeat',
+      ]) {
+        const method = path.includes('/clients/') ? 'POST' : 'GET'
+        const error = refusal(method, path)
+        expect(error, path).toBeInstanceOf(AtomicCoreError)
+        expect((error as AtomicCoreError).code).toBe('INVALID_ARGUMENT')
+      }
+      expect(models.find('GET', '/atomic/v1/models/p/v1.2/model.Q4/capabilities')).toMatchObject({
+        match: { params: { modelId: 'v1.2/model.Q4' } },
+      })
+    })
+
+    it('decodes only the route that matched: a broken value on a wrong method is still a 405', () => {
+      expect(models.find('POST', '/atomic/v1/models/p/bad%E0%A4/capabilities')).toEqual({
+        methodMismatch: true,
+      })
+    })
+  })
 })
 
 describe('loopback checks', () => {
@@ -87,7 +158,23 @@ describe('error envelope', () => {
     expect(statusForCode('FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED')).toBe(409)
     expect(statusForCode('FOUNDRY_LOCAL_VARIANT_UNSUPPORTED')).toBe(422)
     expect(statusForCode('FOUNDRY_LOCAL_HOST_ERROR')).toBe(500)
+    // LiteRT-LM (change add-litert-lm-runtime, task 6.1): the same three, and a file for a newer engine
+    // (update the engine first, like ENGINE_UPDATE_REQUIRED).
+    expect(statusForCode('LITERT_LM_ACCELERATOR_NOT_PREPARED')).toBe(409)
+    expect(statusForCode('LITERT_LM_VARIANT_UNSUPPORTED')).toBe(422)
+    expect(statusForCode('LITERT_LM_HOST_ERROR')).toBe(500)
+    expect(statusForCode('LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
+    // GenieX (change add-geniex-runtime, task 6.1): the host failed; the variant is not for this host or
+    // device; a bundle for a newer GenieX (update the engine first).
+    expect(statusForCode('GENIEX_HOST_ERROR')).toBe(500)
+    expect(statusForCode('GENIEX_VARIANT_UNSUPPORTED')).toBe(422)
+    expect(statusForCode('GENIEX_MODEL_REQUIRES_NEWER_ENGINE')).toBe(409)
     expect(statusForCode('OUT_OF_MEMORY')).toBe(500)
+    // Audio generation: the loaded model makes another mode (state); audio.cpp refused the job; the engine
+    // returned no WAV.
+    expect(statusForCode('UNSUPPORTED_MODE')).toBe(409)
+    expect(statusForCode('REQUEST_REJECTED')).toBe(422)
+    expect(statusForCode('INVALID_OUTPUT')).toBe(500)
   })
 
   it.each([
@@ -95,6 +182,12 @@ describe('error envelope', () => {
     ['MODEL_FORMAT_LEGACY', 422],
   ] satisfies Array<[ErrorCode, number]>)('maps the model compatibility code %s to %i', (code, status) => {
     expect(statusForCode(code)).toBe(status)
+  })
+
+  // Change close-cli-core-gaps, design D2: the catalog understood the file's requirements, and no
+  // build on offer meets them.
+  it('maps BACKEND_BUILD_UNAVAILABLE to 422', () => {
+    expect(statusForCode('BACKEND_BUILD_UNAVAILABLE')).toBe(422)
   })
 
   it('maps the image-generation codes: the caller can fix 4xx, and nothing acts on the status', () => {

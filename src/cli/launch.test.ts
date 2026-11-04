@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { readFile } from 'node:fs/promises'
+import { chmod, readFile, readdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { CAN_INSTALL_FAKE_BACKEND, installFakeBackend } from '../../test/helpers/fake-backend-pack.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -8,7 +8,14 @@ import { AtomicCore } from '../core/index.js'
 import { AGENTS, findAgent } from '../integrations/index.js'
 import type { AgentDetection } from '../integrations/index.js'
 import { recordingIo } from './io.js'
-import { agentEnvironment, launchCommand, runAgent, runCommand, splitAgentArgs } from './launch.js'
+import {
+  agentEnvironment,
+  launchCommand,
+  runAgent,
+  runCommand,
+  spawnTarget,
+  splitAgentArgs,
+} from './launch.js'
 import type { LaunchDeps, RunSpec } from './launch.js'
 
 let data: TmpDataFolder
@@ -98,15 +105,23 @@ describe('refusals', () => {
 
 describe('agentEnvironment', () => {
   it('drops ambient provider credentials and adds what the agent reads', () => {
-    const base = { PATH: '/bin', OPENAI_API_KEY: 'leaked', ANTHROPIC_API_KEY: 'leaked', HOME: '/home/u' }
+    const base = {
+      PATH: '/bin',
+      OPENAI_API_KEY: 'leaked',
+      ANTHROPIC_API_KEY: 'leaked',
+      OPENAI_HOST: 'https://api.openai.com',
+      HOME: '/home/u',
+    }
     const env = agentEnvironment(base, findAgent('goose') as never, 'http://127.0.0.1:6767', 'm', 'k')
     expect(env['OPENAI_API_KEY'], 'goose gets its own value, not the ambient one').toBe('k')
+    expect(env['OPENAI_HOST'], 'an ambient host would beat OPENAI_BASE_URL').toBeUndefined()
     expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
     expect(env['PATH']).toBe('/bin')
     expect(env['GOOSE_MODEL']).toBe('m')
 
     const codexEnv = agentEnvironment(base, findAgent('codex') as never, 'http://h/v1', 'm', 'k')
     expect(codexEnv['OPENAI_API_KEY']).toBeUndefined()
+    expect(codexEnv['ATOMIC_CHAT_API_KEY'], 'the variable Codex’s profile names').toBe('k')
     expect(codexEnv['HOME']).toBe('/home/u')
   })
 })
@@ -145,10 +160,17 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     expect(configured).toHaveLength(1)
     expect(configured[0]).toMatchObject({ agent: 'codex', model: 'demo', apiKey: 'atomic' })
     expect(configured[0]?.apiUrl, 'Codex wants the /v1 prefix').toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/)
-    expect(ran[0]).toMatchObject({ program: 'codex', args: [], detached: false })
+    expect(ran[0]).toMatchObject({ program: 'codex', args: ['--profile', 'atomic-chat'], detached: false })
+    expect(ran[0]?.env['ATOMIC_CHAT_API_KEY'], 'the key the profile names, set on the child').toBe('atomic')
     expect(core.sessions(), 'the model is unloaded when the agent exits').toEqual([])
     expect(io.err.join('')).toContain('Agent     Codex CLI')
   })
+
+  /** Detection that hands `launch` this program for Codex — never the real `codex` on the test machine. */
+  const codexAt =
+    (program: string): LaunchDeps['detect'] =>
+    async (agents) =>
+      new Map(agents.map((a) => [a.id, { installed: true, path: program, program }]))
 
   it('uses the production agent config writer when none is injected', async () => {
     await runningCore()
@@ -157,14 +179,45 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     const io = recordingIo({ env: { HOME: data.root } })
     expect(
       await launchCommand(['codex', '--model', 'demo', '--port', '0', '--data-folder', data.root], io, {
-        detect: detecting(),
+        // A launcher that does not exist: its version is unknown, which is let through.
+        detect: codexAt(join(data.root, 'no-such-codex')),
         run: async () => 0,
       })
     ).toBe(0)
-    expect(await readFile(join(data.root, '.codex/config.toml'), 'utf8')).toContain(
-      '[model_providers.atomic]'
-    )
+    const profile = await readFile(join(data.root, '.codex/atomic-chat.config.toml'), 'utf8')
+    expect(profile).toContain('[model_providers.atomic-chat]')
+    expect(profile).toContain('env_key = "ATOMIC_CHAT_API_KEY"')
+    expect(await readdir(join(data.root, '.codex')), 'the shared config.toml is not ours').toEqual([
+      'atomic-chat.config.toml',
+    ])
   })
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a Codex too old for profiles, asking the detected launcher',
+    async () => {
+      const core = await runningCore()
+      await data.writeModel('demo')
+      await installFakeBackend(data.layout)
+      const codex = join(data.root, 'old-codex')
+      await writeFile(codex, '#!/bin/sh\necho "codex-cli 0.133.0"\n')
+      await chmod(codex, 0o755)
+      const ran: RunSpec[] = []
+      await expect(
+        launchCommand(
+          ['codex', '--model', 'demo', '--port', '0', '--data-folder', data.root],
+          recordingIo({ env: { HOME: data.root } }),
+          { detect: codexAt(codex), run: async (s) => (ran.push(s), 0) }
+        )
+      ).rejects.toMatchObject({
+        code: 'IO_ERROR',
+        details:
+          'Codex CLI 0.133.0 is too old for Atomic Chat. Update it to 0.134 or newer and connect again.',
+      })
+      expect(ran, 'Codex is not run').toEqual([])
+      await expect(readdir(join(data.root, '.codex'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(core.sessions(), 'the model is unloaded again').toEqual([])
+    }
+  )
 
   it('runs standalone as a foreground owner and shuts it down with its session', async () => {
     await data.writeModel('demo')
@@ -192,7 +245,9 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('launching an agent', () => {
     expect(code, 'the agent’s exit code is ours').toBe(7)
     expect(ran[0]?.args).toEqual(['session', '--debug'])
     expect(ran[0]?.env['GOOSE_PROVIDER']).toBe('openai')
-    expect(ran[0]?.env['OPENAI_HOST'], 'Goose appends its own path').toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)
+    expect(ran[0]?.env['OPENAI_BASE_URL'], 'the server prefix rides on the base URL').toMatch(
+      /^http:\/\/127\.0\.0\.1:\d+\/v1$/
+    )
   })
 
   it('keeps serving after a GUI agent opens, until it is interrupted', async () => {
@@ -274,6 +329,38 @@ describe('splitAgentArgs', () => {
     expect(splitAgentArgs(['claude', '--fit=false'])).toEqual({
       own: ['claude', '--no-fit'],
       forwarded: [],
+    })
+  })
+})
+
+describe('spawnTarget', () => {
+  it('runs npm shims and bare names through cmd.exe on Windows', () => {
+    expect(spawnTarget('codex', ['--profile', 'atomic-chat'], 'win32')).toEqual({
+      file: 'cmd.exe',
+      args: ['/d', '/s', '/c', '"codex --profile atomic-chat"'],
+      windowsVerbatimArguments: true,
+    })
+    const shim = 'C:\\Users\\John Smith\\AppData\\Roaming\\npm\\openclaw.cmd'
+    expect(spawnTarget(shim, ['chat', 'say "hi" & bye'], 'win32')).toEqual({
+      file: 'cmd.exe',
+      args: ['/d', '/s', '/c', `""${shim}" chat "say ""hi"" & bye""`],
+      windowsVerbatimArguments: true,
+    })
+  })
+
+  it('spawns executables directly, and everything off Windows', () => {
+    const exe = 'C:\\Users\\u\\.local\\bin\\claude.exe'
+    expect(spawnTarget(exe, ['--help'], 'win32')).toEqual({
+      file: exe,
+      args: ['--help'],
+      windowsVerbatimArguments: false,
+    })
+    // An absolute path without an extension is not looked up; spawning it reports what is wrong.
+    expect(spawnTarget('C:\\missing\\agent', [], 'win32').file).toBe('C:\\missing\\agent')
+    expect(spawnTarget('codex', ['--profile', 'atomic-chat'], 'linux')).toEqual({
+      file: 'codex',
+      args: ['--profile', 'atomic-chat'],
+      windowsVerbatimArguments: false,
     })
   })
 })

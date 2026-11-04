@@ -485,6 +485,68 @@ describe('EmbeddingService lifecycle', () => {
     expect(h.service.getStatus()).toMatchObject({ state: 'failed', restarts: MAX_RESTARTS + 1 })
   })
 
+  it.each(['load', 'configure'] as const)(
+    'a deliberate %s replaces a pending crash restart',
+    async (action) => {
+      let spawned = 0
+      const first = stubHandle(1)
+      const h = harness({ spawn: async () => (++spawned === 1 ? first : stubHandle(spawned)), now: () => 0 })
+      await h.service.load()
+      first.die(1)
+      await tick()
+      expect(h.service.getStatus()).toMatchObject({ state: 'restarting', restarts: 1 })
+      if (action === 'load') await h.service.load()
+      else {
+        await h.service.configure({ idle_unload_secs: 0 })
+        await tick()
+      }
+      expect(h.service.getStatus()).toMatchObject({ state: 'ready', restarts: 0, pid: 2 })
+      expect(h.timers[0]?.cancelled).toBe(true)
+      h.fire()
+      await tick()
+      expect((await h.service.load()).pid).toBe(2)
+      expect(spawned).toBe(2)
+    }
+  )
+
+  it.each(['SIGSEGV', null] as const)(
+    'reports a signal-only or unknown exit (%s) without stale diagnostics',
+    async (signal) => {
+      let die!: (exit: { code: null; signal: typeof signal }) => void
+      const handle = {
+        ...stubHandle(8),
+        tail: () => [],
+        exited: new Promise<{ code: null; signal: typeof signal }>((resolve) => {
+          die = resolve
+        }),
+      }
+      const h = harness({ spawn: async () => handle })
+      await h.service.load()
+      die({ code: null, signal })
+      await tick()
+      expect(h.service.getStatus()).toMatchObject({
+        state: 'restarting',
+        error: { message: expect.stringContaining(signal ? `signal ${signal}` : 'an unknown status') },
+      })
+      expect(h.service.getStatus().error).not.toHaveProperty('details')
+      await h.service.configure({ enabled: false })
+      expect((await h.service.onEnginesChanged()).state).toBe('disabled')
+    }
+  )
+
+  it('normalizes a non-Error startup failure into a visible failure', async () => {
+    const h = harness({
+      spawn: async () => {
+        throw 'backend unavailable'
+      },
+    })
+    await expect(h.service.load()).rejects.toBe('backend unavailable')
+    expect(h.service.getStatus()).toMatchObject({
+      state: 'failed',
+      error: { code: 'INTERNAL_ERROR', message: 'backend unavailable' },
+    })
+  })
+
   it('reports a restart that fails and keeps trying', async () => {
     let n = 0
     const first = stubHandle(1)
@@ -585,6 +647,17 @@ describe('EmbeddingService public target', () => {
     })
   })
 
+  it('releases an aborted waiter while leaving the shared model start alive', async () => {
+    const h = harness({ spawn: hangingSpawn })
+    const controller = new AbortController()
+    const pending = h.service.publicBackend().acquire(5_000, controller.signal)
+    await tick()
+    controller.abort()
+    expect(await pending).toMatchObject({ ok: false, reason: 'starting' })
+    expect(h.timers[0]?.cancelled).toBe(true)
+    expect(h.service.getStatus().state).toBe('starting')
+  })
+
   it('stops waiting at its deadline', async () => {
     const h = harness({ spawn: hangingSpawn })
     const pending = h.service.publicBackend().acquire(10)
@@ -661,6 +734,33 @@ describe('EmbeddingService.embed', () => {
 })
 
 describe('EmbeddingService shutdown', () => {
+  it('terminates a handle that arrives after shutdown has already stopped its start', async () => {
+    let release!: (handle: EmbeddingProcessHandle) => void
+    let spawned!: () => void
+    const started = new Promise<void>((resolve) => {
+      spawned = resolve
+    })
+    const h = harness({
+      spawn: () => {
+        spawned()
+        return new Promise<EmbeddingProcessHandle>((resolve) => {
+          release = resolve
+        })
+      },
+    })
+    const loading = rejection<AtomicCoreError>(h.service.load())
+    await started
+    const closing = h.service.shutdown()
+    const events = h.events.length
+    const late = stubHandle(9)
+    release(late)
+    await closing
+    expect(await loading).toMatchObject({ code: 'EMBEDDING_UNAVAILABLE' })
+    expect(late.exitStatus()).toEqual({ code: 0, signal: null })
+    expect(h.events).toHaveLength(events)
+    expect(h.states()).not.toContain('ready')
+  })
+
   it('stops the process and a start in flight, and emits nothing after', async () => {
     const h = harness({ spawn: realSpawn() })
     const status = await h.service.load()
@@ -673,4 +773,22 @@ describe('EmbeddingService shutdown', () => {
       code: 'EMBEDDING_UNAVAILABLE',
     })
   })
+})
+
+it('observes the original failed load before its public state loses the cause', async () => {
+  const cause = Object.assign(new Error('disk unavailable'), { code: 'EIO' })
+  const error = new AtomicCoreError('IO_ERROR', 'load failed', undefined, { cause })
+  const failures: unknown[] = []
+  const h = harness({
+    spawn: async () => {
+      throw error
+    },
+    onFailure: (value) => {
+      failures.push(value)
+    },
+  })
+  await expect(h.service.load()).rejects.toBe(error)
+  expect(failures).toEqual([error])
+  expect((failures[0] as Error).cause).toBe(cause)
+  expect(h.service.getStatus().error).toEqual({ code: 'IO_ERROR', message: 'load failed' })
 })
