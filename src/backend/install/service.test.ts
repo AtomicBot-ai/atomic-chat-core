@@ -402,7 +402,8 @@ describe('install on the TurboQuant provider', () => {
       message: expect.stringContaining('missing its CUDA runtime (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll)'),
       details: expect.stringContaining('atomic-core-diag {"stage":"spawn","backend":"windows-x64-cuda-12.4"'),
     })
-    expect(downloader.download).toHaveBeenCalledTimes(2)
+    // The pack, the provider's own repair, then the pinned companion the resolver falls back to.
+    expect(downloader.download).toHaveBeenCalledTimes(3)
     // The runtime is checked before the launch gate, and nothing half-installed is left behind.
     expect(gated).toEqual([])
     expect(warnings).toEqual([

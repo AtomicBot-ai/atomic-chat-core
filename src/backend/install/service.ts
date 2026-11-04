@@ -66,6 +66,7 @@ import {
 } from '../turboquant.js'
 import { parseBackendVersion, parseBinaryVersion, stripBom } from '../version.js'
 import { verifyWindowsBackendBinary } from './windows-launch-check.js'
+import { deliverWindowsCudaRuntime } from './cuda-runtime-source.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -334,6 +335,12 @@ export interface BackendServiceDeps {
    */
   onChanged?: (reason: 'install' | 'uninstall') => void
   log?: (message: string) => void
+  /**
+   * The fetch for NVIDIA's CUDA redistributable manifests, by the install's proxy. Absent — the
+   * NVIDIA source is skipped and the CUDA runtime comes from local packs, a host toolkit or the
+   * ggml-org companions only.
+   */
+  cudaRuntimeFetchFor?: (proxy: ProxyConfig | null) => typeof fetch
 }
 
 export interface BackendHost {
@@ -556,7 +563,29 @@ export class BackendService {
       } else if (platform === 'win32') {
         // A Windows CUDA pack is only installed with its whole CUDA runtime beside it: without cudart or
         // cuBLAS, ggml-cuda.dll does not load and the "CUDA" pack quietly runs on the CPU. `--version`
-        // does not load the CUDA backend, so the launch check below cannot see this.
+        // does not load the CUDA backend, so the launch check below cannot see this. What the archive
+        // and its companion did not bring is fetched from the best source this machine has; only when
+        // none can supply it is the install refused.
+        await deliverWindowsCudaRuntime(
+          { provider: this.deps.provider, version, backend, packDir: staging },
+          {
+            layout: this.deps.layout,
+            downloader: this.deps.downloader,
+            taskId: options.taskId,
+            proxy: options.proxy ?? null,
+            ...(this.deps.cudaRuntimeFetchFor ? { fetch: this.deps.cudaRuntimeFetchFor(options.proxy ?? null) } : {}),
+            ...(this.deps.env ? { env: this.deps.env } : {}),
+            ...(this.deps.log ? { log: this.deps.log } : {}),
+          }
+        ).catch((error: unknown) => {
+          if (error instanceof AtomicCoreError && error.code === 'ENGINE_BINARY_BROKEN')
+            throw new AtomicCoreError(
+              error.code,
+              error.message,
+              withLoadDiag(error.details, { stage: 'spawn', backend, build: version })
+            )
+          throw error
+        })
         const toolkit =
           this.deps.provider === 'llamacpp' ? turboquantCudaToolkit(backend) : getCudaToolkitVersion(backend)
         const missing = toolkit
