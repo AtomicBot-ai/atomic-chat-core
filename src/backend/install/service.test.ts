@@ -2,7 +2,7 @@ import { chmod, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promis
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { storedZip } from '../../../test/helpers/backend-install-e2e.js'
+import { cudaRuntimeZip, storedZip } from '../../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import {
@@ -375,7 +375,7 @@ describe('install on the TurboQuant provider', () => {
     ])
   })
 
-  it('installs a pack and warns instead of failing when the CUDA runtime cannot be repaired', async () => {
+  it('refuses a CUDA pack whose CUDA runtime cannot be put in place, and installs nothing', async () => {
     const bytes = storedZip('build/bin/llama-server.exe', Buffer.from('exe'))
     const warnings: string[] = []
     const downloader = {
@@ -394,18 +394,21 @@ describe('install on the TurboQuant provider', () => {
       now: () => 1,
       log: (message) => warnings.push(message),
       verifyWindowsBackend: async (staging, version, backend) => {
-        // The repair ran first, in staging: the gate sees the pack the way a load will.
-        expect(downloader.download).toHaveBeenCalledTimes(2)
         gated.push(`${staging.endsWith('.incoming-1')}:${version}/${backend}`)
       },
     })
-    const result = await service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })
-    expect(result).toMatchObject({ installed: true })
+    await expect(service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })).rejects.toMatchObject({
+      code: 'ENGINE_BINARY_BROKEN',
+      message: expect.stringContaining('missing its CUDA runtime (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll)'),
+      details: expect.stringContaining('atomic-core-diag {"stage":"spawn","backend":"windows-x64-cuda-12.4"'),
+    })
     expect(downloader.download).toHaveBeenCalledTimes(2)
-    expect(gated).toEqual(['true:b1-1.0.0/windows-x64-cuda-12.4'])
+    // The runtime is checked before the launch gate, and nothing half-installed is left behind.
+    expect(gated).toEqual([])
     expect(warnings).toEqual([
       expect.stringContaining('cudart repair for b1-1.0.0/windows-x64-cuda-12.4 failed'),
     ])
+    expect(await readdir(join(data.layout.provider('llamacpp').backendsDir, 'b1-1.0.0'))).toEqual([])
   })
 
   it('repairs the CUDA runtime in staging, before the launch gate, and moves it in with the pack', async () => {
@@ -415,7 +418,7 @@ describe('install on the TurboQuant provider', () => {
         const item = items[0]!
         await writeFile(
           item.save_path,
-          item.url.includes('cudart') ? zipWith('cudart64_12.dll') : zipWith('build/bin/llama-server.exe')
+          item.url.includes('cudart') ? cudaRuntimeZip(12, '') : zipWith('build/bin/llama-server.exe')
         )
       }),
     }
@@ -432,11 +435,9 @@ describe('install on the TurboQuant provider', () => {
       },
     })
     const result = await service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })
-    expect(seen).toEqual(['cudart64_12.dll', 'llama-server.exe'])
-    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
-      'cudart64_12.dll',
-      'llama-server.exe',
-    ])
+    const runtime = ['cublas64_12.dll', 'cublasLt64_12.dll', 'cudart64_12.dll', 'llama-server.exe']
+    expect(seen).toEqual(runtime)
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual(runtime)
   })
 })
 
@@ -499,6 +500,47 @@ describe('the Windows launch gate', () => {
     expect(failures).toEqual([error])
     expect(await readFile(join(target(), 'build', 'bin', 'llama-server.exe'), 'utf8')).toBe('previous')
     expect(await readdir(join(target(), '..'))).toEqual(['win-cpu-x64'])
+  })
+
+  it('installs an upstream CUDA pack only with its whole CUDA runtime beside it', async () => {
+    const withRuntime = (runtime: Buffer) => ({
+      download: vi.fn(async (_task: string, items: Array<{ save_path: string }>) => {
+        for (const item of items)
+          await writeFile(
+            item.save_path,
+            item.save_path.includes('cudart') ? runtime : storedZip('llama-server.exe', Buffer.from('new'))
+          )
+      }),
+    })
+    const gate = vi.fn(async () => {})
+    const cuda = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b12019', 'win-cuda-12.4-x64')
+
+    // A companion with cudart but without cuBLAS: ggml-cuda.dll would not load, so the pack is refused.
+    const partial = storedZip('cudart64_12.dll', Buffer.from('dll'))
+    await expect(
+      winService(withRuntime(partial), { verifyWindowsBackend: gate }).install('b12019', 'win-cuda-12.4-x64', {
+        taskId: 't',
+      })
+    ).rejects.toMatchObject({
+      code: 'ENGINE_BINARY_BROKEN',
+      message: expect.stringContaining('(cublas64_12.dll, cublasLt64_12.dll)'),
+    })
+    expect(gate).not.toHaveBeenCalled()
+    expect(await readdir(join(cuda, '..'))).toEqual([])
+
+    const result = await winService(withRuntime(cudaRuntimeZip(12, '')), { verifyWindowsBackend: gate }).install(
+      'b12019',
+      'win-cuda-12.4-x64',
+      { taskId: 't' }
+    )
+    expect(result).toMatchObject({ installed: true, path: cuda })
+    expect((await readdir(join(cuda, 'build', 'bin'))).sort()).toEqual([
+      'cublas64_12.dll',
+      'cublasLt64_12.dll',
+      'cudart64_12.dll',
+      'llama-server.exe',
+    ])
+    expect(gate).toHaveBeenCalledTimes(1)
   })
 
   it('runs the real gate by default, and not at all for PrismML or off Windows', async () => {

@@ -10,6 +10,7 @@
  * (`store.ts`); this file only turns scan results into decisions and joins paths.
  */
 
+import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { llamaServerExeName } from '../../config/index.js'
 import type { ProviderPaths } from '../../config/index.js'
@@ -226,6 +227,42 @@ export function cudaRuntimeLibName(osType: string, version: string): string | nu
     default:
       return null
   }
+}
+
+/**
+ * Every DLL a Windows `ggml-cuda.dll` imports from the CUDA runtime companion, by CUDA major. Without
+ * any one of them the CUDA backend does not load and llama.cpp quietly runs on the CPU (or dies with
+ * an empty stderr), so a pack counts as having its runtime only when all of them are beside it.
+ * Matches the contents of ggml-org's `cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip` (b10205):
+ * `cudart64_<N>.dll`, `cublas64_<N>.dll`, `cublasLt64_<N>.dll`. `null` for another OS or major.
+ */
+export function windowsCudaRuntimeDlls(version: string): string[] | null {
+  const major = parseRustU32(version.split('.')[0] ?? '') ?? 0
+  switch (major) {
+    case 11:
+      return ['cudart64_110.dll', 'cublas64_11.dll', 'cublasLt64_11.dll']
+    case 12:
+      return ['cudart64_12.dll', 'cublas64_12.dll', 'cublasLt64_12.dll']
+    case 13:
+      return ['cudart64_13.dll', 'cublas64_13.dll', 'cublasLt64_13.dll']
+    default:
+      return null
+  }
+}
+
+/**
+ * The CUDA runtime DLLs missing from `binDir` (compared case-insensitively, as Windows does); `[]`
+ * when all are there or the toolkit has no Windows runtime set. A missing directory misses them all.
+ */
+export async function missingWindowsCudaRuntimeDlls(
+  binDir: string,
+  toolkit: string,
+  list: (dir: string) => Promise<string[]> = (dir) => readdir(dir).catch(() => [] as string[])
+): Promise<string[]> {
+  const required = windowsCudaRuntimeDlls(toolkit)
+  if (!required) return []
+  const present = new Set((await list(binDir)).map((name) => name.toLowerCase()))
+  return required.filter((name) => !present.has(name.toLowerCase()))
 }
 
 export interface CudaLibFs {

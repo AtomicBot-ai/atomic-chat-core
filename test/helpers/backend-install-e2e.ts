@@ -231,6 +231,40 @@ export function storedZip(filename: string, content: Buffer): Buffer {
   return Buffer.concat([local, name, content, central, name, end])
 }
 
+/** A stored (uncompressed) zip with several files, built from single-file `storedZip` archives. */
+export function storedZipFiles(files: ReadonlyArray<readonly [string, Buffer]>): Buffer {
+  const locals: Buffer[] = []
+  const centrals: Buffer[] = []
+  let offset = 0
+  for (const [filename, content] of files) {
+    const one = storedZip(filename, content)
+    const nameLength = Buffer.byteLength(filename)
+    const localLength = 30 + nameLength + content.length
+    const central = Buffer.from(one.subarray(localLength, localLength + 46 + nameLength))
+    central.writeUInt32LE(offset, 42)
+    locals.push(one.subarray(0, localLength))
+    centrals.push(central)
+    offset += localLength
+  }
+  const centralSize = centrals.reduce((sum, c) => sum + c.length, 0)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0)
+  end.writeUInt16LE(files.length, 8)
+  end.writeUInt16LE(files.length, 10)
+  end.writeUInt32LE(centralSize, 12)
+  end.writeUInt32LE(offset, 16)
+  return Buffer.concat([...locals, ...centrals, end])
+}
+
+/** The DLLs of a Windows CUDA runtime companion for a CUDA major, as a zip under `prefix`. */
+export function cudaRuntimeZip(major: 12 | 13, prefix = 'bin/'): Buffer {
+  return storedZipFiles(
+    [`cudart64_${major}.dll`, `cublas64_${major}.dll`, `cublasLt64_${major}.dll`].map(
+      (name) => [`${prefix}${name}`, Buffer.from('dll')] as const
+    )
+  )
+}
+
 function listen(server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer>) {
   return new Promise<number>((resolve) =>
     server.listen(0, '127.0.0.1', () => {

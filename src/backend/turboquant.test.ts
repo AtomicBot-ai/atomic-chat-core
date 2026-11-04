@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { storedZip } from '../../test/helpers/backend-install-e2e.js'
+import { cudaRuntimeZip, storedZip, storedZipFiles } from '../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { BackendVersion, GpuProbeInfo } from './types.js'
@@ -380,8 +380,12 @@ describe('archives', () => {
     await writeFile(join(donorBin, 'cudart64_12.dll'), 'x')
     expect(await findUpstreamCudaDonor(data.layout, '12.4')).toBe(donorBin)
     expect(await findUpstreamCudaDonor(data.layout, '9.0')).toBeUndefined()
+    // A donor with cudart but no cuBLAS is not enough: the pack would still run on the CPU.
+    await expect(ensureTurboquantCudart('windows-x64-cuda-12.4', pack, 't', deps)).rejects.toThrow('offline')
+    await writeFile(join(donorBin, 'cublas64_12.dll'), 'x')
+    await writeFile(join(donorBin, 'cublasLt64_12.dll'), 'x')
     expect(await ensureTurboquantCudart('windows-x64-cuda-12.4', pack, 't', deps)).toBe('copied')
-    expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
+    expect((await readdir(bin)).sort()).toEqual(['cublas64_12.dll', 'cublasLt64_12.dll', 'cudart64_12.dll'])
     expect(await ensureTurboquantCudart('windows-x64-cuda-12.4', pack, 't', deps)).toBe('present')
   })
 
@@ -397,18 +401,23 @@ describe('archives', () => {
       downloader: {
         download: async (_task: string, items: Array<{ url: string; save_path: string }>) => {
           downloads.push(items[0]!.url)
-          await writeFile(items[0]!.save_path, storedZip('bin/cudart64_12.dll', Buffer.from('new')))
+          await writeFile(items[0]!.save_path, cudaRuntimeZip(12))
         },
       },
     }
-    expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('present')
-    expect(downloads).toHaveLength(0)
     const bin = join(pack, 'build', 'bin')
-    expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
-    await rm(join(bin, 'cudart64_12.dll'))
+    // cudart alone (here from the legacy location) does not make the pack ready: cuBLAS is fetched.
     expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('downloaded')
     expect(downloads).toHaveLength(1)
-    expect(await readdir(bin)).toEqual(['cudart64_12.dll'])
+    const full = ['cublas64_12.dll', 'cublasLt64_12.dll', 'cudart64_12.dll']
+    expect((await readdir(bin)).sort()).toEqual(full)
+    expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('present')
+    expect(downloads).toHaveLength(1)
+    await rm(join(bin, 'cudart64_12.dll'))
+    await writeFile(join(legacy, 'cudart64_12.dll'), 'old')
+    expect(await ensureUpstreamCudart('b10205', 'win-cuda-12.4-x64', pack, 't', deps)).toBe('present')
+    expect(downloads).toHaveLength(1)
+    expect((await readdir(bin)).sort()).toEqual(full)
   })
 
   it('does not fetch for other platforms or backends, and rejects a companion without the required DLL', async () => {
@@ -444,21 +453,41 @@ describe('archives', () => {
 
   it('downloads the companion into the pack and cleans up, and refuses an archive with no DLLs', async () => {
     const pack = join(data.layout.provider('llamacpp').backendsDir, 'b1-1.0.0', 'windows-x64-cuda-13.3')
-    let content = storedZip('bin/cudart64_13.dll', Buffer.from('runtime'))
+    let content = cudaRuntimeZip(13)
+    const items: Array<{ sha256: string | null | undefined; size: number | null | undefined }> = []
     const deps = {
       layout: data.layout,
       platform: 'win32' as const,
       proxy: { url: 'http://proxy' },
       downloader: {
-        download: async (_task: string, items: Array<{ save_path: string; proxy?: unknown }>) => {
-          expect(items[0]?.proxy).toEqual({ url: 'http://proxy' })
-          await writeFile(items[0]?.save_path as string, content)
+        download: async (
+          _task: string,
+          batch: Array<{ save_path: string; proxy?: unknown; sha256?: string | null; size?: number | null }>
+        ) => {
+          expect(batch[0]?.proxy).toEqual({ url: 'http://proxy' })
+          items.push({ sha256: batch[0]?.sha256, size: batch[0]?.size })
+          await writeFile(batch[0]?.save_path as string, content)
         },
       },
     }
     expect(await ensureTurboquantCudart('windows-x64-cuda-13.3', pack, 't', deps)).toBe('downloaded')
-    expect(await readdir(join(pack, 'build', 'bin'))).toEqual(['cudart64_13.dll'])
+    expect((await readdir(join(pack, 'build', 'bin'))).sort()).toEqual([
+      'cublas64_13.dll',
+      'cublasLt64_13.dll',
+      'cudart64_13.dll',
+    ])
     expect(await readdir(data.layout.provider('llamacpp').tmpDir)).toEqual([])
+    // The pinned companion is checked against GitHub's digest and size.
+    expect(items[0]).toEqual({
+      sha256: '1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e',
+      size: 390_970_417,
+    })
+
+    const partial = join(data.layout.provider('llamacpp').backendsDir, 'b1-1.0.0', 'windows-x64-cuda-12.4')
+    content = storedZipFiles([['bin/cudart64_12.dll', Buffer.from('runtime')]])
+    await expect(ensureTurboquantCudart('windows-x64-cuda-12.4', partial, 't', deps)).rejects.toThrow(
+      'did not contain cublas64_12.dll, cublasLt64_12.dll'
+    )
 
     const other = join(data.layout.provider('llamacpp').backendsDir, 'b1-1.0.0', 'windows-x64-cuda-12.4')
     content = storedZip('readme.txt', Buffer.from('no dlls'))

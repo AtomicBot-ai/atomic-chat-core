@@ -1,4 +1,5 @@
 import type { FailureDiagnostic, FailureObserver } from '../../contracts/index.js'
+import { withLoadDiag } from '../../contracts/index.js'
 /**
  * Installing and updating llama.cpp backends (PLAN.md §4, stage 3c).
  *
@@ -41,6 +42,7 @@ import {
   getBackendArchiveName,
   getCudartArchiveName,
   getCudartDownloadUrl,
+  getCudaToolkitVersion,
   prismArchiveSources,
   prismTagBuild,
   resolveBackendArchiveSource,
@@ -52,11 +54,16 @@ import {
   listInstalledBackendPacks,
   readBundledLlamacppPack,
 } from '../installed/index.js'
-import { scanInstalledBackends } from '../installed/index.js'
+import { missingWindowsCudaRuntimeDlls, scanInstalledBackends } from '../installed/index.js'
 import { llamaServerExeName } from '../../config/index.js'
 import type { BackendArchiveSource, InstalledBackendPack, UpstreamManifest } from '../types.js'
 import type { OptimalBackendStore, OptimalState, OptimalUpdate } from '../optimal/index.js'
-import { ensureTurboquantCudart, readTurboquantIndexedAsset, turboquantArchiveUrl } from '../turboquant.js'
+import {
+  ensureTurboquantCudart,
+  readTurboquantIndexedAsset,
+  turboquantArchiveUrl,
+  turboquantCudaToolkit,
+} from '../turboquant.js'
 import { parseBackendVersion, parseBinaryVersion, stripBom } from '../version.js'
 import { verifyWindowsBackendBinary } from './windows-launch-check.js'
 
@@ -547,6 +554,21 @@ export class BackendService {
           )
         }
       } else if (platform === 'win32') {
+        // A Windows CUDA pack is only installed with its whole CUDA runtime beside it: without cudart or
+        // cuBLAS, ggml-cuda.dll does not load and the "CUDA" pack quietly runs on the CPU. `--version`
+        // does not load the CUDA backend, so the launch check below cannot see this.
+        const toolkit =
+          this.deps.provider === 'llamacpp' ? turboquantCudaToolkit(backend) : getCudaToolkitVersion(backend)
+        const missing = toolkit
+          ? await missingWindowsCudaRuntimeDlls(join(staging, 'build', 'bin'), toolkit)
+          : []
+        if (missing.length > 0) {
+          throw new AtomicCoreError(
+            'ENGINE_BINARY_BROKEN',
+            `The ${version}/${backend} backend is missing its CUDA runtime (${missing.join(', ')}). Install it again to download the runtime, or pick another backend.`,
+            withLoadDiag(undefined, { stage: 'spawn', backend, build: version })
+          )
+        }
         // Throws ENGINE_BINARY_BROKEN / CPU_INSTRUCTION_UNSUPPORTED with the load-diag line as is.
         await (
           this.deps.verifyWindowsBackend ??
