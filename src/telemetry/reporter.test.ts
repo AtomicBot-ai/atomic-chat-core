@@ -335,3 +335,18 @@ it('does not let HTTP propagation bypass the owning boundary cooldown', async ()
   await h.reporter.flush()
   expect(h.sent).toHaveLength(1)
 })
+
+it('keeps the tag keys a host names on the reports it captures', async () => {
+  const h = harness({ host: 'atc', hostTagKeys: ['component', 'diagnostic_code'] })
+  h.reporter.capture({
+    source: 'event_listener',
+    level: 'error',
+    error: new Error('Unexpected failure in workspace.read'),
+    tags: { component: 'tui', diagnostic_code: 'CHAT_STREAM_EMPTY_RESPONSE', operation: 'workspace.read' },
+  })
+  await h.reporter.flush()
+  const tags = h.sent[0]?.event['tags'] as Record<string, string>
+  expect(tags).toMatchObject({ component: 'tui', diagnostic_code: 'CHAT_STREAM_EMPTY_RESPONSE' })
+  // Not named by the host: the diagnostic's operation stays.
+  expect(tags['operation']).toBe('event')
+})

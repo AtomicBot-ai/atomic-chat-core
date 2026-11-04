@@ -284,3 +284,59 @@ it('keeps apparent stack frames in a multiline message out of causes and groupin
   expect(event.fingerprint).toContain('src/settings/store.ts:12:1')
   expect(event.exception.values.map((entry) => entry.stacktrace?.frames.length)).toEqual([1, 1])
 })
+
+describe("a host's own report tags", () => {
+  const hostReport = (): ErrorReport => {
+    const error = new Error('Unexpected failure in workspace.read')
+    error.stack = 'Error: x\n    at read (src/workspace-service/read.ts:4:2)'
+    return {
+      source: 'event_listener',
+      level: 'error',
+      error,
+      tags: {
+        component: 'tui',
+        operation: 'workspace.read',
+        diagnostic_code: 'CHAT_STREAM_EMPTY_RESPONSE',
+        route: '/models/secret-model',
+      },
+    }
+  }
+  const hostTagKeys = new Set(['component', 'operation', 'diagnostic_code'])
+
+  it("are dropped while the host names none, as the core's own reports are", () => {
+    const event = buildEvent(hostReport(), ctx)
+    expect(event.tags).toMatchObject({ component: 'core', operation: 'event' })
+    expect(event.tags).not.toHaveProperty('diagnostic_code')
+    expect(event.exception.values.at(-1)?.value).toBe('core event: unknown')
+  })
+
+  it('win over the diagnostic and name the event and its grouping', () => {
+    const event = buildEvent(hostReport(), { ...ctx, hostTagKeys })
+    expect(event.tags).toMatchObject({
+      component: 'tui',
+      operation: 'workspace.read',
+      diagnostic_code: 'CHAT_STREAM_EMPTY_RESPONSE',
+      failure_category: 'unknown',
+    })
+    expect(event.tags).not.toHaveProperty('route')
+    expect(event.exception.values.at(-1)?.value).toBe('tui workspace.read: unknown')
+    expect(event.fingerprint).toEqual([
+      'core-v1',
+      'tui',
+      'workspace.read',
+      '',
+      'unknown',
+      '',
+      '',
+      'src/workspace-service/read.ts:4:2',
+    ])
+  })
+
+  it('are scrubbed and capped like every tag', () => {
+    const report = hostReport()
+    report.tags = { component: '/Users/misha/Library/Atomic/x', operation: 'o'.repeat(500) }
+    const event = buildEvent(report, { ...ctx, hostTagKeys })
+    expect(event.tags['component']).not.toContain('misha')
+    expect(event.tags['operation']!.length).toBeLessThan(500)
+  })
+})

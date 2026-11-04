@@ -214,10 +214,13 @@ export function diagnosticTags(
   }
 }
 
-/** Unknown causes keep their source location; messages and user-selected models never form a key. */
+/**
+ * Unknown causes keep their source location; messages and user-selected models never form a key.
+ * `component` and `operation` may be a host's own (see `ErrorReporterOptions.hostTagKeys`).
+ */
 export function diagnosticFingerprint(
   error: unknown,
-  diagnostic: FailureDiagnostic,
+  diagnostic: Pick<FailureDiagnostic, 'reason' | 'nativeFailure'> & { component: string; operation: string },
   provider?: string
 ): string[] {
   const chain = errorChain(error)
