@@ -597,6 +597,80 @@ describe('the Windows launch gate', () => {
   })
 })
 
+describe('BackendService.repairCudaRuntime', () => {
+  const service = (
+    provider: 'llamacpp-upstream' | 'llamacpp' | 'atomic-prism',
+    downloader: { download: (task: string, items: never[]) => Promise<void> },
+    over: Partial<ConstructorParameters<typeof BackendService>[0]> = {}
+  ) =>
+    new BackendService({
+      layout: data.layout,
+      provider,
+      downloader: downloader as never,
+      readManifest: async () => null,
+      platform: 'win32',
+      now: () => 1,
+      ...over,
+    })
+  const bin = (provider: 'llamacpp-upstream' | 'llamacpp', version: string, backend: string) =>
+    join(data.layout.provider(provider).backendsDir, version, backend, 'build', 'bin')
+
+  it('leaves PrismML packs and other platforms alone', async () => {
+    const download = vi.fn(async () => {})
+    await service('atomic-prism', { download }).repairCudaRuntime('b1', 'win-cuda-12.4-x64')
+    await service('llamacpp-upstream', { download }, { platform: 'linux' }).repairCudaRuntime(
+      'b12019',
+      'win-cuda-12.4-x64'
+    )
+    expect(download).not.toHaveBeenCalled()
+  })
+
+  it("completes an upstream pack from its listed companion when the CDN one lacks cuBLAS", async () => {
+    const mirror = 'https://mirror.example/releases/b12019/cudart-llama-bin-win-cuda-13.4-x64.zip'
+    const items: Array<Record<string, unknown>> = []
+    const download = vi.fn(async (_t: string, given: Array<{ url: string; save_path: string }>) => {
+      for (const item of given) {
+        items.push(item)
+        await writeFile(
+          item.save_path,
+          item.url === mirror ? cudaRuntimeZip(13, '') : storedZip('cudart64_13.dll', Buffer.from('dll'))
+        )
+      }
+    })
+    const manifest: UpstreamManifest = {
+      tag_name: 'b12019',
+      download_base: 'https://mirror.example/releases',
+      assets: [{ name: 'cudart-llama-bin-win-cuda-13.4-x64.zip', sha256: 'b'.repeat(64), size: 20 }],
+    }
+    await service('llamacpp-upstream', { download }, { readManifest: async () => manifest }).repairCudaRuntime(
+      'b12019',
+      'win-cuda-13.4-x64'
+    )
+    expect(items.map((i) => i['url'])).toEqual([
+      'https://github.com/ggml-org/llama.cpp/releases/download/b12019/cudart-llama-bin-win-cuda-13.4-x64.zip',
+      mirror,
+    ])
+    expect(items[1]).toMatchObject({ sha256: 'b'.repeat(64), size: 20 })
+    expect((await readdir(bin('llamacpp-upstream', 'b12019', 'win-cuda-13.4-x64'))).sort()).toEqual([
+      'cublas64_13.dll',
+      'cublasLt64_13.dll',
+      'cudart64_13.dll',
+    ])
+  })
+
+  it('rejects when no source can supply the runtime, so the load guard picks another pack', async () => {
+    const warnings: string[] = []
+    const download = vi.fn(async () => {
+      throw new Error('offline')
+    })
+    await expect(
+      service('llamacpp', { download }, { log: (m) => warnings.push(m), readManifest: async () => { throw new Error('unused') } })
+        .repairCudaRuntime('b1-1.0.0', 'windows-x64-cuda-12.4')
+    ).rejects.toMatchObject({ code: 'ENGINE_BINARY_BROKEN' })
+    expect(warnings).toEqual([expect.stringContaining('cudart repair for b1-1.0.0/windows-x64-cuda-12.4: Error: offline')])
+  })
+})
+
 describe('companionSource', () => {
   const cdn = 'https://github.com/ggml-org/llama.cpp/releases/download/b1/cudart.zip'
   const listed: UpstreamManifest = {

@@ -72,12 +72,6 @@ import {
   TurboquantCatalogService,
   UpstreamReleasesCatalogService,
   upstreamManifestForTag,
-  ensureTurboquantCudart,
-  ensureUpstreamCudart,
-  companionSource,
-  deliverWindowsCudaRuntime,
-  getCudartArchiveName,
-  getCudartDownloadUrl,
   llamaBackendFallback,
   OptimalBackendStore,
   readRuntimeSettings,
@@ -286,50 +280,10 @@ export async function createAtomicCore(
             version,
             hardware,
             process.arch,
-            (repairBackend, repairVersion) => {
-              const backendDir = join(layout.provider(provider).backendsDir, repairVersion, repairBackend)
-              const taskId = `${provider}-cudart-${repairVersion}/${repairBackend}`.replace(
-                /[^A-Za-z0-9_/:-]/g,
-                '_'
-              )
-              const deps = { layout, downloader, platform, log: (message: string) => log('warn', message) }
-              // A PrismML pack is installed with its CUDA runtime in place; there is nothing to repair.
-              if (provider === 'atomic-prism') return Promise.resolve()
-              const quick =
-                provider === 'llamacpp'
-                  ? ensureTurboquantCudart(repairBackend, backendDir, taskId, deps)
-                  : ensureUpstreamCudart(repairVersion, repairBackend, backendDir, taskId, deps)
-              // The provider's own repair first (its companion, as before); whatever it could not
-              // supply comes from another pack, a host toolkit, NVIDIA's redistributables or the pinned
-              // companions. A rejection here is what makes the guard pick another pack.
-              return quick
-                .catch((error: unknown) => log('warn', `cudart repair for ${repairVersion}/${repairBackend}: ${String(error)}`))
-                .then(async () => {
-                  if (platform !== 'win32') return
-                  const companionName = getCudartArchiveName(repairBackend, repairVersion)
-                  const companionUrl = getCudartDownloadUrl(repairVersion, repairBackend)
-                  const manifest =
-                    provider === 'llamacpp-upstream' && companionName && companionUrl
-                      ? await upstreamCatalog
-                          .catalog({ proxy: null })
-                          .then(({ catalog }) => upstreamManifestForTag(catalog, repairVersion))
-                          .catch(() => null)
-                      : null
-                  await deliverWindowsCudaRuntime(
-                    { provider, version: repairVersion, backend: repairBackend, packDir: backendDir },
-                    {
-                      layout,
-                      downloader,
-                      taskId,
-                      fetch: fetchFor(),
-                      log: (message) => log('warn', message),
-                      ...(provider === 'llamacpp-upstream' && companionName && companionUrl
-                        ? { releaseCompanion: companionSource(repairVersion, companionName, companionUrl, manifest) }
-                        : {}),
-                    }
-                  )
-                })
-            }
+            // The provider's own companion first, then whatever source can supply the rest of the
+            // runtime; a rejection is what makes the guard pick another pack.
+            (repairBackend, repairVersion) =>
+              backendService(provider).repairCudaRuntime(repairVersion, repairBackend)
           ),
         // A GPU build this card or driver cannot run (CUDA 13 on Turing before R616, a pack Windows
         // cannot load) is remembered and the load is retried once on the next installed build.

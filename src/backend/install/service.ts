@@ -60,6 +60,7 @@ import type { BackendArchiveSource, InstalledBackendPack, UpstreamManifest } fro
 import type { OptimalBackendStore, OptimalState, OptimalUpdate } from '../optimal/index.js'
 import {
   ensureTurboquantCudart,
+  ensureUpstreamCudart,
   readTurboquantIndexedAsset,
   turboquantArchiveUrl,
   turboquantCudaToolkit,
@@ -487,6 +488,56 @@ export class BackendService {
    * downloaded again, because the updater screen calls this for every row it offers and a user
    * clicking twice should not re-fetch half a gigabyte.
    */
+  /**
+   * Before a load: make an installed Windows CUDA pack carry its whole CUDA runtime. The provider's
+   * own repair runs first (its companion, as it always did); whatever it could not supply comes from
+   * another pack, a host toolkit, NVIDIA's redistributables or the pinned companions. Rejects when no
+   * source could, which is what makes the load guard pick another pack. PrismML packs are installed
+   * with their runtime and are left alone; other platforms have nothing to do.
+   */
+  async repairCudaRuntime(version: string, backend: string): Promise<void> {
+    const provider = this.deps.provider
+    if (provider === 'atomic-prism') return
+    const platform = this.deps.platform ?? process.platform
+    const backendDir = join(this.deps.layout.provider(provider).backendsDir, version, backend)
+    const taskId = `${provider}-cudart-${version}/${backend}`.replace(/[^A-Za-z0-9_/:-]/g, '_')
+    const deps = {
+      layout: this.deps.layout,
+      downloader: this.deps.downloader,
+      platform,
+      ...(this.deps.log ? { log: this.deps.log } : {}),
+    }
+    await (
+      provider === 'llamacpp'
+        ? ensureTurboquantCudart(backend, backendDir, taskId, deps)
+        : ensureUpstreamCudart(version, backend, backendDir, taskId, deps)
+    ).catch((error: unknown) => this.deps.log?.(`cudart repair for ${version}/${backend}: ${String(error)}`))
+    if (platform !== 'win32') return
+    const companionName = getCudartArchiveName(backend, version)
+    const companionUrl = getCudartDownloadUrl(version, backend)
+    const releaseCompanion =
+      provider === 'llamacpp-upstream' && companionName && companionUrl
+        ? companionSource(
+            version,
+            companionName,
+            companionUrl,
+            await this.deps.readManifest(stripBom(version)).catch(() => null)
+          )
+        : null
+    await deliverWindowsCudaRuntime(
+      { provider, version, backend, packDir: backendDir },
+      {
+        layout: this.deps.layout,
+        downloader: this.deps.downloader,
+        taskId,
+        releaseCompanion,
+        ...(this.deps.cudaRuntimeFetchFor ? { fetch: this.deps.cudaRuntimeFetchFor(null) } : {}),
+        ...(this.deps.env ? { env: this.deps.env } : {}),
+        ...(this.deps.log ? { log: this.deps.log } : {}),
+      }
+    )
+  }
+
   async install(
     version: string,
     backend: string,
