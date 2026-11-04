@@ -3,7 +3,12 @@ import { LOAD_DIAG_PREFIX, formatLoadDiag, parseLoadDiag, stripLoadDiag, withLoa
 
 describe('load diag line', () => {
   it('formats without empty fields and parses back', () => {
-    const line = formatLoadDiag({ exit_code: '0xC0000135', stage: 'spawn', backend: 'win-cpu-x64', build: '' })
+    const line = formatLoadDiag({
+      exit_code: '0xC0000135',
+      stage: 'spawn',
+      backend: 'win-cpu-x64',
+      build: '',
+    })
     expect(line).toBe(`${LOAD_DIAG_PREFIX}{"exit_code":"0xC0000135","stage":"spawn","backend":"win-cpu-x64"}`)
     expect(parseLoadDiag(`stderr line\n${line}`)).toEqual({
       exit_code: '0xC0000135',

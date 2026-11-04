@@ -54,7 +54,8 @@ export async function startBackendInstallFixture(
       ? storedZip(`build/bin/${exe}`, await windowsFixtureExe())
       : await createTar(folder, exe)
   const companionName = 'cudart-llama-bin-win-cuda-13.3-x64.zip'
-  const companion = storedZip('build/bin/cudart.dll', Buffer.from('fixture CUDA runtime'))
+  // The whole Windows CUDA runtime: a pack is only installed with cudart and both cuBLAS DLLs.
+  const companion = cudaRuntimeZip(13, 'build/bin/')
   const sha256 = createHash('sha256').update(archive).digest('hex')
   const manifest = Buffer.from(
     JSON.stringify({

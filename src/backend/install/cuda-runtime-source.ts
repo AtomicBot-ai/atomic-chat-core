@@ -70,12 +70,7 @@ export const PINNED_WINDOWS_CUDA_RUNTIMES: ReadonlyArray<{
 ]
 
 export type CudaRuntimeSource =
-  | 'present'
-  | 'installed-pack'
-  | 'host-toolkit'
-  | 'release-companion'
-  | 'nvidia-redist'
-  | 'pinned-companion'
+  'present' | 'installed-pack' | 'host-toolkit' | 'release-companion' | 'nvidia-redist' | 'pinned-companion'
 
 export interface CudaRuntimeTarget {
   provider: string
@@ -138,7 +133,8 @@ async function copyAllFrom(
   const sources = names.map((name) => byLower.get(name.toLowerCase()))
   if (sources.some((s) => s === undefined)) return false
   await mkdir(toDir, { recursive: true })
-  for (const [i, name] of names.entries()) await copyFile(join(fromDir, sources[i] as string), join(toDir, name))
+  for (const [i, name] of names.entries())
+    await copyFile(join(fromDir, sources[i] as string), join(toDir, name))
   return true
 }
 
@@ -250,7 +246,9 @@ export async function nvidiaRedistArchives(
 ): Promise<Array<{ url: string; sha256: string; size: number; name: string }> | undefined> {
   const index = await fetchImpl(`${NVIDIA_CUDA_REDIST_BASE}/`)
   if (!index.ok) return undefined
-  const releases = [...new Set([...(await index.text()).matchAll(/redistrib_(\d+)\.(\d+)\.(\d+)\.json/g)].map((m) => m[0]))]
+  const releases = [
+    ...new Set([...(await index.text()).matchAll(/redistrib_(\d+)\.(\d+)\.(\d+)\.json/g)].map((m) => m[0])),
+  ]
     .map((file) => {
       const [, ma, mi, pa] = /redistrib_(\d+)\.(\d+)\.(\d+)\.json/.exec(file) as RegExpExecArray
       return { file, major: Number(ma), minor: Number(mi), patch: Number(pa) }

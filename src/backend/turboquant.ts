@@ -649,7 +649,9 @@ export async function ensureTurboquantCudart(
       {
         url,
         save_path: archive,
-        ...(pinned && url === turboquantCudartUrl(backend) ? { sha256: pinned.sha256, size: pinned.size } : {}),
+        ...(pinned && url === turboquantCudartUrl(backend)
+          ? { sha256: pinned.sha256, size: pinned.size }
+          : {}),
         ...(deps.proxy ? { proxy: deps.proxy } : {}),
       },
     ])
@@ -671,7 +673,10 @@ export async function ensureTurboquantCudart(
     if (moved === 0) throw new AtomicCoreError('IO_ERROR', `cudart archive for ${backend} contained no DLLs`)
     const missing = await missingWindowsCudaRuntimeDlls(bin, toolkit)
     if (missing.length > 0)
-      throw new AtomicCoreError('IO_ERROR', `cudart archive for ${backend} did not contain ${missing.join(', ')}`)
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `cudart archive for ${backend} did not contain ${missing.join(', ')}`
+      )
     return 'downloaded'
   } finally {
     await rm(archive, { force: true }).catch(() => {})

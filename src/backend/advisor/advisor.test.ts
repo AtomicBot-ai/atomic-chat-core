@@ -323,7 +323,10 @@ describe('BackendAdvisor.catalog', () => {
     expect(catalog.recommended).toBe(`${UP}/win-cuda-12.4-x64`)
 
     // A newer driver is a different key: the CUDA 13 build is offered again.
-    const updated = await harness('llamacpp-upstream', host('windows', [{ ...rtx4090, driver_version: '616.07' }]))
+    const updated = await harness(
+      'llamacpp-upstream',
+      host('windows', [{ ...rtx4090, driver_version: '616.07' }])
+    )
     const fresh = await updated.advisor.catalog({ current_backend: 'b10405/win-cpu-x64', force: true })
     expect(fresh.recommended).toBe(`${UP}/win-cuda-13.3-x64`)
   })

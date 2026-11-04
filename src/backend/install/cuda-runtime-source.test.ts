@@ -20,7 +20,11 @@ beforeEach(async () => {
 })
 afterEach(() => data.cleanup())
 
-const runtime = (major: 12 | 13) => [`cudart64_${major}.dll`, `cublas64_${major}.dll`, `cublasLt64_${major}.dll`]
+const runtime = (major: 12 | 13) => [
+  `cudart64_${major}.dll`,
+  `cublas64_${major}.dll`,
+  `cublasLt64_${major}.dll`,
+]
 
 async function writeDlls(dir: string, names: readonly string[]): Promise<void> {
   await mkdir(dir, { recursive: true })
@@ -55,7 +59,10 @@ describe('cudaToolkitOfPack', () => {
 })
 
 describe('deliverWindowsCudaRuntime', () => {
-  const target = (backend = 'win-cuda-12.4-x64', provider: 'llamacpp-upstream' | 'llamacpp' = 'llamacpp-upstream') => ({
+  const target = (
+    backend = 'win-cuda-12.4-x64',
+    provider: 'llamacpp-upstream' | 'llamacpp' = 'llamacpp-upstream'
+  ) => ({
     provider,
     version: 'b12019',
     backend,
@@ -75,14 +82,20 @@ describe('deliverWindowsCudaRuntime', () => {
     const { downloader } = offline()
     const deps = { layout: data.layout, downloader, taskId: 't', log: vi.fn() }
     // A 13.3 pack cannot lend its runtime to a 13.4 build; a 13.4 TurboQuant-compatible upstream one can.
-    await writeDlls(join(pack('llamacpp-upstream', 'b11000', 'win-cuda-13.3-x64'), 'build', 'bin'), runtime(13))
+    await writeDlls(
+      join(pack('llamacpp-upstream', 'b11000', 'win-cuda-13.3-x64'), 'build', 'bin'),
+      runtime(13)
+    )
     const tq = target('windows-x64-cuda-13.3', 'llamacpp')
     expect(await deliverWindowsCudaRuntime(tq, deps)).toBe('installed-pack')
     expect((await readdir(join(tq.packDir, 'build', 'bin'))).sort()).toEqual(runtime(13).sort())
 
     const newer = target('win-cuda-13.4-x64')
     await expect(deliverWindowsCudaRuntime(newer, deps)).rejects.toBeInstanceOf(AtomicCoreError)
-    await writeDlls(join(pack('llamacpp-upstream', 'b11500', 'win-cuda-13.4-x64'), 'build', 'bin'), runtime(13))
+    await writeDlls(
+      join(pack('llamacpp-upstream', 'b11500', 'win-cuda-13.4-x64'), 'build', 'bin'),
+      runtime(13)
+    )
     expect(await deliverWindowsCudaRuntime(newer, deps)).toBe('installed-pack')
     // Only the refused attempt above went to the network (the pinned 13.4 companion).
     expect(downloader.download).toHaveBeenCalledTimes(1)
@@ -92,9 +105,17 @@ describe('deliverWindowsCudaRuntime', () => {
   it('only uses a donor that has every missing DLL, and takes the legacy lib folder', async () => {
     const { downloader } = offline()
     const deps = { layout: data.layout, downloader, taskId: 't' }
-    await writeDlls(join(pack('llamacpp', 'b1-1.0.0', 'windows-x64-cuda-12.4'), 'build', 'bin'), ['cudart64_12.dll'])
-    await expect(deliverWindowsCudaRuntime(target(), deps)).rejects.toMatchObject({ code: 'ENGINE_BINARY_BROKEN' })
-    await writeDlls(join(data.root, 'llamacpp', 'lib'), ['CUDART64_12.DLL', 'cublas64_12.dll', 'cublasLt64_12.dll'])
+    await writeDlls(join(pack('llamacpp', 'b1-1.0.0', 'windows-x64-cuda-12.4'), 'build', 'bin'), [
+      'cudart64_12.dll',
+    ])
+    await expect(deliverWindowsCudaRuntime(target(), deps)).rejects.toMatchObject({
+      code: 'ENGINE_BINARY_BROKEN',
+    })
+    await writeDlls(join(data.root, 'llamacpp', 'lib'), [
+      'CUDART64_12.DLL',
+      'cublas64_12.dll',
+      'cublasLt64_12.dll',
+    ])
     expect(await deliverWindowsCudaRuntime(target(), deps)).toBe('installed-pack')
     expect((await readdir(join(target().packDir, 'build', 'bin'))).sort()).toEqual(runtime(12).sort())
   })
@@ -128,7 +149,9 @@ describe('deliverWindowsCudaRuntime', () => {
 
   it("downloads the pack's own release companion with its checksum", async () => {
     const url = 'https://mirror.example/b12019/cudart-llama-bin-win-cuda-12.4-x64.zip'
-    const { downloader, items } = fakeDownloader((u) => (u === url ? cudaRuntimeZip(12, '') : new Error('unexpected')))
+    const { downloader, items } = fakeDownloader((u) =>
+      u === url ? cudaRuntimeZip(12, '') : new Error('unexpected')
+    )
     const source = await deliverWindowsCudaRuntime(target(), {
       layout: data.layout,
       downloader,
@@ -164,7 +187,9 @@ describe('deliverWindowsCudaRuntime', () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
       if (url === `${NVIDIA_CUDA_REDIST_BASE}/`)
-        return new Response('<a href="redistrib_13.3.1.json">x</a> redistrib_13.4.1.json redistrib_13.4.3.json redistrib_12.9.1.json')
+        return new Response(
+          '<a href="redistrib_13.3.1.json">x</a> redistrib_13.4.1.json redistrib_13.4.3.json redistrib_12.9.1.json'
+        )
       if (url === `${NVIDIA_CUDA_REDIST_BASE}/redistrib_13.4.3.json`) return Response.json(manifest)
       return new Response('nope', { status: 404 })
     })
@@ -209,15 +234,18 @@ describe('deliverWindowsCudaRuntime', () => {
     const answers: Record<string, (() => Response) | undefined> = {}
     const fetchImpl = (async (input: string | URL | Request) =>
       answers[String(input)]?.() ?? new Response('nope', { status: 404 })) as typeof fetch
-    answers[`${NVIDIA_CUDA_REDIST_BASE}/`] = () => new Response('redistrib_12.4.0.json redistrib_12.6.3.json redistrib_11.8.0.json')
-    answers[`${NVIDIA_CUDA_REDIST_BASE}/redistrib_12.6.3.json`] = () => Response.json({
-      cuda_cudart: { 'windows-x86_64': { relative_path: 'a/x.zip', sha256: 'a', size: 1 } },
-      libcublas: { 'windows-x86_64': { relative_path: 'b/y.zip', sha256: 'b', size: 2 } },
-    })
+    answers[`${NVIDIA_CUDA_REDIST_BASE}/`] = () =>
+      new Response('redistrib_12.4.0.json redistrib_12.6.3.json redistrib_11.8.0.json')
+    answers[`${NVIDIA_CUDA_REDIST_BASE}/redistrib_12.6.3.json`] = () =>
+      Response.json({
+        cuda_cudart: { 'windows-x86_64': { relative_path: 'a/x.zip', sha256: 'a', size: 1 } },
+        libcublas: { 'windows-x86_64': { relative_path: 'b/y.zip', sha256: 'b', size: 2 } },
+      })
     // 12.4.0 has no Windows cuBLAS entry: skipped for the next release up.
-    answers[`${NVIDIA_CUDA_REDIST_BASE}/redistrib_12.4.0.json`] = () => Response.json({
-      cuda_cudart: { 'windows-x86_64': { relative_path: 'a/x.zip', sha256: 'a', size: 1 } },
-    })
+    answers[`${NVIDIA_CUDA_REDIST_BASE}/redistrib_12.4.0.json`] = () =>
+      Response.json({
+        cuda_cudart: { 'windows-x86_64': { relative_path: 'a/x.zip', sha256: 'a', size: 1 } },
+      })
     expect(await nvidiaRedistArchives({ major: 12, minor: 4 }, fetchImpl)).toEqual([
       { url: `${NVIDIA_CUDA_REDIST_BASE}/a/x.zip`, sha256: 'a', size: 1, name: 'x.zip' },
       { url: `${NVIDIA_CUDA_REDIST_BASE}/b/y.zip`, sha256: 'b', size: 2, name: 'y.zip' },
@@ -229,7 +257,9 @@ describe('deliverWindowsCudaRuntime', () => {
 
   it('falls back to the pinned ggml-org companions, arm64 included, and skips NVIDIA there', async () => {
     const arm = PINNED_WINDOWS_CUDA_RUNTIMES.find((p) => p.arch === 'arm64')!
-    const { downloader, items } = fakeDownloader((url) => (url === arm.url ? cudaRuntimeZip(13, '') : new Error('offline')))
+    const { downloader, items } = fakeDownloader((url) =>
+      url === arm.url ? cudaRuntimeZip(13, '') : new Error('offline')
+    )
     const fetchImpl = vi.fn()
     const source = await deliverWindowsCudaRuntime(target('win-cuda-13.4-arm64'), {
       layout: data.layout,
@@ -256,7 +286,9 @@ describe('deliverWindowsCudaRuntime', () => {
     expect(error).toBeInstanceOf(AtomicCoreError)
     expect(error).toMatchObject({
       code: 'ENGINE_BINARY_BROKEN',
-      message: expect.stringContaining('missing its CUDA runtime (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll)'),
+      message: expect.stringContaining(
+        'missing its CUDA runtime (cudart64_12.dll, cublas64_12.dll, cublasLt64_12.dll)'
+      ),
     })
     const details = (error as AtomicCoreError).details ?? ''
     expect(details).toContain('installed packs')

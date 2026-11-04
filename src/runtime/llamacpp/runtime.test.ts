@@ -21,6 +21,7 @@ import { generateApiKey, hostPid, spawnManaged } from '../shared/index.js'
 import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
+import { formatExitCode } from './errors.js'
 
 /**
  * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
@@ -1319,7 +1320,12 @@ describe('the diag line of a failed load', () => {
     const details = (error as AtomicCoreError).details ?? ''
     expect(details).toMatch(/failed to allocate 4096\.00 MiB/)
     expect(details.split('\n').at(-1)).toMatch(/^atomic-core-diag \{/)
-    expect(diagOf(error)).toEqual({ exit_code: '1', stage: 'load', backend: 'macos-arm64', build: 'b6325' })
+    expect(diagOf(error)).toEqual({
+      exit_code: formatExitCode(1, process.platform),
+      stage: 'load',
+      backend: 'macos-arm64',
+      build: 'b6325',
+    })
     expect((error as AtomicCoreError).diagnostic).toMatchObject({ engineVersion: 'b6325/macos-arm64' })
   })
 
@@ -1348,7 +1354,7 @@ describe('the diag line of a failed load', () => {
     const runtime = await makeRuntime({ spawn: diesWith('', 3) })
     const error = await runtime.load('demo').catch((e: unknown) => e)
     expect(diagOf(error)).toEqual({
-      exit_code: '3',
+      exit_code: formatExitCode(3, process.platform),
       stage: 'spawn',
       backend: 'macos-arm64',
       build: 'b6325',
@@ -1443,7 +1449,7 @@ describe('a build that cannot run on this machine', () => {
     expect(asked).toBe(1)
     expect(error).toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
     expect(diagOf(error)).toEqual({
-      exit_code: '1',
+      exit_code: formatExitCode(1, process.platform),
       stage: 'load',
       backend: 'win-vulkan-x64',
       build: 'b12019',
@@ -1500,7 +1506,7 @@ describe('a build that cannot run on this machine', () => {
     const error = await nothing.load('demo').catch((e: unknown) => e)
     expect(error).toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
     expect(diagOf(error)).toEqual({
-      exit_code: '1',
+      exit_code: formatExitCode(1, process.platform),
       stage: 'load',
       backend: 'win-cuda-13.3-x64',
       build: 'b12019',

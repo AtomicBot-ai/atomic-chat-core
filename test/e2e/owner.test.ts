@@ -554,7 +554,7 @@ describe.skipIf(!existsSync(BIN))('the compiled core as an owner', () => {
             fixture.backend,
             'build',
             'bin',
-            'cudart.dll'
+            'cublasLt64_13.dll'
           )
         )
       ).toBe(true)

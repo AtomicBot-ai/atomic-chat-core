@@ -26,7 +26,11 @@ describe('discoverCudaPaths', () => {
       probe(
         'win32',
         { CUDA_PATH_V13_4: 'C:\\cuda\\v13.4', ProgramFiles: 'C:\\PF' },
-        ['C:\\cuda\\v13.4\\bin', 'C:\\cuda\\v13.4\\bin\\x64', 'C:\\PF\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.3\\bin\\x64'],
+        [
+          'C:\\cuda\\v13.4\\bin',
+          'C:\\cuda\\v13.4\\bin\\x64',
+          'C:\\PF\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.3\\bin\\x64',
+        ],
         { 'C:\\PF\\NVIDIA GPU Computing Toolkit\\CUDA': ['v13.3'] }
       )
     )

@@ -624,7 +624,9 @@ export class BackendService {
             downloader: this.deps.downloader,
             taskId: options.taskId,
             proxy: options.proxy ?? null,
-            ...(this.deps.cudaRuntimeFetchFor ? { fetch: this.deps.cudaRuntimeFetchFor(options.proxy ?? null) } : {}),
+            ...(this.deps.cudaRuntimeFetchFor
+              ? { fetch: this.deps.cudaRuntimeFetchFor(options.proxy ?? null) }
+              : {}),
             ...(this.deps.env ? { env: this.deps.env } : {}),
             ...(this.deps.log ? { log: this.deps.log } : {}),
           }
