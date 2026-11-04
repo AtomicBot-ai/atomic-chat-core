@@ -91,9 +91,9 @@ describe('how long a record counts', () => {
       const record = entry({ reason })
       expect(isBadBackendEntryLive(record, at + 6 * day)).toBe(true)
       expect(isBadBackendEntryLive(record, at + TRANSIENT_BAD_BACKEND_TTL_MS)).toBe(false)
-      expect(
-        isBackendMarkedBad([record], record.provider, record.backend, record.driver, at + 8 * day)
-      ).toBe(false)
+      expect(isBackendMarkedBad([record], record.provider, record.backend, record.driver, at + 8 * day)).toBe(
+        false
+      )
     }
   })
 
