@@ -171,5 +171,6 @@ add a new one that says which record it supersedes.
 - [Strip a leading UTF-8 BOM when reading settings.json](2026-11-03-strip-utf8-bom-when-reading-settings-json.md)
 - **2026-11-03** — [Keep failure diagnostics outside the wire contract](2026-11-03-keep-failure-diagnostics-outside-the-wire-contract.md).
 - [Preserve filesystem cause on instance lock IO_ERRORs](2026-11-03-preserve-filesystem-cause-on-instance-lock-io-errors.md)
+- [Gate superseded-load test readiness on cancellation](2026-11-04-gate-superseded-load-test-readiness.md)
 - [Await download write streams and settle multi-file transfers](2026-11-04-await-download-write-streams-and-settle-multi-file-transfers.md)
 - [Compare lock causes with native filesystem errors](2026-11-04-compare-lock-causes-with-native-filesystem-errors.md)
