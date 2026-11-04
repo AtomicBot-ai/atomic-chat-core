@@ -180,11 +180,9 @@ describe('InstanceLock.acquire', () => {
       details: (acquireErr.cause as Error).message,
     })
     const diagnostic = classifyFailure(acquireErr, { component: 'core', operation: 'startup' })
-    expect(diagnostic).toMatchObject({
-      component: 'core',
-      operation: 'startup',
-      ...classifyFailure(nativeAcquireErr, { component: 'core', operation: 'startup' }),
-    })
+    expect(diagnostic).toMatchObject(
+      classifyFailure(nativeAcquireErr, { component: 'core', operation: 'startup' })
+    )
     expect(diagnosticTags(acquireErr, diagnostic).cause_code).toBe(nativeAcquireErr.code)
 
     // 2. readLockRecord failing with a non-ENOENT error (EISDIR on a directory).
