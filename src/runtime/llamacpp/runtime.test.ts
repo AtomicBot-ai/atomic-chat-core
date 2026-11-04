@@ -1533,8 +1533,10 @@ describe('a build that cannot run on this machine', () => {
         return { version: 'b12019', backend: 'win-cpu-x64' }
       },
     })
+    // A real file, so the named binary passes the existence check on every OS.
+    const named = await data.writeBackend('llamacpp-upstream', 'b12019', 'win-cuda-13.3-x64')
     await expect(
-      explicit.load('demo', { exePath: '/bin/llama-server', versionBackend: 'b12019/win-cuda-13.3-x64' })
+      explicit.load('demo', { exePath: named, versionBackend: 'b12019/win-cuda-13.3-x64' })
     ).rejects.toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
     expect(asked).toBe(0)
   })
