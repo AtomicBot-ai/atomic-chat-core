@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -232,6 +233,78 @@ describe('Downloader', () => {
     await expect(second).resolves.toBeUndefined()
   })
 
+  it('closes the write stream before rejecting on abort so removing the staging folder never emits an unhandled ENOENT', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-abort-open-'))
+    const uncaught: Error[] = []
+    const onUncaught = (err: Error) => uncaught.push(err)
+    process.on('uncaughtException', onUncaught)
+    let busy: Array<Promise<unknown>> = []
+    try {
+      const dl: Downloader = new Downloader({
+        dataFolder,
+        platform: 'darwin',
+        fetch: (async () => {
+          busy = Array.from({ length: 16 }, () => realpath(dataFolder))
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              pull() {
+                dl.cancel('abort-open')
+                return Promise.reject(new DOMException('The operation was aborted', 'AbortError'))
+              },
+            }),
+            { status: 200, headers: { 'content-length': '1024' } }
+          )
+        }) as unknown as typeof fetch,
+        availableSpace: async () => undefined,
+        sleep: async () => {},
+        emit: () => {},
+      })
+      const relDir = 'diffusion/backends/master-1028-37bc88b-a5f9a63b/macos-arm64.incoming-1.download'
+      const stagingDir = join(dataFolder, relDir)
+      await expect(
+        dl.download('abort-open', [
+          {
+            url: 'http://engine.test/sd.zip',
+            save_path: `${relDir}/sd-master-37bc88b-bin-Darwin-macOS-26.6.2-arm64.zip`,
+            size: 1024,
+          },
+        ])
+      ).rejects.toThrow(DOWNLOAD_CANCELLED)
+      rmSync(stagingDir, { recursive: true, force: true })
+      await Promise.allSettled(busy)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(uncaught).toEqual([])
+
+      const missingDir = join(dataFolder, 'removed-while-opening')
+      const dl2 = new Downloader({
+        dataFolder,
+        platform: 'darwin',
+        fetch: (async () => {
+          busy = Array.from({ length: 16 }, () => realpath(dataFolder))
+          queueMicrotask(() => rmSync(missingDir, { recursive: true, force: true }))
+          return new Response(new ReadableStream<Uint8Array>({ start: (c) => c.close() }), {
+            status: 200,
+          })
+        }) as unknown as typeof fetch,
+        availableSpace: async () => undefined,
+        sleep: async () => {},
+        emit: () => {},
+      })
+      await expect(
+        dl2.download('open-error', [
+          { url: 'http://engine.test/sd.zip', save_path: 'removed-while-opening/sd.zip' },
+        ])
+      ).rejects.toThrow(/^Error: \[disk_/)
+      await Promise.allSettled(busy)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(uncaught).toEqual([])
+    } finally {
+      await Promise.allSettled(busy)
+      process.removeListener('uncaughtException', onUncaught)
+      await rm(dataFolder, { recursive: true, force: true })
+    }
+  })
+
   it('treats an unknown size as open-ended and fails an incomplete known size', async () => {
     server.files.set('/nolen.bin', { body: body.subarray(0, 100), noHeadLength: true })
     const { dl, dataFolder } = await make()
@@ -249,6 +322,102 @@ describe('Downloader', () => {
     await expect(
       dl.download('t16', [{ url: server.url('/ok.bin'), save_path: 'p/a.bin', proxy: { url: 'ftp://p' } }])
     ).rejects.toThrow('Error: Unsupported proxy scheme: ftp')
+  })
+
+  it('closes write streams and settles sibling transfers before rejecting on failure or cancel', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-sibling-'))
+    let siblingStreaming!: () => void
+    const siblingStarted = new Promise<void>((resolve) => {
+      siblingStreaming = resolve
+    })
+    let releaseSibling!: () => void
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve
+    })
+    let siblingAborted = false
+
+    const dl = new Downloader({
+      dataFolder,
+      platform: 'linux',
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('/main.zip')) {
+          await siblingStarted
+          return new Response('missing archive', { status: 404 })
+        }
+        if (url.endsWith('/cudart.zip')) {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              siblingAborted = true
+              releaseSibling()
+            },
+            { once: true }
+          )
+          let firstChunk = true
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                if (firstChunk) {
+                  firstChunk = false
+                  controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+                  siblingStreaming()
+                  return
+                }
+                await siblingGate
+                if (init?.signal?.aborted) {
+                  controller.error(new Error('aborted'))
+                  return
+                }
+                controller.enqueue(new Uint8Array([5, 6, 7, 8]))
+                controller.close()
+              },
+            }),
+            { status: 200, headers: { 'content-length': '8' } }
+          )
+        }
+        await rm(join(dataFolder, 'diffusion/backends/gone'), { recursive: true, force: true })
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { 'content-length': '4' },
+        })
+      }) as unknown as typeof fetch,
+      availableSpace: async () => undefined,
+      sleep: async () => {},
+      emit: () => {},
+    })
+
+    const stagingDir = 'diffusion/backends/win-cuda12-x64.incoming-1.download'
+    try {
+      await expect(
+        dl.download('sd-cpp-backend', [
+          {
+            url: 'http://engine.test/main.zip',
+            save_path: `${stagingDir}/sd-bin-win-cu12-x64.zip`,
+            size: 8,
+          },
+          {
+            url: 'http://engine.test/cudart.zip',
+            save_path: `${stagingDir}/cudart-sd-bin-win-cu12-x64.zip`,
+            size: 8,
+          },
+        ])
+      ).rejects.toThrow('Failed to download: HTTP status 404, missing archive')
+      expect(siblingAborted).toBe(true)
+    } finally {
+      releaseSibling()
+    }
+
+    await rm(join(dataFolder, stagingDir), { recursive: true, force: true })
+    await expect(
+      dl.download('sd-cpp-gone', [
+        {
+          url: 'http://engine.test/gone.zip',
+          save_path: 'diffusion/backends/gone/cudart-sd-bin-win-cu12-x64.zip',
+          size: 4,
+        },
+      ])
+    ).rejects.toThrow(/^Error: \[disk_device_lost\] ENOENT:/)
   })
 })
 

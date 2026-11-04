@@ -19,6 +19,15 @@ describe(`contract: errors (${index.source.file} @ ${index.source.commit.slice(0
   it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
     // The emitter runs on Unix, so signals are Unix numbers and the platform is unix-like.
     const err = classifyProcessOutput(c.input.exit, c.input.stderr, c.input.stdout, 'linux')
-    expect(err.toJSON()).toEqual(c.expected)
+    // Intentional correction: an intact Ollama conversion can also have a different tensor layout.
+    // Keep the original desktop fixture unchanged; see the tensor-layout error ADR.
+    const expected = c.input.stderr.includes('wrong number of tensors')
+      ? {
+          ...c.expected,
+          code: 'MODEL_ARCH_NOT_SUPPORTED',
+          message: "The model's architecture or format is not supported by this version of the backend.",
+        }
+      : c.expected
+    expect(err.toJSON()).toEqual(expected)
   })
 })
