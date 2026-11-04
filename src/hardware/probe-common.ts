@@ -4,7 +4,7 @@
  * runner and dispatcher) so the platform files and the dispatcher do not import each other.
  */
 
-import type { SystemInfo } from '../contracts/index.js'
+import type { HardwareGpuSource, SystemInfo } from '../contracts/index.js'
 import { osTypeOf, rustArch } from './facts.js'
 import type { NvidiaSmiGpu } from './merge.js'
 import {
@@ -60,6 +60,14 @@ export interface HardwareProbeResult {
   info: SystemInfo
   /** What could not be read, one line each. */
   warnings: string[]
+  /** Windows: which enumeration the GPU list came from. */
+  gpuSource?: HardwareGpuSource
+  /**
+   * The probe could not read what it normally reads and the answer is likely missing GPUs (Windows:
+   * PowerShell failed and the registry did not make up for it; any platform: the probe itself threw).
+   * `HardwareService` keeps such an answer only until a later request may probe again.
+   */
+  degraded?: boolean
 }
 
 /** The facts every platform reads the same way, from `node:os`. */

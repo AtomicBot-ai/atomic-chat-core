@@ -289,6 +289,8 @@ export const DISK_ERROR_TAGS = [
   'disk_path_too_long',
   'disk_device_lost',
   'disk_io',
+  /** The volume cannot hold a file this large: FAT/FAT32 stops at 4 GiB − 1 bytes. */
+  'disk_fs_limit',
 ] as const
 export type DiskErrorTag = (typeof DISK_ERROR_TAGS)[number]
 

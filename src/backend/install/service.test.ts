@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,11 +7,16 @@ import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import {
   BackendService,
+  companionSource,
   mergeCompanionIntoBin,
+  mergeCudartIntoBin,
+  moveWithRetry,
   verifyMacBackendBinary,
   PRISM_LAUNCH_CHECK_TIMEOUT_MS,
   verifyPrismBackendBinary,
 } from './service.js'
+import { AtomicCoreError, parseLoadDiag } from '../../contracts/index.js'
+import { windowsLaunchVerdict } from './windows-launch-check.js'
 import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
 import type { UpstreamManifest } from '../types.js'
@@ -379,6 +384,7 @@ describe('install on the TurboQuant provider', () => {
         await writeFile(items[0]?.save_path as string, bytes)
       }),
     }
+    const gated: string[] = []
     const service = new BackendService({
       layout: data.layout,
       provider: 'llamacpp',
@@ -387,14 +393,329 @@ describe('install on the TurboQuant provider', () => {
       platform: 'win32',
       now: () => 1,
       log: (message) => warnings.push(message),
+      verifyWindowsBackend: async (staging, version, backend) => {
+        // The repair ran first, in staging: the gate sees the pack the way a load will.
+        expect(downloader.download).toHaveBeenCalledTimes(2)
+        gated.push(`${staging.endsWith('.incoming-1')}:${version}/${backend}`)
+      },
     })
     const result = await service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })
     expect(result).toMatchObject({ installed: true })
     expect(downloader.download).toHaveBeenCalledTimes(2)
+    expect(gated).toEqual(['true:b1-1.0.0/windows-x64-cuda-12.4'])
     expect(warnings).toEqual([
       expect.stringContaining('cudart repair for b1-1.0.0/windows-x64-cuda-12.4 failed'),
     ])
   })
+
+  it('repairs the CUDA runtime in staging, before the launch gate, and moves it in with the pack', async () => {
+    const zipWith = (name: string) => storedZip(name, Buffer.from('dll'))
+    const downloader = {
+      download: vi.fn(async (_task: string, items: Array<{ url: string; save_path: string }>) => {
+        const item = items[0]!
+        await writeFile(
+          item.save_path,
+          item.url.includes('cudart') ? zipWith('cudart64_12.dll') : zipWith('build/bin/llama-server.exe')
+        )
+      }),
+    }
+    let seen: string[] = []
+    const service = new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp',
+      downloader: downloader as never,
+      readManifest: async () => null,
+      platform: 'win32',
+      now: () => 1,
+      verifyWindowsBackend: async (staging) => {
+        seen = (await readdir(join(staging, 'build', 'bin'))).sort()
+      },
+    })
+    const result = await service.install('b1-1.0.0', 'windows-x64-cuda-12.4', { taskId: 't' })
+    expect(seen).toEqual(['cudart64_12.dll', 'llama-server.exe'])
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
+      'cudart64_12.dll',
+      'llama-server.exe',
+    ])
+  })
+})
+
+describe('the Windows launch gate', () => {
+  const winService = (
+    downloader: { download: (task: string, items: never[]) => Promise<void> },
+    over: Partial<ConstructorParameters<typeof BackendService>[0]> = {}
+  ) =>
+    new BackendService({
+      layout: data.layout,
+      provider: 'llamacpp-upstream',
+      downloader: downloader as never,
+      readManifest: async () => null,
+      platform: 'win32',
+      now: () => 1,
+      ...over,
+    })
+  const zipDownloader = () => ({
+    download: vi.fn(async (_task: string, items: Array<{ save_path: string }>) => {
+      for (const item of items)
+        await writeFile(item.save_path, storedZip('llama-server.exe', Buffer.from('new')))
+    }),
+  })
+  const target = () => join(data.layout.provider('llamacpp-upstream').backendsDir, 'b12019', 'win-cpu-x64')
+
+  it('runs on every upstream Windows pack, with the staged directory, tag and backend id', async () => {
+    const calls: string[][] = []
+    const result = await winService(zipDownloader(), {
+      verifyWindowsBackend: async (staging, version, backend) => {
+        calls.push([staging, version, backend])
+        expect(await readdir(join(staging, 'build', 'bin'))).toEqual(['llama-server.exe'])
+      },
+    }).install('b12019', 'win-cpu-x64', { taskId: 't' })
+    expect(calls).toEqual([[`${target()}.incoming-1`, 'b12019', 'win-cpu-x64']])
+    expect(result).toMatchObject({ installed: true, path: target() })
+  })
+
+  it('refuses a pack Windows cannot start: staging removed, the previous pack kept, the code and diag line kept', async () => {
+    await data.writeBackend('llamacpp-upstream', 'b12019', 'win-cpu-x64')
+    await writeFile(join(target(), 'build', 'bin', 'llama-server.exe'), 'previous')
+    const failures: unknown[] = []
+    const install = winService(zipDownloader(), {
+      onFailure: (error) => failures.push(error),
+      verifyWindowsBackend: async (_staging, version, backend) => {
+        throw windowsLaunchVerdict(
+          { code: 0xc000_0135, signal: null, stdout: '', stderr: '', timedOut: false },
+          { version, backend }
+        )
+      },
+    }).install('b12019', 'win-cpu-x64', { taskId: 't', force: true })
+    const error = await install.catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    expect(error).toMatchObject({ code: 'ENGINE_BINARY_BROKEN' })
+    expect(parseLoadDiag((error as AtomicCoreError).details)).toMatchObject({
+      exit_code: '0xC0000135',
+      stage: 'spawn',
+      backend: 'win-cpu-x64',
+      build: 'b12019',
+    })
+    expect(failures).toEqual([error])
+    expect(await readFile(join(target(), 'build', 'bin', 'llama-server.exe'), 'utf8')).toBe('previous')
+    expect(await readdir(join(target(), '..'))).toEqual(['win-cpu-x64'])
+  })
+
+  it('runs the real gate by default, and not at all for PrismML or off Windows', async () => {
+    // The staged file is not an executable: the real gate refuses it the way Windows would.
+    await expect(
+      winService(zipDownloader()).install('b12019', 'win-cpu-x64', { taskId: 't' })
+    ).rejects.toMatchObject({
+      code: 'ENGINE_BINARY_BROKEN',
+    })
+    await expect(readdir(`${target()}.incoming-1`)).rejects.toThrow()
+    const linux = await winService(
+      {
+        download: vi.fn(async (_t: string, items: Array<{ save_path: string }>) => {
+          await tarCreate({ gzip: true, cwd: await linuxFixture(), file: items[0]!.save_path }, ['build'])
+        }),
+      },
+      { platform: 'linux' }
+    ).install('b12019', 'linux-cpu-x64', { taskId: 't' })
+    expect(linux.installed).toBe(true)
+  })
+
+  async function linuxFixture(): Promise<string> {
+    const dir = join(data.root, 'linux-fixture')
+    await mkdir(join(dir, 'build', 'bin'), { recursive: true })
+    await writeFile(join(dir, 'build', 'bin', 'llama-server'), 'server')
+    return dir
+  }
+
+  it('verifies the CUDA runtime companion against the release list when it lists one', async () => {
+    const items: Array<Record<string, unknown>> = []
+    const downloader = {
+      download: vi.fn(async (_t: string, given: Array<Record<string, unknown>>) => {
+        items.push(...given)
+        throw new Error('stop before extraction')
+      }),
+    }
+    const manifest: UpstreamManifest = {
+      tag_name: 'b12019',
+      download_base: 'https://mirror.example/releases',
+      assets: [
+        { name: 'llama-b12019-bin-win-cuda-13.3-x64.zip', sha256: 'a'.repeat(64), size: 10 },
+        { name: 'cudart-llama-bin-win-cuda-13.3-x64.zip', sha256: 'b'.repeat(64), size: 20 },
+      ],
+    }
+    await winService(downloader as never, { readManifest: async () => manifest })
+      .install('b12019', 'win-cuda-13.3-x64', { taskId: 't' })
+      .catch(() => {})
+    expect(items[1]).toMatchObject({
+      url: 'https://mirror.example/releases/b12019/cudart-llama-bin-win-cuda-13.3-x64.zip',
+      sha256: 'b'.repeat(64),
+      size: 20,
+    })
+  })
+})
+
+describe('companionSource', () => {
+  const cdn = 'https://github.com/ggml-org/llama.cpp/releases/download/b1/cudart.zip'
+  const listed: UpstreamManifest = {
+    tag_name: 'b1',
+    download_base: 'https://mirror.example',
+    assets: [
+      { name: 'cudart.zip', sha256: 'c'.repeat(64), size: 5 },
+      { name: 'unhashed.zip', size: 5 },
+    ],
+  }
+  it.each<[string, string, UpstreamManifest | null, Record<string, unknown>]>([
+    [
+      'the listed asset, from the mirror',
+      'cudart.zip',
+      listed,
+      { url: 'https://mirror.example/b1/cudart.zip', sha256: 'c'.repeat(64), size: 5 },
+    ],
+    ['an asset without a hash, from the CDN', 'unhashed.zip', listed, { url: cdn }],
+    ['an unlisted asset', 'other.zip', listed, { url: cdn }],
+    ['another tag', 'cudart.zip', { ...listed, tag_name: 'b2' }, { url: cdn }],
+    ['a list without a mirror', 'cudart.zip', { tag_name: 'b1', assets: listed.assets }, { url: cdn }],
+    ['no list', 'cudart.zip', null, { url: cdn }],
+  ])('%s', (_label, name, manifest, expected) => {
+    expect(companionSource('\uFEFFb1', name, cdn, manifest)).toEqual(expected)
+  })
+  it('reads a manifest without an asset list', () => {
+    expect(companionSource('b1', 'x', cdn, { tag_name: 'b1', download_base: 'm' } as never)).toEqual({
+      url: cdn,
+    })
+  })
+})
+
+describe('moveWithRetry', () => {
+  const err = (code: string) => Object.assign(new Error(`${code}: held`), { code })
+  it('waits out a held handle on Windows and gives up with the disk tag', async () => {
+    let calls = 0
+    await moveWithRetry(
+      async () => {
+        if (++calls < 3) throw err('EBUSY')
+      },
+      'Could not move',
+      'win32',
+      { delaysMs: [0, 0, 0] }
+    )
+    expect(calls).toBe(3)
+    const locked = await moveWithRetry(
+      async () => {
+        throw err('EPERM')
+      },
+      'Could not move the new b1/win-cpu-x64 backend into place',
+      'win32',
+      { delaysMs: [0] }
+    ).catch((e: unknown) => e as AtomicCoreError)
+    // A plain Error, as the downloader's disk failures are: the engines route still names it ENGINE_INSTALL_FAILED.
+    expect(locked).not.toBeInstanceOf(AtomicCoreError)
+    expect(locked).toMatchObject({
+      message:
+        'Error: [disk_file_locked] Could not move the new b1/win-cpu-x64 backend into place: EPERM: held',
+      diagnostic: {
+        component: 'backend',
+        operation: 'install',
+        stage: 'persist',
+        reason: 'disk_file_locked',
+      },
+    })
+    expect((locked as Error).cause).toMatchObject({ code: 'EPERM' })
+  })
+  it.each([
+    ['EPERM', 'darwin', 'disk_permission'],
+    ['ENOSPC', 'win32', 'disk_full'],
+    ['EFBIG', 'linux', 'disk_fs_limit'],
+  ])('tags %s on %s as %s at once', async (code, platform, tag) => {
+    let calls = 0
+    const error = (await moveWithRetry(
+      async () => {
+        calls++
+        throw err(code)
+      },
+      'x',
+      platform as NodeJS.Platform
+    ).catch((e: unknown) => e)) as AtomicCoreError
+    expect(error.message.startsWith(`Error: [${tag}] x: `)).toBe(true)
+    expect(calls).toBe(1)
+    expect(error.diagnostic?.reason).toBe(tag === 'disk_fs_limit' ? undefined : tag)
+  })
+  it('renders a thrown string', async () => {
+    await expect(moveWithRetry(() => Promise.reject('odd'), 'x', 'darwin')).rejects.toThrow(
+      'Error: [disk_io] x: odd'
+    )
+  })
+})
+
+describe('the move into place', () => {
+  // A read-only parent makes the final rename fail the way a held directory does on Windows.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'fails with a disk tag, leaves no pack behind and logs the staging it could not remove',
+    async () => {
+      const parent = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6325')
+      const logs: string[] = []
+      const downloader = {
+        download: vi.fn(async (_t: string, items: Array<{ save_path: string }>) => {
+          const fixture = join(data.root, 'move-fixture')
+          await mkdir(join(fixture, 'build', 'bin'), { recursive: true })
+          await writeFile(join(fixture, 'build', 'bin', 'llama-server'), 'server')
+          const save = items[0]!.save_path
+          if (save.endsWith('.zip')) await writeFile(save, storedZip('llama-server.exe', Buffer.from('exe')))
+          else await tarCreate({ gzip: true, cwd: fixture, file: save }, ['build'])
+          await chmod(parent, 0o555)
+        }),
+      }
+      const make = (platform: NodeJS.Platform) =>
+        new BackendService({
+          layout: data.layout,
+          provider: 'llamacpp-upstream',
+          downloader: downloader as never,
+          readManifest: async () => MANIFEST,
+          platform,
+          now: () => 1,
+          verifyMacBackend: async () => {},
+          verifyWindowsBackend: async () => {},
+          moveRetry: { delaysMs: [0] },
+          log: (message) => logs.push(message),
+        })
+      try {
+        await expect(make('darwin').install('b6325', 'macos-arm64', { taskId: 't' })).rejects.toMatchObject({
+          message: expect.stringMatching(
+            /^Error: \[disk_permission\] Could not move the new b6325\/macos-arm64 backend into place: /
+          ),
+        })
+        expect(logs).toEqual([expect.stringMatching(/^could not remove .*macos-arm64\.incoming-1: /)])
+        await chmod(parent, 0o755)
+        await expect(make('win32').install('b6325', 'win-cpu-x64', { taskId: 't' })).rejects.toMatchObject({
+          message: expect.stringMatching(/^Error: \[disk_file_locked\] /),
+        })
+      } finally {
+        await chmod(parent, 0o755)
+      }
+      expect((await readdir(parent)).filter((name) => !name.includes('.incoming-'))).toEqual([])
+    }
+  )
+})
+
+describe('mergeCudartIntoBin', () => {
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'tags a move that keeps failing',
+    async () => {
+      const staging = join(data.root, 'cudart-merge')
+      await mkdir(join(staging, 'cudart-llama-b1-bin-ubuntu-cuda-13.4-arm64'), { recursive: true })
+      await writeFile(join(staging, 'cudart-llama-b1-bin-ubuntu-cuda-13.4-arm64', 'libcudart.so.13'), 'x')
+      // A read-only `build/bin`: nothing can be moved into it.
+      const bin = join(staging, 'build', 'bin')
+      await mkdir(bin, { recursive: true })
+      await chmod(bin, 0o555)
+      try {
+        await expect(mergeCudartIntoBin(staging, 'linux')).rejects.toThrow(
+          /^Error: \[disk_permission\] Could not move libcudart\.so\.13 into the backend: /
+        )
+      } finally {
+        await chmod(bin, 0o755)
+      }
+    }
+  )
 })
 
 describe('install on the PrismML provider', () => {

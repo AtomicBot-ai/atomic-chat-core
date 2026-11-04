@@ -1,0 +1,43 @@
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}
+    Class    REG_SZ    Display
+    ClassDesc    REG_SZ    @%SystemRoot%\System32\DispDiag.dll,-1
+    IconPath    REG_MULTI_SZ    %SystemRoot%\System32\setupapi.dll,-3
+    NoDisplayClass    REG_SZ    1
+    (Default)    REG_SZ    Display adapters
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    ProviderName    REG_SZ    Intel Corporation
+    DriverVersion    REG_SZ    32.0.101.6083
+    MatchingDeviceId    REG_SZ    pci\ven_8086&dev_4680
+    DriverDesc    REG_SZ    Intel(R) UHD Graphics 770
+    HardwareInformation.qwMemorySize    REG_QWORD    0x8000000
+    VulkanDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_5b8fe1d2f2b1a0c4\igvk64.json
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    ProviderName    REG_SZ    NVIDIA
+    DriverVersion    REG_SZ    32.0.15.8142
+    MatchingDeviceId    REG_SZ    pci\ven_10de&dev_2684
+    DriverDesc    REG_SZ    NVIDIA GeForce RTX 4090
+    HardwareInformation.qwMemorySize    REG_QWORD    0x600000000
+    HardwareInformation.MemorySize    REG_BINARY    00000000
+    VulkanDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\nv_dispi.inf_amd64_7c0d8e1a2b3c4d5e\nv-vk64.json
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0002
+    ProviderName    REG_SZ    NVIDIA
+    DriverVersion    REG_SZ    31.0.15.3699
+    MatchingDeviceId    REG_SZ    pci\ven_10de&dev_1b80
+    DriverDesc    REG_SZ    NVIDIA GeForce GTX 1080
+    HardwareInformation.qwMemorySize    REG_QWORD    0x200000000
+    VulkanDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\nv_dispi.inf_amd64_0f1e2d3c4b5a6978\nv-vk64.json
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0003
+    ProviderName    REG_SZ    Parsec Cloud, Inc.
+    DriverVersion    REG_SZ    0.45.0.0
+    MatchingDeviceId    REG_SZ    root\parsec\vdd
+    DriverDesc    REG_SZ    Parsec Virtual Display Adapter
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\Configuration
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\Properties
+ERROR: Access is denied.

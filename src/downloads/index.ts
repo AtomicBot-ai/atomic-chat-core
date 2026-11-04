@@ -6,6 +6,7 @@
  * core/filesystem/commands.rs:335-515. See PLAN.md §3.2.
  */
 export * from './disk.js'
+export * from './fs-retry.js'
 export * from './protocol.js'
 export * from './verify.js'
 export * from './downloader.js'

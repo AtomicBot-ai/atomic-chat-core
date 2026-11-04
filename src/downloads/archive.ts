@@ -13,6 +13,8 @@ import { dirname, join, normalize, relative, isAbsolute } from 'node:path'
 import { pipeline } from 'node:stream/promises'
 import { x as tarExtract } from 'tar'
 import yauzl from 'yauzl'
+import { diskFaultMessage, heldFileFaultTag } from './disk.js'
+import { retryTransientFs } from './fs-retry.js'
 
 export const UNSUPPORTED_ARCHIVE_MESSAGE = 'Unsupported file format. Only .tar.gz and .zip are supported.'
 
@@ -82,13 +84,22 @@ const exists = (p: string) =>
     () => false
   )
 
+/** Entries were extracted a moment ago: on Windows a scanner may still hold them (`fs-retry.ts`). */
 async function moveEntry(src: string, dstDir: string): Promise<void> {
   const dst = join(dstDir, src.split(/[\\/]/).pop() as string)
-  await rm(dst, { recursive: true, force: true })
   try {
-    await rename(src, dst)
+    await retryTransientFs(async () => {
+      await rm(dst, { recursive: true, force: true })
+      await rename(src, dst)
+    })
   } catch (e) {
-    throw new Error(`Failed to move backend entry ${src} -> ${dst}: ${(e as Error).message}`)
+    throw new Error(
+      diskFaultMessage(
+        heldFileFaultTag(e, process.platform),
+        `Failed to move backend entry ${src} -> ${dst}: ${(e as Error).message}`
+      ),
+      { cause: e }
+    )
   }
 }
 

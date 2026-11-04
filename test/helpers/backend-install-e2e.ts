@@ -1,5 +1,6 @@
 /** An isolated HTTPS mirror behind a CONNECT proxy for compiled-binary backend-install tests. */
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -50,7 +51,7 @@ export async function startBackendInstallFixture(
   const exe = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'
   const archive =
     process.platform === 'win32'
-      ? storedZip(`build/bin/${exe}`, Buffer.from('fixture backend'))
+      ? storedZip(`build/bin/${exe}`, await windowsFixtureExe())
       : await createTar(folder, exe)
   const companionName = 'cudart-llama-bin-win-cuda-13.3-x64.zip'
   const companion = storedZip('build/bin/cudart.dll', Buffer.from('fixture CUDA runtime'))
@@ -167,6 +168,16 @@ export async function startBackendInstallFixture(
       )
     },
   }
+}
+
+/**
+ * A real Windows executable that answers `--version` with exit code 0, for the install's Windows
+ * launch gate: System32's `curl.exe` (in every Windows 10 1803+ and Server 2019+, importing system
+ * DLLs only, so it runs from any folder), else the Node running the tests.
+ */
+async function windowsFixtureExe(): Promise<Buffer> {
+  const curl = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'curl.exe')
+  return readFile(existsSync(curl) ? curl : process.execPath)
 }
 
 async function createTar(folder: string, exe: string): Promise<Buffer> {

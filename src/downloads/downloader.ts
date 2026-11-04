@@ -22,7 +22,13 @@ import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, realpath, rename, rm, rmdir, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { CoreEvents, DownloadProgress, DownloadStage } from '../contracts/index.js'
-import { checkFreeSpace, checkPathWithinLimit, diskErrToString, remainingBytes } from './disk.js'
+import {
+  checkFreeSpace,
+  checkPathWithinLimit,
+  diskErrToString,
+  diskWriteErrToString,
+  remainingBytes,
+} from './disk.js'
 import type { ProxyConfig } from './protocol.js'
 import {
   classifyDownloadStatus,
@@ -536,9 +542,13 @@ export class Downloader {
     }
 
     let writer = createWriteStream(tmpPath, { flags: shouldResume ? 'a' : 'w' })
+    // Writes are awaited one at a time, so `totalTransferred` is where this chunk starts in the file.
     const write = (chunk: Uint8Array) =>
       new Promise<void>((ok, fail) => {
-        writer.write(chunk, (e) => (e ? fail(disk(e)) : ok()))
+        const offset = totalTransferred
+        writer.write(chunk, (e) =>
+          e ? fail(new Error(diskWriteErrToString(e, offset, chunk.byteLength), { cause: e })) : ok()
+        )
       })
     const close = () =>
       new Promise<void>((ok, fail) => writer.end((e?: Error | null) => (e ? fail(disk(e)) : ok())))

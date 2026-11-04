@@ -70,6 +70,6 @@ export async function probeSystemInfo(deps: ProbeDeps): Promise<HardwareProbeRes
     if (deps.platform === 'darwin') return await probeDarwin(deps)
     return { ...fallbackProbe(deps), warnings: [`no hardware probe for platform ${String(deps.platform)}`] }
   } catch (error) {
-    return { ...fallbackProbe(deps), warnings: [warningOf('hardware probe failed', error)] }
+    return { ...fallbackProbe(deps), warnings: [warningOf('hardware probe failed', error)], degraded: true }
   }
 }

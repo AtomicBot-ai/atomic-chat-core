@@ -1,0 +1,55 @@
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}
+    Class    REG_SZ    Display
+    ClassDesc    REG_SZ    @%SystemRoot%\System32\DispDiag.dll,-1
+    IconPath    REG_MULTI_SZ    %SystemRoot%\System32\setupapi.dll,-3
+    NoDisplayClass    REG_SZ    1
+    (Default)    REG_SZ    Display adapters
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000
+    InfPath    REG_SZ    oem45.inf
+    InfSection    REG_SZ    ati2mtag_Navi31
+    ProviderName    REG_SZ    Advanced Micro Devices, Inc.
+    DriverDateData    REG_BINARY    00C0B5A1D2D2DA01
+    DriverDate    REG_SZ    10-17-2024
+    DriverVersion    REG_SZ    32.0.12033.1030
+    MatchingDeviceId    REG_SZ    pci\ven_1002&dev_744c&rev_c8
+    DriverDesc    REG_SZ    AMD Radeon RX 7900 XTX
+    HardwareInformation.AdapterString    REG_BINARY    41004D004400200052006100640065006F006E0000000000
+    HardwareInformation.ChipType    REG_BINARY    410054004900200069006E007400650072006E0061006C0000000000
+    HardwareInformation.MemorySize    REG_BINARY    0000F0FF
+    HardwareInformation.qwMemorySize    REG_QWORD    0x5ff000000
+    VulkanDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amd-vulkan64.json
+    VulkanDriverNameWoW    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amd-vulkan32.json
+    UserModeDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amdxx64.dll\0C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amdxx64.dll\0C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amdxx64.dll\0C:\Windows\System32\DriverStore\FileRepository\u0405208.inf_amd64_3a1b2c3d4e5f6a7b\B405148\amdxx64.dll
+    KMD_EnableGDIAcceleration    REG_DWORD    0x1
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\UMD
+    3to2Pulldown_NA    REG_SZ    1
+    Main3D_DEF    REG_SZ    3
+    DriverDesc    REG_SZ    not the adapter
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\Settings
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001
+    InfPath    REG_SZ    oem52.inf
+    ProviderName    REG_SZ    Intel Corporation
+    DriverVersion    REG_SZ    32.0.101.6083
+    MatchingDeviceId    REG_SZ    pci\ven_8086&dev_4680
+    DriverDesc    REG_SZ    Intel(R) UHD Graphics 770
+    HardwareInformation.MemorySize    REG_DWORD    0x8000000
+    VulkanDriverName    REG_MULTI_SZ    C:\Windows\System32\DriverStore\FileRepository\iigd_dch.inf_amd64_5b8fe1d2f2b1a0c4\igvk64.json
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0001\Settings
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0002
+    InfPath    REG_SZ    display.inf
+    ProviderName    REG_SZ    Microsoft
+    DriverVersion    REG_SZ    10.0.26100.1
+    MatchingDeviceId    REG_SZ    pci\cc_0300
+    DriverDesc    REG_SZ    Microsoft Basic Display Adapter
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\Configuration
+
+HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\Properties
+ERROR: Access is denied.
