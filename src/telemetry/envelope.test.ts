@@ -340,3 +340,14 @@ describe("a host's own report tags", () => {
     expect(event.tags['operation']!.length).toBeLessThan(500)
   })
 })
+
+it('keeps two stackless failures of different types apart', () => {
+  const stackless = (error: Error): ErrorReport => {
+    error.stack = `${error.name}: x`
+    return { source: 'event_listener', level: 'error', error }
+  }
+  const type = buildEvent(stackless(new TypeError('a')), ctx).fingerprint
+  const range = buildEvent(stackless(new RangeError('b')), ctx).fingerprint
+  expect(type.at(-1)).toBe('no-stack:TypeError')
+  expect(range.at(-1)).toBe('no-stack:RangeError')
+})

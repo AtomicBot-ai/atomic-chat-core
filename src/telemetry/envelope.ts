@@ -180,7 +180,12 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
       },
     },
     tags,
-    fingerprint: diagnosticFingerprint(report.error, part, String(report.tags?.['provider'] ?? '')),
+    fingerprint: diagnosticFingerprint(
+      report.error,
+      part,
+      String(report.tags?.['provider'] ?? ''),
+      thrown.type
+    ),
     exception: {
       values: [
         ...errorChain(report.error)
