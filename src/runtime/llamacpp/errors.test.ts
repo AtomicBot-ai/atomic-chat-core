@@ -100,15 +100,15 @@ describe('classifyExit / classifyProcessOutput', () => {
     expect(classifyProcessOutput(exit, 'out of memory', 'invalid magic', 'linux').code).toBe('OUT_OF_MEMORY')
   })
   // `tensor_layout_mismatch_is_backend_incompatibility_not_corruption` (TurboQuant `error.rs`,
-  // app commit ec1fd3ea7); the upstream plugin keeps it as corruption.
-  it('reads a tensor-count mismatch as an unsupported architecture only for TurboQuant', () => {
+  // app commit ec1fd3ea7); core applies the correction to every provider.
+  it('reads a tensor-count mismatch as an unsupported architecture on every provider', () => {
     const stdout = 'llama_model_load: done_getting_tensors: wrong number of tensors; expected 417, got 408\n'
     const exit = { code: 1, signal: null }
     expect(classifyProcessOutput(exit, '', stdout, 'linux', 'llamacpp').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     expect(classifyProcessOutput(exit, '', stdout, 'linux', 'llamacpp-upstream').code).toBe(
-      'MODEL_FILE_CORRUPT'
+      'MODEL_ARCH_NOT_SUPPORTED'
     )
-    expect(classifyProcessOutput(exit, '', stdout, 'linux').code).toBe('MODEL_FILE_CORRUPT')
+    expect(classifyProcessOutput(exit, '', stdout, 'linux').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     expect(classifyStderr(stdout, 'llamacpp').code).toBe('MODEL_ARCH_NOT_SUPPORTED')
     // The other corruption markers stay corruption on both.
     expect(classifyStderr('invalid magic', 'llamacpp').code).toBe('MODEL_FILE_CORRUPT')

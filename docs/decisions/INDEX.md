@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-11-02** — [Classify tensor-layout mismatches without claiming corruption](2026-11-02-tensor-layout-error.md) — "wrong number of tensors" is `MODEL_ARCH_NOT_SUPPORTED` on upstream llama.cpp too; truncation, invalid magic and EOF stay corrupt.
+
 - [2026-11-03 — Serve coding agents with their window, bounded output and two shared-KV slots](2026-11-03-serve-coding-agents-with-their-window-and-bounded-output.md)
 - [2026-11-02 — Wait for audio lifecycle cleanup and reject superseded jobs](2026-11-02-wait-for-audio-lifecycle-cleanup.md)
 

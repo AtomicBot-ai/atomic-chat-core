@@ -2,8 +2,8 @@
  * Classification of a failed `llama-server` process into the app's error contract. Port of
  * `src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/error.rs` (`LlamacppError::from_stderr`,
  * `from_exit_status`, `from_process_output`). Pinned by `test/contract/errors.test.ts`. The
- * TurboQuant fork's `error.rs` differs in one rule, `wrong number of tensors` (app commit
- * `ec1fd3ea7`), so the provider is a parameter.
+ * recorded desktop fixture predates the tensor-layout correction: a tensor-count mismatch alone
+ * is backend incompatibility on every provider (2026-11-02-tensor-layout-error).
  *
  * The cascade is ordered: the first matching group wins. Messages are the app's user-facing strings
  * and are part of the contract. `details` is always set (the raw stream), even when empty.
@@ -67,11 +67,10 @@ const includesAny = (lower: string, needles: string[]) => needles.some((n) => lo
 /**
  * TurboQuant (`llamacpp`) can know an architecture and still expect a tensor layout that differs
  * from a valid upstream GGUF: re-downloading cannot fix that, and the same file loads in stock
- * llama.cpp, so there the mismatch is an unsupported architecture. Upstream it still means a
- * damaged file.
+ * llama.cpp, so there the mismatch is an unsupported architecture. Ollama conversions can differ
+ * from upstream too, so on any build a tensor count alone does not prove a damaged file.
  */
 const TENSOR_COUNT_MISMATCH = 'wrong number of tensors'
-const tensorLayoutIsArchitecture = (provider: LocalProviderId) => provider === 'llamacpp'
 
 export const ARGUMENT_REJECTED_MESSAGE =
   'This llama.cpp backend does not accept one of the arguments it was started with. If you added custom arguments to this model, remove them; otherwise switch to another backend version or update Atomic Chat.'
@@ -99,14 +98,14 @@ const CASCADE: Rule[] = [
   {
     code: 'MODEL_ARCH_NOT_SUPPORTED',
     message: "The model's architecture or format is not supported by this version of the backend.",
-    match: (l, provider) =>
+    match: (l) =>
       includesAny(l, [
         'error loading model architecture',
         'unknown model architecture',
         'error loading model hyperparameters',
         'key not found in model',
-      ]) ||
-      (tensorLayoutIsArchitecture(provider) && l.includes(TENSOR_COUNT_MISMATCH)),
+        TENSOR_COUNT_MISMATCH,
+      ]),
   },
   {
     code: 'MULTIMODAL_PROJECTOR_LOAD_FAILED',
@@ -118,14 +117,13 @@ const CASCADE: Rule[] = [
     code: 'MODEL_FILE_CORRUPT',
     message:
       'The model file appears to be incomplete or corrupted. Try deleting and re-downloading the model.',
-    match: (l, provider) =>
+    match: (l) =>
       includesAny(l, [
         'corrupted or incomplete',
         'invalid magic',
         'unexpectedly reached end of file',
         'failed to read tensor',
-      ]) ||
-      (!tensorLayoutIsArchitecture(provider) && l.includes(TENSOR_COUNT_MISMATCH)),
+      ]),
   },
   {
     // `common_params_parse` (upstream, TurboQuant and Prism alike): a flag the build does not know,
