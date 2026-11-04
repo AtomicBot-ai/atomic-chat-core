@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
+import { mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -230,6 +231,77 @@ describe('Downloader', () => {
     ])
     await expect(first).rejects.toThrow(DOWNLOAD_CANCELLED)
     await expect(second).resolves.toBeUndefined()
+  })
+
+  it('closes the write stream before rejecting on abort so removing the staging folder never emits an unhandled ENOENT', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-abort-open-'))
+    const uncaught: Error[] = []
+    const onUncaught = (err: Error) => uncaught.push(err)
+    process.on('uncaughtException', onUncaught)
+    let busy: Array<Promise<unknown>> = []
+    try {
+      const dl: Downloader = new Downloader({
+        dataFolder,
+        platform: 'darwin',
+        fetch: (async () => {
+          busy = Array.from({ length: 16 }, () => realpath(dataFolder))
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              pull() {
+                dl.cancel('abort-open')
+                return Promise.reject(new DOMException('The operation was aborted', 'AbortError'))
+              },
+            }),
+            { status: 200, headers: { 'content-length': '1024' } }
+          )
+        }) as unknown as typeof fetch,
+        availableSpace: async () => undefined,
+        sleep: async () => {},
+        emit: () => {},
+      })
+      const relDir = 'diffusion/backends/master-1028-37bc88b-a5f9a63b/macos-arm64.incoming-1.download'
+      const stagingDir = join(dataFolder, relDir)
+      await expect(
+        dl.download('abort-open', [
+          {
+            url: 'http://engine.test/sd.zip',
+            save_path: `${relDir}/sd-master-37bc88b-bin-Darwin-macOS-26.6.2-arm64.zip`,
+            size: 1024,
+          },
+        ])
+      ).rejects.toThrow(DOWNLOAD_CANCELLED)
+      rmSync(stagingDir, { recursive: true, force: true })
+      await Promise.allSettled(busy)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(uncaught).toEqual([])
+
+      const missingDir = join(dataFolder, 'removed-while-opening')
+      const dl2 = new Downloader({
+        dataFolder,
+        platform: 'darwin',
+        fetch: (async () => {
+          busy = Array.from({ length: 16 }, () => realpath(dataFolder))
+          queueMicrotask(() => rmSync(missingDir, { recursive: true, force: true }))
+          return new Response(new ReadableStream<Uint8Array>({ start: (c) => c.close() }), {
+            status: 200,
+          })
+        }) as unknown as typeof fetch,
+        availableSpace: async () => undefined,
+        sleep: async () => {},
+        emit: () => {},
+      })
+      await expect(
+        dl2.download('open-error', [
+          { url: 'http://engine.test/sd.zip', save_path: 'removed-while-opening/sd.zip' },
+        ])
+      ).rejects.toThrow(/^Error: \[disk_/)
+      await Promise.allSettled(busy)
+      await new Promise((r) => setTimeout(r, 50))
+      expect(uncaught).toEqual([])
+    } finally {
+      await Promise.allSettled(busy)
+      process.removeListener('uncaughtException', onUncaught)
+    }
   })
 
   it('treats an unknown size as open-ended and fails an incomplete known size', async () => {
