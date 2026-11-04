@@ -284,12 +284,13 @@ export class BackendAdvisor {
     const merged = this.policy.merge(remote, installed)
     // A pack this machine already failed to run with its current GPU driver (CUDA 13 on Turing
     // before R616, a build Windows cannot load) is left out, so detection and the recommendation
-    // move on to the next build instead of offering it again. A driver update clears the record.
+    // move on to the next build instead of offering it again. Binary failures apply only to that release;
+    // GPU incompatibility lasts until the driver changes.
     const badEntries = await readBadBackends(this.deps.layout)
     const driver = gpuDriverKey(gpus)
     const available = this.policy
       .filterBySupport(merged, supported, osType)
-      .filter((b) => !isBackendMarkedBad(badEntries, this.provider, b.backend, driver))
+      .filter((b) => !isBackendMarkedBad(badEntries, this.provider, b.backend, driver, b.version))
 
     const installedKeys = new Set(installed.map((b) => `${b.version}|${b.backend}`))
     const installedAvailable = available.filter((b) => installedKeys.has(`${b.version}|${b.backend}`))

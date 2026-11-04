@@ -535,6 +535,8 @@ describe('resolveFitCtx / fitCtxText', () => {
     ['zero is no window', '8192', 0, '8192'],
     ['nor is text that is not a whole number', '8192', '16k', '8192'],
     ['nor a negative number', '8192', -1, '8192'],
+    ['overflowing model tokens keep the provider', '8192', '9'.repeat(400), '8192'],
+    ['unsafe model tokens keep the provider', '8192', '9007199254740993', '8192'],
     ['a provider number is sent as text', 4096, undefined, '4096'],
     ['nothing anywhere is empty', undefined, undefined, ''],
   ])('%s', (_name, provider, model, expected) => {

@@ -14,8 +14,9 @@
  *    `redistrib_<X.Y.Z>.json` manifest of the same major and the nearest minor, verified by sha256.
  * 6. The pinned ggml-org companions below, verified by GitHub's digests.
  *
- * A source is used only when it supplies every DLL still missing, so cuBLAS and cuBLASLt always come
- * from one release. Nothing is changed when all sources fail; the caller decides what that means.
+ * An incomplete runtime is replaced as a whole from one source: existing cuBLAS and cuBLASLt may
+ * belong to different releases, so filling only the missing filenames is not enough. A failed copy is never reported as a successful repair; the caller decides how to
+ * handle a pack that remains unusable.
  */
 
 import { copyFile, mkdir, readdir, rm } from 'node:fs/promises'
@@ -23,9 +24,9 @@ import { join } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { DownloadItem, Downloader, ProxyConfig } from '../../downloads/index.js'
-import { extractArchive } from '../../downloads/index.js'
+import { DOWNLOAD_CANCELLED, extractArchive } from '../../downloads/index.js'
 import { getCudaToolkitVersion, windowsCudaBackendArch } from '../catalog/index.js'
-import { missingWindowsCudaRuntimeDlls } from '../installed/index.js'
+import { missingWindowsCudaRuntimeDlls, windowsCudaRuntimeDlls } from '../installed/index.js'
 import { turboquantCudaToolkit } from '../turboquant.js'
 import { parseRustU32 } from '../version.js'
 
@@ -295,9 +296,10 @@ export async function deliverWindowsCudaRuntime(
 
   let need = await missing()
   if (need.length === 0) return 'present'
+  const runtimeDlls = windowsCudaRuntimeDlls(toolkitText) ?? need
 
   for (const dir of await localDonors(target, wanted, arch, deps, list)) {
-    if (await copyAllFrom(dir, binDir, need, list)) {
+    if (await copyAllFrom(dir, binDir, runtimeDlls, list)) {
       log('installed-pack', dir)
       return 'installed-pack'
     }
@@ -305,7 +307,7 @@ export async function deliverWindowsCudaRuntime(
   tried.push('installed packs')
 
   for (const dir of await hostToolkitDirs(wanted, deps.env ?? process.env, list)) {
-    if (await copyAllFrom(dir, binDir, need, list)) {
+    if (await copyAllFrom(dir, binDir, runtimeDlls, list)) {
       log('host-toolkit', dir)
       return 'host-toolkit'
     }
@@ -318,16 +320,16 @@ export async function deliverWindowsCudaRuntime(
     items: Array<Omit<DownloadItem, 'save_path'> & { name: string }>
   ): Promise<boolean> => {
     try {
-      if (await fromArchives(items, binDir, need, deps)) {
+      if (await fromArchives(items, binDir, runtimeDlls, deps)) {
         log(source, label)
         return true
       }
-      tried.push(`${label}: did not contain ${need.join(', ')}`)
+      tried.push(`${label}: did not contain ${runtimeDlls.join(', ')}`)
     } catch (error) {
+      if (error instanceof Error && error.message === DOWNLOAD_CANCELLED) throw error
       tried.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
     }
-    need = await missing()
-    return need.length === 0
+    return false
   }
 
   const companion = deps.releaseCompanion
@@ -363,7 +365,7 @@ export async function deliverWindowsCudaRuntime(
   }
 
   need = await missing()
-  if (need.length === 0) return 'present'
+  if (need.length === 0) need = runtimeDlls
   throw new AtomicCoreError(
     'ENGINE_BINARY_BROKEN',
     `The ${target.version}/${target.backend} backend is missing its CUDA runtime (${need.join(', ')}) and it could not be downloaded. Check the connection and install the backend again, or install the NVIDIA CUDA Toolkit ${toolkitText}.`,

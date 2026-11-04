@@ -110,7 +110,7 @@ A case the port deliberately does not reproduce is listed under `comparator_note
 has not landed yet is validated for shape only, and `docs/testing-critical-flows.md` lists it as not replayed.
 
 New data paths: `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
-bad-backends.json (llama.cpp packs this machine could not run, keyed by provider, backend and GPU driver),
+bad-backends.json (llama.cpp packs this machine could not run, keyed by provider, backend and GPU driver; binary failures also match the release tag),
 instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml,
 media-catalog.cache.json), `<data>/diffusion/remote-jobs.json` (remote clips still running at a provider),
 `<data>/llamacpp-upstream/releases.cache.json` (the last upstream release list read)

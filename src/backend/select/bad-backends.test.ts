@@ -29,6 +29,8 @@ const entry = (over: Partial<BadBackendEntry> = {}): BadBackendEntry => ({
   ...over,
 })
 const b = (version: string, backend: string): BackendVersion => ({ version, backend })
+/** Two hours after `entry()`'s time: within the transient-record lifetime, whatever day the tests run. */
+const NOW = Date.parse('2026-11-04T12:00:00.000Z')
 
 describe('gpuDriverKey', () => {
   it('keys by the NVIDIA driver when there is one, else by every GPU driver, else nothing', () => {
@@ -62,12 +64,47 @@ describe('the bad-backends document', () => {
 
   it('matches provider, backend and driver; a new driver or another provider is not bad', () => {
     const entries = [entry()]
-    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-13.3-x64', '596.36')).toBe(true)
-    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', '﻿win-cuda-13.3-x64', '596.36')).toBe(true)
-    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-13.3-x64', '616.07')).toBe(false)
-    expect(isBackendMarkedBad(entries, 'atomic-prism', 'win-cuda-13.3-x64', '596.36')).toBe(false)
-    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-12.4-x64', '596.36')).toBe(false)
+    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-13.3-x64', '596.36', 'b12019')).toBe(
+      true
+    )
+    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', '﻿win-cuda-13.3-x64', '596.36', 'b12019')).toBe(
+      true
+    )
+    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-13.3-x64', '616.07', 'b12019')).toBe(
+      false
+    )
+    expect(isBackendMarkedBad(entries, 'atomic-prism', 'win-cuda-13.3-x64', '596.36', 'b12019')).toBe(false)
+    expect(isBackendMarkedBad(entries, 'llamacpp-upstream', 'win-cuda-12.4-x64', '596.36', 'b12019')).toBe(
+      false
+    )
   })
+
+  it.each(['ENGINE_BINARY_BROKEN', 'EMPTY_STDERR_CRASH', 'CPU_INSTRUCTION_UNSUPPORTED'])(
+    'keeps %s failures per release without forgetting earlier failures',
+    (reason) => {
+      const first = entry({ reason })
+      const second = entry({ reason, version: 'b12020' })
+      const entries = withBadBackend([first], second)
+      expect(entries).toEqual([first, second])
+      for (const version of ['b12019', 'b12020'])
+        expect(isBackendMarkedBad(entries, first.provider, first.backend, first.driver, version, NOW)).toBe(
+          true
+        )
+      expect(isBackendMarkedBad(entries, first.provider, first.backend, first.driver, 'b12021', NOW)).toBe(
+        false
+      )
+      expect(
+        isBackendMarkedBad(entries, first.provider, first.backend, 'new-driver', first.version, NOW)
+      ).toBe(false)
+      expect(withBadBackend(entries, second)).toEqual(entries)
+      const incompatible = entry()
+      expect(withBadBackend(entries, incompatible)).toEqual([incompatible])
+      expect(
+        isBackendMarkedBad([incompatible], first.provider, first.backend, first.driver, 'b12021', NOW)
+      ).toBe(true)
+      expect(withBadBackend([incompatible], second)).toEqual([incompatible, second])
+    }
+  )
 
   it('replaces the record of the same pack, an older driver included, and keeps the others', () => {
     const other = entry({ backend: 'win-vulkan-x64' })
@@ -83,17 +120,36 @@ describe('how long a record counts', () => {
   it('keeps a card-cannot-run record until the driver changes, however old', () => {
     const ptx = entry({ reason: 'GPU_BACKEND_INCOMPATIBLE' })
     expect(isBadBackendEntryLive(ptx, at + 365 * day)).toBe(true)
-    expect(isBackendMarkedBad([ptx], ptx.provider, ptx.backend, ptx.driver, at + 365 * day)).toBe(true)
+    expect(isBackendMarkedBad([ptx], ptx.provider, ptx.backend, ptx.driver, 'b13000', at + 365 * day)).toBe(
+      true
+    )
   })
 
   it('lets a record whose cause can go away lapse after a week', () => {
     for (const reason of ['ENGINE_BINARY_BROKEN', 'EMPTY_STDERR_CRASH', 'CPU_INSTRUCTION_UNSUPPORTED']) {
       const record = entry({ reason })
       expect(isBadBackendEntryLive(record, at + 6 * day)).toBe(true)
+      expect(
+        isBackendMarkedBad(
+          [record],
+          record.provider,
+          record.backend,
+          record.driver,
+          record.version,
+          at + 6 * day
+        )
+      ).toBe(true)
       expect(isBadBackendEntryLive(record, at + TRANSIENT_BAD_BACKEND_TTL_MS)).toBe(false)
-      expect(isBackendMarkedBad([record], record.provider, record.backend, record.driver, at + 8 * day)).toBe(
-        false
-      )
+      expect(
+        isBackendMarkedBad(
+          [record],
+          record.provider,
+          record.backend,
+          record.driver,
+          record.version,
+          at + 8 * day
+        )
+      ).toBe(false)
     }
   })
 
@@ -120,6 +176,16 @@ describe('the fallback order', () => {
     ['my-build', undefined],
   ])('%s ranks %s', (backend, rank) => {
     expect(backendFallbackRank(backend)).toBe(rank)
+  })
+
+  it('checks fallback candidates with their release tag', () => {
+    const bad = entry({ backend: 'win-cuda-12.4-x64', reason: 'ENGINE_BINARY_BROKEN' })
+    const candidates = [b('b12019', bad.backend), b('b12020', bad.backend), b('b12019', 'win-cpu-x64')]
+    expect(
+      nextFallbackBackend(b('b12019', 'win-cuda-13.3-x64'), candidates, (backend, version) =>
+        isBackendMarkedBad([bad], bad.provider, backend, bad.driver, version, NOW)
+      )
+    ).toEqual(b('b12020', bad.backend))
   })
 
   it('walks CUDA 13 → CUDA 12.4 → Vulkan → CPU, same tag first, never the failed or a skipped pack', () => {

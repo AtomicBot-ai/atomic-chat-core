@@ -174,3 +174,5 @@ add a new one that says which record it supersedes.
 - [Gate superseded-load test readiness on cancellation](2026-11-04-gate-superseded-load-test-readiness.md)
 - [Await download write streams and settle multi-file transfers](2026-11-04-await-download-write-streams-and-settle-multi-file-transfers.md)
 - [Compare lock causes with native filesystem errors](2026-11-04-compare-lock-causes-with-native-filesystem-errors.md)
+- [Keep CUDA runtime repair cancellable and coherent](2026-11-04-keep-cuda-runtime-repair-cancellable-and-coherent.md)
+- [Scope binary failures to the engine release](2026-11-04-scope-binary-failures-to-the-engine-release.md)

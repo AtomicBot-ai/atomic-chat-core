@@ -16,6 +16,7 @@ import {
   verifyPrismBackendBinary,
 } from './service.js'
 import { AtomicCoreError, parseLoadDiag } from '../../contracts/index.js'
+import { DOWNLOAD_CANCELLED } from '../../downloads/index.js'
 import { windowsLaunchVerdict } from './windows-launch-check.js'
 import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
@@ -632,6 +633,23 @@ describe('BackendService.repairCudaRuntime', () => {
     )
     expect(download).not.toHaveBeenCalled()
   })
+
+  it.each([
+    ['llamacpp-upstream', 'b12019', 'win-cuda-13.4-x64'],
+    ['llamacpp', 'b1-1.0.0', 'windows-x64-cuda-12.4'],
+  ] as const)(
+    'does not restart a cancelled %s repair through another source',
+    async (provider, version, backend) => {
+      const cancelled = new Error(DOWNLOAD_CANCELLED)
+      const download = vi.fn(async () => {
+        throw cancelled
+      })
+      await expect(service(provider, { download }).repairCudaRuntime(version, backend)).rejects.toBe(
+        cancelled
+      )
+      expect(download).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('completes an upstream pack from its listed companion when the CDN one lacks cuBLAS', async () => {
     const mirror = 'https://mirror.example/releases/b12019/cudart-llama-bin-win-cuda-13.4-x64.zip'

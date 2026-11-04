@@ -83,7 +83,8 @@ export async function ensureBackend(
   repair?: (backend: string, version: string) => Promise<void>
 ): Promise<{ version: string; backend: string; exePath: string }> {
   const exact = await resolveBackendExe(layout, provider, version, backend)
-  const skipExact = exact !== undefined && (await badBackendFilter(layout, provider, hardware))(backend)
+  const skipExact =
+    exact !== undefined && (await badBackendFilter(layout, provider, hardware))(backend, version)
   if (exact && !skipExact) {
     await repair?.(backend, version)
     return { version, backend, exePath: exact }
@@ -117,7 +118,7 @@ export async function selectInstalledBackend(
   const { compatible, gpus } = await compatibleBackends(installed, provider, hardware, hostArch, probeRocm)
   // A pack that failed on this machine is passed over while another compatible one is installed.
   const isBad = await badBackendFilter(layout, provider, hardware)
-  const usable = compatible.filter((pack) => !isBad(pack.backend))
+  const usable = compatible.filter((pack) => !isBad(pack.backend, pack.version))
   const pool = usable.length > 0 ? usable : compatible
   if (pool.length === 0) return undefined
   const selected =
@@ -205,11 +206,11 @@ async function badBackendFilter(
   layout: DataLayout,
   provider: LocalProviderId,
   hardware: HardwareFactsSource
-): Promise<(backend: string) => boolean> {
+): Promise<(backend: string, version: string) => boolean> {
   const entries = (await readBadBackends(layout)).filter((e) => e.provider === provider)
   if (entries.length === 0) return () => false
   const driver = gpuDriverKey((await hardware.facts()).gpus)
-  return (backend) => isBackendMarkedBad(entries, provider, backend, driver)
+  return (backend, version) => isBackendMarkedBad(entries, provider, backend, driver, version)
 }
 
 /**

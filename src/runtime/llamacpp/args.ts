@@ -511,7 +511,8 @@ export function resolveFitCtx(providerValue: unknown, modelValue: unknown): stri
 /** `fit_ctx` in tokens: a positive whole number, or 0 when it names no window. */
 export function fitCtxTokens(value: unknown): number {
   const text = fitCtxText(value)
-  return /^\d+$/.test(text) ? Number(text) : 0
+  const tokens = /^\d+$/.test(text) ? Number(text) : 0
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 0
 }
 
 /** `fit_ctx` as llama-server takes it: a number in its decimal text, a string trimmed, anything else `''`. */
