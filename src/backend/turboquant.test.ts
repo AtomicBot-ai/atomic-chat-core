@@ -195,6 +195,9 @@ describe('features', () => {
       rocm: false,
     })
     expect(getTurboquantSupportedFeatures('windows', [], [nvidia('590.1', '7.0')]).cuda13).toBe(false)
+    // Turing needs R616 on Windows for the 13.x PTX (features.ts `gpuMeetsCuda13DriverForArch`).
+    expect(getTurboquantSupportedFeatures('windows', [], [nvidia('610.47', '7.5')]).cuda13).toBe(false)
+    expect(getTurboquantSupportedFeatures('windows', [], [nvidia('616.07', '7.5')]).cuda13).toBe(true)
     expect(
       getTurboquantSupportedFeatures('linux', [], [nvidia('580.0', '7.5'), nvidia('580.0', '')]).cuda13
     ).toBe(true)

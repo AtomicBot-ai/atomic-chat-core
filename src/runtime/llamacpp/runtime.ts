@@ -8,7 +8,10 @@
  *    `session:died`, so nothing dials a dead port;
  *  - every spawned process is journalled *before* it can be forgotten, so a crashed owner leaves a
  *    trail the next owner can clean up (PLAN.md §3.4);
- *  - the two post-failure retries of `performLoad` (drop mmproj, drop MTP) happen here, once each;
+ *  - the two post-failure retries of `performLoad` (drop mmproj, drop MTP) happen here, once each,
+ *    and so does the one retry on another installed build when this one cannot run on the machine;
+ *  - every failed spawn says, on the last line of its details, how and where the process stopped
+ *    (`atomic-core-diag`, `src/contracts/load-diag.ts`);
  *  - stderr is fed to the device accumulator while loading, which is the only place llama.cpp says
  *    which device it actually used;
  *  - a load the user cancels stops wherever it is — queued, planning, spawning or just ready — kills
@@ -70,6 +73,14 @@ import type { LlamacppConfigInput } from './args.js'
 import { parseDeviceOutput } from './devices.js'
 import { classifyProcessOutput } from './errors.js'
 import type { ExitInfo } from './errors.js'
+import {
+  attemptLoadDiag,
+  backendFallbackTrigger,
+  isWeightsLoadedLine,
+  withFallbackDiag,
+  withLoadFailureDiag,
+} from './load-failure.js'
+import type { BackendFallbackTrigger } from './load-failure.js'
 import { autoUnloadTargets, llamaGpuFootprint, nextRetry, planLlamaLoad, withPort } from './load-plan.js'
 import type { LlamacppEngineSettings, LoadPlan, LoadPlanDeps } from './load-plan.js'
 import { classifyBackendMismatch, formatLoadError, isConcreteVersionBackend, packDirOfExe } from './policy.js'
@@ -132,6 +143,17 @@ export interface LlamacppRuntimeOptions {
   readSettings: () => Promise<RuntimeSettings>
   /** Resolve `<version>/<backend>` to an installed executable (the backend service in a full core). */
   ensureBackendReady?: LoadPlanDeps['ensureBackendReady'] | undefined
+  /**
+   * The one retry on another build (`llamaBackendFallback` in a full core): `failed` cannot run on
+   * this machine (`reason`); remember that, and answer the next installed build to try, or nothing.
+   * Asked at most once per load. Absent, such a load fails on the build it was given.
+   */
+  backendFallback?:
+    | ((
+        failed: { version: string; backend: string },
+        reason: BackendFallbackTrigger
+      ) => Promise<{ version: string; backend: string } | undefined>)
+    | undefined
   resolveLatestBackend?: LoadPlanDeps['resolveLatestBackend'] | undefined
   cpuInfo?: LoadPlanDeps['cpuInfo'] | undefined
   unifiedMemory?: LoadPlanDeps['unifiedMemory'] | undefined
@@ -166,6 +188,8 @@ interface Session {
   info: SessionInfo
   process: ManagedProcess
   plan: LoadPlan
+  /** The model's own settings it was loaded with, kept by the reloads core starts itself. */
+  overrides?: Partial<LlamacppConfigInput> | undefined
   devices: RuntimeDeviceAccumulator
   journalled: boolean
   logStream?: WriteStream
@@ -326,34 +350,37 @@ export class LlamacppRuntime implements LocalRuntime {
       throw new AtomicCoreError('INVALID_ARGUMENT', 'Load timeout must be a positive number of seconds.')
     }
     // Planning can wait on a backend install or a draft download; a cancel does not wait for them.
-    let plan = await raceLoadCancel(
-      planLlamaLoad(
-        {
-          provider: this.provider,
-          modelId,
-          config,
-          engine: settings.engine,
-          overrides: opts.overrides as Partial<LlamacppConfigInput> | undefined,
-          ...(opts.modelPath !== undefined ? { modelPath: opts.modelPath } : {}),
-          ...(opts.mmprojPath !== undefined ? { mmprojPath: opts.mmprojPath } : {}),
-          ...(opts.timeoutSecs !== undefined ? { timeoutSecs: opts.timeoutSecs } : {}),
-          isEmbedding,
-          dataFolder: this.options.layout.root,
-          ...(this.options.transcriptionModelId !== undefined
-            ? { transcriptionModelId: this.options.transcriptionModelId }
-            : {}),
-        },
-        this.planDeps(opts)
-      ),
-      opts.signal
-    )
-    if (opts.port !== undefined) plan = { ...plan, port: opts.port }
+    const planWith = async (overrides: Partial<LlamacppConfigInput> | undefined): Promise<LoadPlan> => {
+      const planned = await raceLoadCancel(
+        planLlamaLoad(
+          {
+            provider: this.provider,
+            modelId,
+            config,
+            engine: settings.engine,
+            overrides,
+            ...(opts.modelPath !== undefined ? { modelPath: opts.modelPath } : {}),
+            ...(opts.mmprojPath !== undefined ? { mmprojPath: opts.mmprojPath } : {}),
+            ...(opts.timeoutSecs !== undefined ? { timeoutSecs: opts.timeoutSecs } : {}),
+            isEmbedding,
+            dataFolder: this.options.layout.root,
+            ...(this.options.transcriptionModelId !== undefined
+              ? { transcriptionModelId: this.options.transcriptionModelId }
+              : {}),
+          },
+          this.planDeps(opts)
+        ),
+        opts.signal
+      )
+      return opts.port !== undefined ? { ...planned, port: opts.port } : planned
+    }
+    let plan = await planWith(opts.overrides as Partial<LlamacppConfigInput> | undefined)
 
     // GPU residency: the backend is known now, and nothing is started yet. Every other engine on the
     // cards this build takes is stopped, with its exit confirmed, before the spawn below.
     // It holds its cards as `loading` from the moment core grants the claim, inside core's turn.
     const footprint = this.footprint(plan)
-    const occupancy: GpuOccupancy = { model_id: modelId, ...footprint, state: 'loading' }
+    let occupancy: GpuOccupancy = { model_id: modelId, ...footprint, state: 'loading' }
     const hold = () => {
       this.claimed.set(modelId, occupancy)
     }
@@ -364,9 +391,82 @@ export class LlamacppRuntime implements LocalRuntime {
         this.assertRunning()
         throwIfLoadCancelled(opts.signal)
       } else hold()
-      return await this.spawnWithRetries(plan, opts)
+      try {
+        return await this.spawnWithRetries(plan, opts)
+      } catch (error) {
+        const fallback = await this.backendFallbackPlan(error, plan, opts, planWith)
+        if (!fallback) throw error
+        const from = plan.backend
+        plan = fallback
+        // The next build down holds no more cards than the one that failed: the claim stands.
+        occupancy = { model_id: modelId, ...this.footprint(plan), state: 'loading' }
+        hold()
+        try {
+          const info = await this.spawnWithRetries(plan, opts)
+          this.options.log?.(
+            'warn',
+            `${plan.provider}/${modelId} loaded on ${plan.version}/${plan.backend} after ${from} could not run on this machine`
+          )
+          return info
+        } catch (fallbackError) {
+          throw withFallbackDiag(fallbackError, { from, to: plan.backend, ok: false })
+        }
+      }
     } finally {
       if (this.claimed.get(modelId) === occupancy) this.claimed.delete(modelId)
+    }
+  }
+
+  /**
+   * The plan of the one retry on another build, or nothing: only for a failure `backendFallbackTrigger`
+   * accepts, never for an executable the caller named, a cancelled load or a stopping runtime, and only
+   * when `backendFallback` names a build to try. A fallback that cannot be planned leaves the original
+   * error, with the attempt in its diag.
+   */
+  private async backendFallbackPlan(
+    error: unknown,
+    plan: LoadPlan,
+    opts: LoadOptions,
+    planWith: (overrides: Partial<LlamacppConfigInput> | undefined) => Promise<LoadPlan>
+  ): Promise<LoadPlan | undefined> {
+    const hook = this.options.backendFallback
+    if (!hook || opts.exePath || this.closing || isLoadCancelled(opts.signal)) return undefined
+    const trigger = backendFallbackTrigger(error, plan.backend)
+    if (!trigger) return undefined
+    const next = await hook({ version: plan.version, backend: plan.backend }, trigger).catch(
+      (hookError: unknown) => {
+        this.options.log?.(
+          'warn',
+          `backend fallback for ${plan.provider}/${plan.modelId} failed: ${String(hookError)}`
+        )
+        return undefined
+      }
+    )
+    if (!next) return undefined
+    this.assertRunning()
+    throwIfLoadCancelled(opts.signal)
+    this.options.log?.(
+      'warn',
+      `${plan.version}/${plan.backend} cannot run ${plan.provider}/${plan.modelId} on this machine (${trigger}); retrying once on ${next.version}/${next.backend}`
+    )
+    const versionBackend = `${next.version}/${next.backend}`
+    try {
+      const fallback = await planWith({
+        ...(opts.overrides as Partial<LlamacppConfigInput> | undefined),
+        version_backend: versionBackend,
+      })
+      // What the settings asked for stays the configured backend in `backend:runtime-reported`.
+      return {
+        ...fallback,
+        configuredVersionBackend: plan.configuredVersionBackend ?? plan.config.version_backend,
+      }
+    } catch (planError) {
+      if (isLoadCancelled(opts.signal) || this.closing) throw planError
+      this.options.log?.(
+        'warn',
+        `could not plan the fallback on ${versionBackend}: ${formatLoadError(planError)}`
+      )
+      throw withFallbackDiag(error, { from: plan.backend, to: next.backend, ok: false })
     }
   }
 
@@ -553,6 +653,21 @@ export class LlamacppRuntime implements LocalRuntime {
     throwIfLoadCancelled(opts.signal)
     const logStream = opts.logPath ? await openLogStream(opts.logPath) : undefined
     const reportOutput = backendOutputReporter(this.options.backendOutput, this.options.log)
+    // What the process got to, for the diag line of a failure.
+    const seen = { printed: false, stderrPrinted: false, weightsLoaded: false, ready: false }
+    const failed = (error: unknown) =>
+      error instanceof AtomicCoreError
+        ? withLoadFailureDiag(
+            error,
+            attemptLoadDiag(error, {
+              platform: this.platform,
+              backend: plan.backend,
+              version: plan.version,
+              ...seen,
+            }),
+            `${plan.version}/${plan.backend}`
+          )
+        : error
 
     this.options.log?.(
       'info',
@@ -569,6 +684,9 @@ export class LlamacppRuntime implements LocalRuntime {
           readyMarkers: LLAMA_READY_MARKERS,
           healthCheck: () => this.healthy(plan.port, apiKey),
           onLine: (stream, line) => {
+            seen.printed = true
+            if (stream === 'stderr') seen.stderrPrinted = true
+            if (isWeightsLoadedLine(line)) seen.weightsLoaded = true
             if (stream === 'stderr') devices.ingest(line)
             if (textMentionsCudaRuntime(line, this.platform)) devices.markCudaRuntimeMissing()
             logStream?.write(`[${stream}] ${line}\n`)
@@ -586,8 +704,9 @@ export class LlamacppRuntime implements LocalRuntime {
       ))
     } catch (error) {
       await closeLogStream(logStream)
-      throw error
+      throw failed(error)
     }
+    seen.ready = true
 
     const info: SessionInfo = {
       pid: proc.pid,
@@ -603,6 +722,7 @@ export class LlamacppRuntime implements LocalRuntime {
       info,
       process: proc,
       plan,
+      overrides: opts.overrides,
       devices,
       journalled: false,
       ...(logStream ? { logStream } : {}),
@@ -619,7 +739,7 @@ export class LlamacppRuntime implements LocalRuntime {
       await proc.terminate(isLoadCancelled(opts.signal) ? 0 : undefined).catch(() => {})
       if (session.journalled) await this.options.journal?.remove(hostPid(session.info)).catch(() => {})
       await closeLogStream(session.logStream)
-      throw error
+      throw failed(error)
     }
 
     this.emit('session:started', { ...info, provider: plan.provider })
@@ -666,8 +786,10 @@ export class LlamacppRuntime implements LocalRuntime {
 
   private reportRuntimeDevice(plan: LoadPlan, runtimeDevice: RuntimeDeviceInfo): void {
     const configured = `${plan.version}/${plan.backend}`
+    // After a backend fallback the settings still name the build that could not run: report that one.
+    const configuredVersionBackend = plan.configuredVersionBackend ?? plan.config.version_backend
     const mismatch = classifyBackendMismatch({
-      configuredBackend: plan.config.version_backend.split('/')[1] ?? '',
+      configuredBackend: configuredVersionBackend.split('/')[1] ?? '',
       effectiveBackend: plan.backend,
       runtimeDevice,
       requestedGpuLayers: plan.config.n_gpu_layers,
@@ -676,7 +798,7 @@ export class LlamacppRuntime implements LocalRuntime {
     this.emit('backend:runtime-reported', {
       provider: plan.provider,
       modelId: plan.modelId,
-      configuredVersionBackend: plan.config.version_backend,
+      configuredVersionBackend,
       effectiveVersionBackend: configured,
       runtimeDevice,
       mismatch: mismatch.kind !== 'ok',
@@ -746,7 +868,7 @@ export class LlamacppRuntime implements LocalRuntime {
     // `bypassAutoUnload`: this is a reload of the model the user is talking to, not a new model
     // taking its place, so it must not evict anything else.
     const info = await this.load(modelId, {
-      overrides: { ctx_size: newCtxLen },
+      overrides: { ...session.overrides, ctx_size: newCtxLen },
       bypassAutoUnload: true,
     })
     // Informational only: the reload emitted `session:started` with the new port and pid, so a
@@ -770,7 +892,8 @@ export class LlamacppRuntime implements LocalRuntime {
    */
   async recreateSession(modelId: string): Promise<RecreateResult> {
     this.assertRunning()
-    if (!this.sessions.has(modelId)) return { ok: false, reason: 'not-loaded' }
+    const session = this.sessions.get(modelId)
+    if (!session) return { ok: false, reason: 'not-loaded' }
     const ctxLen = this.getCtxSize(modelId)
     const unloaded = await this.unloadSession(modelId)
     if (!unloaded.success)
@@ -778,8 +901,10 @@ export class LlamacppRuntime implements LocalRuntime {
         level: 'warn',
         msg: `compute_error_recovery: unload of ${modelId} failed, reloading anyway: ${unloaded.error}`,
       })
+    // The model's own settings (its `fit_ctx` under fit, its layers) survive the restart.
+    const overrides = { ...session.overrides, ...(ctxLen !== undefined ? { ctx_size: ctxLen } : {}) }
     const info = await this.load(modelId, {
-      ...(ctxLen !== undefined ? { overrides: { ctx_size: ctxLen } } : {}),
+      ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
       bypassAutoUnload: true,
     })
     return { ok: true, session: info }

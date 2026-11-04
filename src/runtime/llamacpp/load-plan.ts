@@ -25,9 +25,10 @@ import {
 } from '../../models/index.js'
 import { generateApiKey } from '../shared/index.js'
 import type { GpuCards } from '../shared/index.js'
-import { withLlamacppDefaults } from './args.js'
+import { resolveFitCtx, withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import { DEFAULT_CTX_LEN } from './ctx-ladder.js'
+import { validateDeviceList } from './devices.js'
 import {
   DEFAULT_FIT_CTX,
   DEFAULT_FIT_TARGET_MIB,
@@ -142,6 +143,11 @@ export interface LoadPlan {
   fitCtxCeiling?: number
   /** `--cache-ram` (MiB) on a machine with at most 16 GiB of RAM; absent: llama.cpp's 8192 MiB. */
   cacheRamMiB?: number
+  /**
+   * Set by the runtime on the plan of a backend fallback: the `version_backend` the settings asked for,
+   * which `config.version_backend` (the build that runs) no longer is.
+   */
+  configuredVersionBackend?: string
   warnings: string[]
 }
 
@@ -204,8 +210,9 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   }
   const { modelId } = input
 
-  // 2. settings merge (per-model overrides win)
+  // 2. settings merge (per-model overrides win; a model's `fit_ctx` only when it names a window)
   const cfg = withLlamacppDefaults({ ...input.config, ...(input.overrides ?? {}) } as LlamacppConfigInput)
+  cfg.fit_ctx = resolveFitCtx(input.config.fit_ctx, input.overrides?.fit_ctx)
   const env: Record<string, string> = {}
 
   // 3. `latest/<backend>` sentinel
@@ -242,6 +249,36 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   version = ready.version
   backend = ready.backend
   const exePath = ready.exePath
+  // One `--list-devices` per executable and plan: the device check below and fit's Metal margin
+  // read the same list.
+  if (deps.listDevices) {
+    const listDevices = deps.listDevices
+    const lists = new Map<string, Promise<DeviceInfo[]>>()
+    deps = {
+      ...deps,
+      listDevices: (path) => {
+        const listed = lists.get(path) ?? listDevices(path)
+        lists.set(path, listed)
+        return listed
+      },
+    }
+  }
+
+  // 7b. a `--device` this build does not have would make llama-server exit; it is dropped instead.
+  // A device list that cannot be read changes nothing.
+  if (String(cfg.device ?? '').trim() !== '' && deps.listDevices) {
+    const devices = await deps.listDevices(exePath).catch(() => undefined)
+    if (devices) {
+      const checked = validateDeviceList(cfg.device, devices)
+      if (checked.dropped.length > 0) {
+        const listedIds = devices.map((d) => d.id).join(', ') || 'none'
+        warn(
+          `Ignoring device ${checked.dropped.join(', ')} for "${modelId}": ${version}/${backend} does not have it (it lists ${listedIds}).`
+        )
+        cfg.device = checked.device
+      }
+    }
+  }
 
   // 8-9. model.yml, port, key, env
   const modelConfig: ModelYmlDocument = input.modelPath
@@ -380,9 +417,10 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
       )
     }
     if (fit?.ctxCeiling !== undefined) {
-      fitCtxCeiling = fit.ctxCeiling
+      // Never below the floor fit is given (`fit_ctx`, which the app raises to grow the window).
+      fitCtxCeiling = Math.max(fit.ctxCeiling, fitMinCtx(cfg))
       warn(
-        `Unified memory below 16 GiB: capping the window fit may pick for "${modelId}" at ${fit.ctxCeiling} tokens.`
+        `Unified memory below 16 GiB: capping the window fit may pick for "${modelId}" at ${fitCtxCeiling} tokens.`
       )
     }
   }

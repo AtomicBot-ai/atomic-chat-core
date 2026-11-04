@@ -26,7 +26,7 @@ import { cudaRuntimeLibName, isCudaInstalled } from './installed/index.js'
 import { getCudartArchiveName, getCudartDownloadUrl, getCudaToolkitVersion } from './catalog/index.js'
 import type { BackendFeatures, BackendVersion, GpuProbeInfo, SupportedFeatures } from './types.js'
 import { compareVersions, parseBackendVersion, parseRustU32, stripBom } from './version.js'
-import { gpuMeetsCuda13ArchFloor, isAmdGpu } from './select/index.js'
+import { gpuMeetsCuda13ArchFloor, gpuMeetsCuda13DriverForArch, isAmdGpu } from './select/index.js'
 
 export const TURBOQUANT_DOWNLOAD_BASE =
   'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download'
@@ -254,6 +254,8 @@ export function getTurboquantSupportedFeatures(
       if (compareVersions(driver, floors.cuda12) >= 0) features.cuda12 = true
       if (compareVersions(driver, floors.cuda13) >= 0) features.cuda13 = true
       if (!gpuMeetsCuda13ArchFloor(gpu.nvidia_info.compute_capability)) allNvidiaMeetCuda13Arch = false
+      if (!gpuMeetsCuda13DriverForArch(osType, gpu.nvidia_info.compute_capability, driver))
+        allNvidiaMeetCuda13Arch = false
     }
     if (gpu.vulkan_info) features.vulkan = true
   }

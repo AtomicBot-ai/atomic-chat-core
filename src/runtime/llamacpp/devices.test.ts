@@ -6,6 +6,7 @@ import {
   parseDeviceLine,
   parseDeviceOutput,
   parseMemoryValue,
+  validateDeviceList,
 } from './devices.js'
 
 describe('isMemoryPattern', () => {
@@ -82,5 +83,27 @@ describe('parseDeviceOutput', () => {
       expect((e as AtomicCoreError).code).toBe('DEVICE_LIST_PARSE_FAILED')
       expect((e as AtomicCoreError).details).toBe('nothing here')
     }
+  })
+})
+
+describe('validateDeviceList', () => {
+  const VULKAN = [
+    { id: 'Vulkan0', name: 'AMD Radeon RX 7800 XT', mem: 16_368, free: 16_000 },
+    { id: 'Vulkan1', name: 'AMD Radeon(TM) Graphics', mem: 8_192, free: 8_000 },
+  ]
+  it.each([
+    ['Vulkan0', 'Vulkan0', []],
+    ['vulkan1', 'vulkan1', []],
+    [' Vulkan0 , Vulkan1 ', 'Vulkan0,Vulkan1', []],
+    ['CUDA0', '', ['CUDA0']],
+    ['CUDA0,Vulkan1', 'Vulkan1', ['CUDA0']],
+    ['none', 'none', []],
+    ['NONE,ROCm0', 'NONE', ['ROCm0']],
+    [',', '', []],
+  ])('%j against a Vulkan build → %j, dropping %j', (requested, device, dropped) => {
+    expect(validateDeviceList(requested, VULKAN)).toEqual({ device, dropped })
+  })
+  it('drops every GPU name on a build that lists none (the CPU build)', () => {
+    expect(validateDeviceList('CUDA0', [])).toEqual({ device: '', dropped: ['CUDA0'] })
   })
 })

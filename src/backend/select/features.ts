@@ -57,6 +57,35 @@ export function gpuMeetsCuda13ArchFloor(computeCapability: string | undefined): 
   return cc[0] > floorMajor || (cc[0] === floorMajor && cc[1] >= floorMinor)
 }
 
+/**
+ * Below this compute capability (Turing and older) a Windows CUDA 13 build also needs
+ * `WINDOWS_PRE_AMPERE_CUDA13_MIN_DRIVER`. The 13.x builds carry Turing only as PTX, and drivers before
+ * R616 refuse that toolchain at load ("the provided PTX was compiled with an unsupported toolchain",
+ * in `ggml_cuda_kernel_can_use_pdl`). Windows telemetry over 14 days, CC 7.5 on CUDA 13.x: drivers
+ * 581–597 crashed 45 users and loaded 12, 610 crashed 46 and loaded 30, 616/617/621 crashed none of
+ * 128. CUDA 12.4 loads on the same cards.
+ */
+export const CUDA13_DRIVER_GATED_BELOW_COMPUTE_CAPABILITY: readonly [number, number] = [8, 0]
+export const WINDOWS_PRE_AMPERE_CUDA13_MIN_DRIVER = '616.00'
+
+/**
+ * Whether this card may run a CUDA 13 build with this driver, beyond the system-wide driver floor and
+ * the architecture floor. Windows only (Linux has no such data); an unreadable compute capability is
+ * not gated, as in `gpuMeetsCuda13ArchFloor`.
+ */
+export function gpuMeetsCuda13DriverForArch(
+  osType: string,
+  computeCapability: string | undefined,
+  driver: string
+): boolean {
+  if (osType !== 'windows') return true
+  const cc = parseComputeCapability(computeCapability ?? '')
+  if (!cc) return true
+  const [gateMajor, gateMinor] = CUDA13_DRIVER_GATED_BELOW_COMPUTE_CAPABILITY
+  const belowGate = cc[0] < gateMajor || (cc[0] === gateMajor && cc[1] < gateMinor)
+  return !belowGate || compareVersions(driver, WINDOWS_PRE_AMPERE_CUDA13_MIN_DRIVER) >= 0
+}
+
 export function isAmdGpu(gpu: GpuProbeInfo): boolean {
   return typeof gpu.vendor === 'string' && gpu.vendor.toLowerCase() === 'amd'
 }
@@ -80,7 +109,8 @@ export function rocmSupportedWindows(hasAmdGpu: boolean, deviceIds: readonly num
 /**
  * Which CPU/GPU tiers this host can run. The driver is system-wide, so *any* NVIDIA GPU over a floor
  * enables that CUDA tier; architecture is per-card and must hold for *every* card (llama.cpp
- * offloads across all visible devices), so one sub-7.5 GPU vetoes CUDA 13 for the whole host.
+ * offloads across all visible devices), so one sub-7.5 GPU vetoes CUDA 13 for the whole host, and on
+ * Windows so does one pre-Ampere GPU on a driver before R616 (`gpuMeetsCuda13DriverForArch`).
  * Vulkan is on when any GPU carries `vulkan_info`; ROCm only on Windows via the PCI table; OpenCL
  * only on Windows with an Adreno GPU (the only OpenCL build ggml-org ships is for Adreno). On any OS
  * other than linux/windows only the CPU flags are set (no CUDA, no Vulkan — macOS has Metal).
@@ -121,6 +151,8 @@ export function getSupportedFeatures(
       if (compareVersions(driver, floors.cuda12) >= 0) features.cuda12 = true
       if (compareVersions(driver, floors.cuda13) >= 0) features.cuda13 = true
       if (!gpuMeetsCuda13ArchFloor(nvidia.compute_capability)) allNvidiaMeetCuda13Arch = false
+      if (!gpuMeetsCuda13DriverForArch(osType, nvidia.compute_capability, driver))
+        allNvidiaMeetCuda13Arch = false
     }
     if (gpu.vulkan_info) features.vulkan = true
   }
