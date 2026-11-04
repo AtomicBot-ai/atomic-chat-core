@@ -38,6 +38,12 @@ export interface EventContext {
   userId?: string | undefined
   /** Already sanitised tags from the host. They win over the core's own on the same key. */
   appTags: Record<string, string>
+  /**
+   * Tag keys a host sets on its own reports (`ErrorReporterOptions.hostTagKeys`). Their values are
+   * scrubbed and capped like any tag and win over the diagnostic's; `component` and `operation` also
+   * name the event and its grouping.
+   */
+  hostTagKeys?: ReadonlySet<string> | undefined
   system?: SystemContext | undefined
   breadcrumbs: readonly Breadcrumb[]
   scrub: ScrubContext
@@ -130,6 +136,15 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
             report.type && /^[A-Za-z][A-Za-z0-9_.]{0,63}$/.test(report.type) ? report.type : report.source,
         }
   const diagnostic = reportDiagnostic(report)
+  const hostTags = ctx.hostTagKeys?.size
+    ? sanitizeTags(report.tags, { allow: ctx.hostTagKeys, scrub: ctx.scrub })
+    : {}
+  // A host's own part of the program names the event; the core's vocabulary does not know it.
+  const part = {
+    ...diagnostic,
+    component: hostTags['component'] ?? diagnostic.component,
+    operation: hostTags['operation'] ?? diagnostic.operation,
+  }
   const frames = report.error instanceof Error ? parseStack(report.error.stack, report.error.message) : []
   const tags = {
     ...sanitizeTags({
@@ -144,6 +159,7 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
     ...ctx.appTags,
     ...sanitizeTags({ source: report.source, ...report.tags }, { allow: REPORT_TAG_KEYS, scrub: ctx.scrub }),
     ...sanitizeTags(diagnosticTags(report.error, diagnostic)),
+    ...hostTags,
   }
   return {
     event_id: ctx.eventId,
@@ -164,7 +180,12 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
       },
     },
     tags,
-    fingerprint: diagnosticFingerprint(report.error, diagnostic, String(report.tags?.['provider'] ?? '')),
+    fingerprint: diagnosticFingerprint(
+      report.error,
+      part,
+      String(report.tags?.['provider'] ?? ''),
+      thrown.type
+    ),
     exception: {
       values: [
         ...errorChain(report.error)
@@ -178,7 +199,7 @@ export function buildEvent(report: ErrorReport, ctx: EventContext): SentryEvent 
           })),
         {
           type: thrown.type,
-          value: `${diagnostic.component} ${diagnostic.operation}: ${diagnostic.reason}`,
+          value: `${part.component} ${part.operation}: ${diagnostic.reason}`,
           mechanism: { type: report.source, handled: report.level !== 'fatal' },
           ...(frames.length ? { stacktrace: { frames } } : {}),
         },

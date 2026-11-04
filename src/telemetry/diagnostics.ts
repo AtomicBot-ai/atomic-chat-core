@@ -214,11 +214,17 @@ export function diagnosticTags(
   }
 }
 
-/** Unknown causes keep their source location; messages and user-selected models never form a key. */
+/**
+ * Unknown causes keep their source location; messages and user-selected models never form a key.
+ * `component` and `operation` may be a host's own (see `ErrorReporterOptions.hostTagKeys`). Without a
+ * location the exception `type` (already finite: a standard error name, a core code or a checked
+ * report type) is the one fact left that tells two failures apart.
+ */
 export function diagnosticFingerprint(
   error: unknown,
-  diagnostic: FailureDiagnostic,
-  provider?: string
+  diagnostic: Pick<FailureDiagnostic, 'reason' | 'nativeFailure'> & { component: string; operation: string },
+  provider?: string,
+  type?: string
 ): string[] {
   const chain = errorChain(error)
   const leaf = chain.at(-1)
@@ -230,7 +236,9 @@ export function diagnosticFingerprint(
     reason === 'unknown' || reason === 'internal'
       ? frame
         ? `${frame.filename}:${frame.lineno ?? 0}:${frame.colno ?? 0}`
-        : 'no-stack'
+        : type
+          ? `no-stack:${type}`
+          : 'no-stack'
       : reason
   return [
     DIAGNOSTIC_VERSION,

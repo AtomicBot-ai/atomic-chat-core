@@ -46,6 +46,14 @@ export interface ErrorReporterOptions {
   newEventId?: (() => string) | undefined
   /** Where a failed send is mentioned; never back into the reporter. */
   onSendError?: ((message: string) => void) | undefined
+  /**
+   * Tag keys a host sets on the reports it captures itself (Atomic Server: `component`, `operation`,
+   * its finite diagnostic codes). Only the core's diagnostic keys survive otherwise, and its
+   * vocabulary has no word for a host's own parts. The host vouches that these values are finite; they
+   * are still scrubbed and capped, and win over the core's diagnostic tags on the same key. The
+   * core's own reporter passes none.
+   */
+  hostTagKeys?: readonly string[] | undefined
 }
 
 /**
@@ -62,6 +70,7 @@ export class ErrorReporter implements TelemetryControl {
   private hostConsent: boolean | undefined
   private userId: string | undefined
   private appTags: Record<string, string> = {}
+  private readonly hostTagKeys: ReadonlySet<string>
   private scrub: ScrubContext
   private readonly breadcrumbs: Breadcrumb[] = []
   private readonly throttled = new Map<string, number>()
@@ -78,6 +87,7 @@ export class ErrorReporter implements TelemetryControl {
     this.now = options.now ?? Date.now
     this.newEventId = options.newEventId ?? (() => randomUUID().replace(/-/g, ''))
     this.hostConsent = options.enabled
+    this.hostTagKeys = new Set(options.hostTagKeys ?? [])
     this.scrub = options.scrub ?? {}
   }
 
@@ -141,6 +151,7 @@ export class ErrorReporter implements TelemetryControl {
         userId: this.userId ?? this.options.installId,
         system: this.options.system,
         appTags: this.appTags,
+        hostTagKeys: this.hostTagKeys,
         breadcrumbs: [...this.breadcrumbs],
         scrub: this.scrub,
       })
