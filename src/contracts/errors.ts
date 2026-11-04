@@ -25,6 +25,19 @@ const RUNTIME_CODES = [
   'MULTIMODAL_PROJECTOR_LOAD_FAILED',
   'MODEL_FILE_CORRUPT',
   'LLAMA_CPP_PROCESS_ERROR',
+  /**
+   * The GPU build cannot run on this card or driver: CUDA "the provided PTX was compiled with an
+   * unsupported toolchain" or "no kernel image is available". Core retries the load once on another
+   * installed build and remembers the bad one for this machine.
+   */
+  'GPU_BACKEND_INCOMPATIBLE',
+  /**
+   * Windows could not start the engine at all: a missing DLL (0xC0000135), a bad image (0xC000007B)
+   * or a DLL that failed to initialise (0xC0000142). Usually an incomplete or quarantined build.
+   */
+  'ENGINE_BINARY_BROKEN',
+  /** The engine hit a CPU instruction this machine does not have (0xC000001D, illegal instruction). */
+  'CPU_INSTRUCTION_UNSUPPORTED',
   /** MLX plugin (`tauri-plugin-mlx/src/error.rs`): an mlx-server failure no pattern explained. */
   'MLX_PROCESS_ERROR',
   /** Foundation Models plugin (`tauri-plugin-foundation-models/src/error.rs`). */
