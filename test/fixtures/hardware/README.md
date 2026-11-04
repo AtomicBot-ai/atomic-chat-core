@@ -17,6 +17,8 @@ test reads these through `test/helpers/hardware-fixtures.ts`. Keep a file's orig
 | `windows-probe-hybrid-rtx4090-uhd770.json` | the `WINDOWS_PROBE_SCRIPT` document on Windows 11 24H2 with an RTX 4090 and an Intel UHD 770, PowerShell 7 array shape | **synthetic** — composed from documented CIM/registry shapes, not recorded |
 | `windows-probe-rx7900xtx-ps51.json` | the same script on Windows 10 22H2 with an RX 7900 XTX, PowerShell 5.1 single-element collapse, with a UTF-8 BOM | **synthetic** |
 | `windows-probe-no-gpu-server2022.json` | the same script on a headless Windows Server 2022 VM (`Add-Type` failed) | **synthetic** |
+| `windows-reg-display-class-rx7900xtx-uhd770.txt` | `reg query HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318} /s` on an RX 7900 XTX + UHD 770 desktop: driver instances `0000`–`0002` (the last the basic display adapter), a private `UMD` subkey with a `DriverDesc` of its own, and the `Properties` key reg.exe may not open; the tests answer non-recursive queries from it | **synthetic** — composed from documented reg.exe output and class-key values, not recorded |
+| `windows-reg-display-class-rtx4090-uhd770-stale-gtx1080.txt` | the same query on an RTX 4090 + UHD 770 desktop that once had a GTX 1080 (its driver key left behind) and runs a Parsec virtual display | **synthetic** |
 
 The Windows documents are synthetic until real ones are recorded (open risk in the 2026-09-27 hardware
 ADR); replace them with recorded output when a Windows machine is at hand and keep the shapes they

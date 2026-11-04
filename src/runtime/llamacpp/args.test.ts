@@ -6,12 +6,15 @@ import {
   CACHE_RAM_MIN_BUILD,
   REASONING_BUDGET_TOKENS_MIN_BUILD,
   buildLlamaArgs,
+  fitCtxText,
+  fitCtxTokens,
   isTurboquantVersion,
   parseBuildNumber,
   parsePrismBuildNumber,
   parseExtraArgs,
   parseVersionBackend,
   planLlamaArgs,
+  resolveFitCtx,
   withLlamacppDefaults,
 } from './args.js'
 
@@ -349,6 +352,33 @@ describe('context size and fit', () => {
     })
   })
 
+  it('sends a model fit_ctx that arrived as a number as its decimal text', () => {
+    const argv = buildLlamaArgs(
+      { ...base(), version_backend: 'b11463/macos-arm64', fit: true, fit_ctx: 16384 as unknown as string },
+      input
+    )
+    expect(contextArgs(argv)).toEqual(['--fit', 'on', '--fit-ctx', '16384'])
+    const atDefault = buildLlamaArgs(
+      { ...base(), version_backend: 'b11463/macos-arm64', fit: true, fit_ctx: 4096 as unknown as string },
+      input
+    )
+    expect(contextArgs(atDefault)).toEqual(['--fit', 'on'])
+  })
+
+  it('never sends a ceiling below fit_ctx, so raising the floor under fit widens the window', () => {
+    const argv = (fit_ctx: unknown) =>
+      contextArgs(
+        buildLlamaArgs(
+          { ...base(), version_backend: 'b11463/macos-arm64', fit: true, fit_ctx: fit_ctx as string },
+          { ...input, fitCtxCeiling: 6144 }
+        )
+      )
+    expect(argv('16384')).toEqual(['--ctx-size', '16384', '--fit', 'on', '--fit-ctx', '16384'])
+    expect(argv(32_768)).toEqual(['--ctx-size', '32768', '--fit', 'on', '--fit-ctx', '32768'])
+    expect(argv('2048')).toEqual(['--ctx-size', '6144', '--fit', 'on', '--fit-ctx', '2048'])
+    expect(argv('')).toEqual(['--ctx-size', '6144', '--fit', 'on'])
+  })
+
   it('sends no ceiling to an ik build, which takes no fit flags at all', () => {
     const argv = buildLlamaArgs(
       { ...base(), version_backend: 'b6000/ik-cpu', fit: true, ctx_size: 32768 },
@@ -491,5 +521,36 @@ describe('PrismML provider', () => {
     expect(line).not.toMatch(/turbo|--spec-type|--model-draft|--split-mode|--main-gpu/)
     expect(line).toContain('--cache-type-k q8_0')
     expect(plan.warnings.join('\n')).toMatch(/Speculative decoding is not available on PrismML/)
+  })
+})
+
+describe('resolveFitCtx / fitCtxText', () => {
+  it.each([
+    ['the model window wins over the provider', '8192', '16384', '16384'],
+    ['a number of tokens counts', '8192', 32768, '32768'],
+    ['its text, trimmed, counts', '', ' 12288 ', '12288'],
+    ['an empty model value keeps the provider', '8192', '', '8192'],
+    ['an absent one too', '8192', undefined, '8192'],
+    ['null too', '8192', null, '8192'],
+    ['zero is no window', '8192', 0, '8192'],
+    ['nor is text that is not a whole number', '8192', '16k', '8192'],
+    ['nor a negative number', '8192', -1, '8192'],
+    ['overflowing model tokens keep the provider', '8192', '9'.repeat(400), '8192'],
+    ['unsafe model tokens keep the provider', '8192', '9007199254740993', '8192'],
+    ['a provider number is sent as text', 4096, undefined, '4096'],
+    ['nothing anywhere is empty', undefined, undefined, ''],
+  ])('%s', (_name, provider, model, expected) => {
+    expect(resolveFitCtx(provider, model)).toBe(expected)
+  })
+  it('fitCtxText floors a fractional number and refuses what is not a window', () => {
+    expect(fitCtxText(8192.7)).toBe('8192')
+    expect(fitCtxText(Number.NaN)).toBe('')
+    expect(fitCtxText(true)).toBe('')
+  })
+  it('fitCtxTokens reads a window in tokens, 0 for anything else', () => {
+    expect(fitCtxTokens('32768')).toBe(32_768)
+    expect(fitCtxTokens(16_384)).toBe(16_384)
+    expect(fitCtxTokens('16k')).toBe(0)
+    expect(fitCtxTokens(undefined)).toBe(0)
   })
 })

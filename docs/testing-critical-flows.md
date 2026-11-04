@@ -115,3 +115,5 @@ For coding agents, the local Anthropic fallback shares the direct chat route's i
 classification. HTTP tests distinguish a recovered first attempt, an oversized prompt, a
 terminal OOM and a terminal 503. The compiled-binary fake-ingest scenario exercises both
 routes and checks the grouping and absence of prompt text.
+
+PR #75 review regressions: CUDA delivery and BackendService tests prove cancellation remains terminal, an incomplete runtime is replaced coherently, and failed copies cannot report success. Backend selection, fallback and advisor tests prove binary failures are release-specific while GPU incompatibility remains driver-specific. Argument tests reject overflowing model context windows. These isolated tests do not establish real Windows GPU readiness.

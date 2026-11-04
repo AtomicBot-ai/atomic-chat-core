@@ -92,6 +92,7 @@ describe('probeSystemInfo', () => {
       gpus: [],
     })
     expect(result.warnings).toEqual(['no hardware probe for platform freebsd'])
+    expect(result.degraded).toBeUndefined()
   })
 
   it('turns a probe that throws into the fallback plus a warning, never a rejection', async () => {
@@ -104,5 +105,7 @@ describe('probeSystemInfo', () => {
       gpus: [],
     })
     expect(result.warnings).toEqual([expect.stringMatching(/^hardware probe failed: .*readFile/)])
+    // Marked so the service probes again later rather than keeping a GPU-less answer for the run.
+    expect(result.degraded).toBe(true)
   })
 })

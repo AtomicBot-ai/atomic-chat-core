@@ -175,6 +175,12 @@ function correctedMergeExpectation(input: Extract<Input, { kind: 'merge' }>, exp
   })
 }
 
+/**
+ * The second recorded divergence: on Windows a pre-Ampere GPU needs driver 616.00 for CUDA 13
+ * (features.ts `gpuMeetsCuda13DriverForArch`), so Turing on the case's 581.42 no longer gets it.
+ */
+const WINDOWS_TURING_CUDA13_CASE = 'features_windows_turing_7_5_is_the_cuda13_floor'
+
 for (const [set, port] of [
   ['backend-select', UPSTREAM],
   ['backend-select-llamacpp', TURBOQUANT],
@@ -189,8 +195,12 @@ for (const [set, port] of [
       expect(cases.map((c) => c.name).sort()).toEqual([...index.cases].sort())
     })
 
-    it('records only the merge `order` shape as a known divergence', () => {
-      expect(Object.keys(knownDivergence)).toEqual(['merge_remote_without_order_defaults_to_zero'])
+    it('records only the merge `order` shape and the Windows Turing CUDA 13 gate as known divergences', () => {
+      expect(Object.keys(knownDivergence)).toEqual(
+        set === 'backend-select'
+          ? ['merge_remote_without_order_defaults_to_zero', WINDOWS_TURING_CUDA13_CASE]
+          : ['merge_remote_without_order_defaults_to_zero']
+      )
     })
 
     it('covers every command kind', () => {
@@ -221,6 +231,8 @@ for (const [set, port] of [
         }
       } else if (c.name in knownDivergence && c.input.kind === 'merge') {
         expect(run(port, c.input)).toEqual(correctedMergeExpectation(c.input, c.expected as BackendVersion[]))
+      } else if (c.name === WINDOWS_TURING_CUDA13_CASE && c.name in knownDivergence) {
+        expect(run(port, c.input)).toEqual({ ...(c.expected as object), cuda13: false })
       } else {
         expect(run(port, c.input)).toEqual(c.expected)
       }

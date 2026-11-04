@@ -299,6 +299,66 @@ describe('planLlamaLoad', () => {
   })
 })
 
+describe('planLlamaLoad — a --device the build does not have', () => {
+  const VULKAN = [{ id: 'Vulkan0', name: 'AMD Radeon RX 7800 XT', mem: 16_368, free: 16_000 }]
+
+  it('drops it with a warning instead of letting llama-server exit, and keeps what the build has', async () => {
+    const listDevices = vi.fn(async () => VULKAN)
+    const plan = await planLlamaLoad(input({ device: 'CUDA0,Vulkan0' }), deps({ listDevices }))
+    expect(plan.config.device).toBe('Vulkan0')
+    expect(plan.warnings).toContain(
+      'Ignoring device CUDA0 for "m": b10405/macos-arm64 does not have it (it lists Vulkan0).'
+    )
+    expect(listDevices).toHaveBeenCalledWith('/b/b10405/macos-arm64/llama-server')
+    const cpu = await planLlamaLoad(input({ device: 'CUDA0' }), deps({ listDevices: async () => [] }))
+    expect(cpu.config.device).toBe('')
+    expect(cpu.warnings).toContain(
+      'Ignoring device CUDA0 for "m": b10405/macos-arm64 does not have it (it lists none).'
+    )
+  })
+
+  it('changes nothing when the device is known, the list cannot be read, or nobody can list', async () => {
+    const known = await planLlamaLoad(input({ device: 'vulkan0' }), deps({ listDevices: async () => VULKAN }))
+    expect(known.config.device).toBe('vulkan0')
+    expect(known.warnings.some((w) => w.startsWith('Ignoring device'))).toBe(false)
+    const unreadable = await planLlamaLoad(
+      input({ device: 'CUDA0' }),
+      deps({ listDevices: async () => Promise.reject(new Error('timed out')) })
+    )
+    expect(unreadable.config.device).toBe('CUDA0')
+    expect((await planLlamaLoad(input({ device: 'CUDA0' }), deps())).config.device).toBe('CUDA0')
+    const listDevices = vi.fn(async () => VULKAN)
+    await planLlamaLoad(input({ device: '' }), deps({ listDevices }))
+    expect(listDevices).not.toHaveBeenCalled()
+  })
+
+  it('lists the devices of a plan once, for the device check and the unified-memory fit alike', async () => {
+    const METAL = [{ id: 'MTL0', name: 'Apple M4', mem: 12_124, free: 12_124 }]
+    const listDevices = vi.fn(async (_exe: string) => METAL)
+    const plan = await planLlamaLoad(
+      input({ device: 'MTL0', fit: true }),
+      deps({ listDevices, unifiedMemory: async () => ({ totalMemoryBytes: 16 * 2 ** 30 }) })
+    )
+    expect(plan.config.device).toBe('MTL0')
+    expect(listDevices).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('planLlamaLoad — a model fit_ctx', () => {
+  it('wins over the provider one, as a number or its text, and an empty one keeps the provider’s', async () => {
+    const plan = (model: unknown) =>
+      planLlamaLoad(
+        { ...input({ fit: true, fit_ctx: '8192' }), overrides: { fit_ctx: model as string } },
+        deps()
+      )
+    expect((await plan('16384')).config.fit_ctx).toBe('16384')
+    expect((await plan(32768)).config.fit_ctx).toBe('32768')
+    expect((await plan('')).config.fit_ctx).toBe('8192')
+    expect((await plan(undefined)).config.fit_ctx).toBe('8192')
+    expect((await planLlamaLoad(input({ fit: true, fit_ctx: '8192' }), deps())).config.fit_ctx).toBe('8192')
+  })
+})
+
 /** Integrations audit 2026-11-03: X6 (answer cap), S4 (fit-off window), S5 (prompt cache). */
 describe('planLlamaLoad — the limits core starts llama.cpp with', () => {
   const GiB = 2 ** 30
@@ -738,6 +798,36 @@ describe('planLlamaLoad — window ceiling on unified memory below 16 GiB', () =
     expect(plan.config.fit_target).toBe('1365')
     // 4096 − 1926 − 1024 MiB leave 1146 MiB: 10487 tokens at 112 KiB, so 10240.
     expect(plan.fitCtxCeiling).toBe(10_240)
+  })
+
+  // The app grows a model's window under fit by reloading it with its own, higher `fit_ctx`: a
+  // ceiling below that floor would end fit's search under it and the raise would change nothing.
+  it('never caps the window below the model fit_ctx, which wins over the provider one', async () => {
+    const llama = smallMac({ meta: LLAMA32_3B_META, files: { [MODEL]: LLAMA32_3B_WEIGHTS } })
+    const withModelFloor = (fitCtx: unknown) =>
+      planLlamaLoad(
+        {
+          ...input({ fit: true, fit_target: '', fit_ctx: '4096' }),
+          overrides: { fit_ctx: fitCtx as string },
+        },
+        llama
+      )
+    // Below the ceiling the memory allows: the ceiling stands.
+    const low = await withModelFloor('8192')
+    expect(low.config.fit_ctx).toBe('8192')
+    expect(low.fitCtxCeiling).toBe(10_240)
+    // Above it (as the app's string or a number): no ceiling under the floor, fit sizes from there.
+    for (const raised of ['16384', 16_384]) {
+      const plan = await withModelFloor(raised)
+      expect(plan.config.fit_ctx).toBe('16384')
+      expect(plan.fitCtxCeiling).toBeUndefined()
+    }
+    // A floor the memory holds keeps a ceiling, never under the floor.
+    const lfm = await planLlamaLoad(
+      { ...input({ fit: true, fit_target: '', fit_ctx: '4096' }), overrides: { fit_ctx: '24576' } },
+      smallMac()
+    )
+    expect(lfm.fitCtxCeiling).toBeGreaterThanOrEqual(24_576)
   })
 
   it('caps the pool the slots share, not a window per slot: more slots cost no more KV', async () => {

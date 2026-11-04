@@ -22,7 +22,13 @@ import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, realpath, rename, rm, rmdir, stat, statfs, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { CoreEvents, DownloadProgress, DownloadStage } from '../contracts/index.js'
-import { checkFreeSpace, checkPathWithinLimit, diskErrToString, remainingBytes } from './disk.js'
+import {
+  checkFreeSpace,
+  checkPathWithinLimit,
+  diskErrToString,
+  diskWriteErrToString,
+  remainingBytes,
+} from './disk.js'
 import type { ProxyConfig } from './protocol.js'
 import {
   classifyDownloadStatus,
@@ -93,7 +99,11 @@ interface Task {
 }
 
 interface OpenWriteStream {
-  write(chunk: Uint8Array): Promise<void>
+  /**
+   * `offset` is where the chunk starts in the file: a write that fails across the 4 GiB - 1 boundary
+   * a FAT32 volume cannot pass is tagged `disk_fs_limit` instead of a generic disk error.
+   */
+  write(chunk: Uint8Array, offset?: number): Promise<void>
   close(): Promise<void>
 }
 
@@ -138,13 +148,17 @@ async function openWriteStream(
     })
     return closing
   }
-  const write = (chunk: Uint8Array): Promise<void> =>
+  const write = (chunk: Uint8Array, offset?: number): Promise<void> =>
     new Promise<void>((ok, fail) => {
       if (streamError) return fail(disk(streamError))
       writer.write(chunk, (err) => {
         if (err) {
           streamError ??= err
-          fail(disk(err))
+          fail(
+            offset === undefined
+              ? disk(err)
+              : new Error(diskWriteErrToString(err, offset, chunk.byteLength), { cause: err })
+          )
         } else ok()
       })
     })
@@ -637,7 +651,8 @@ export class Downloader {
               this.deps.log('info', `Download cancelled: ${item.url}`)
               throw new Error(DOWNLOAD_CANCELLED)
             }
-            await writer.write(value)
+            // Writes are awaited one at a time, so `totalTransferred` is where this chunk starts.
+            await writer.write(value, totalTransferred)
             delta += value.byteLength
             totalTransferred += value.byteLength
             sinceReset += value.byteLength

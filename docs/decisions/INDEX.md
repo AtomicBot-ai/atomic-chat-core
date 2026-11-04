@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-04 — Run only GPU builds the card can run, and retry a failed GPU load once on the next build](2026-11-04-run-only-gpu-builds-the-card-can-run-and-retry-once.md)
+- [2026-11-04 — Smoke-test Windows engine packs, retry locked moves, and find GPUs without PowerShell](2026-11-04-smoke-test-windows-packs-and-probe-gpus-without-powershell.md)
 - **2026-11-02** — [Classify tensor-layout mismatches without claiming corruption](2026-11-02-tensor-layout-error.md) — "wrong number of tensors" is `MODEL_ARCH_NOT_SUPPORTED` on upstream llama.cpp too; truncation, invalid magic and EOF stay corrupt.
 
 - [2026-11-03 — Serve coding agents with their window, bounded output and two shared-KV slots](2026-11-03-serve-coding-agents-with-their-window-and-bounded-output.md)
@@ -172,3 +174,5 @@ add a new one that says which record it supersedes.
 - [Gate superseded-load test readiness on cancellation](2026-11-04-gate-superseded-load-test-readiness.md)
 - [Await download write streams and settle multi-file transfers](2026-11-04-await-download-write-streams-and-settle-multi-file-transfers.md)
 - [Compare lock causes with native filesystem errors](2026-11-04-compare-lock-causes-with-native-filesystem-errors.md)
+- [Keep CUDA runtime repair cancellable and coherent](2026-11-04-keep-cuda-runtime-repair-cancellable-and-coherent.md)
+- [Scope binary failures to the engine release](2026-11-04-scope-binary-failures-to-the-engine-release.md)

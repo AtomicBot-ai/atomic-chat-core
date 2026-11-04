@@ -4,16 +4,19 @@ import type { BackendFeatures, BackendVersion, GpuProbeInfo } from '../types.js'
 import { AMD_ROCM_WINDOWS_PCI_IDS } from './amd-rocm-pci-ids.js'
 import {
   CUDA_DRIVER_FLOORS,
+  CUDA13_DRIVER_GATED_BELOW_COMPUTE_CAPABILITY,
   determineSupportedBackends,
   filterBackendsBySupport,
   getSupportedFeatures,
   gpuMeetsCuda13ArchFloor,
+  gpuMeetsCuda13DriverForArch,
   isAmdGpu,
   listSupportedBackends,
   MIN_CUDA13_COMPUTE_CAPABILITY,
   normalizeFeatures,
   parseComputeCapability,
   rocmSupportedWindows,
+  WINDOWS_PRE_AMPERE_CUDA13_MIN_DRIVER,
 } from './features.js'
 
 const b = (version: string, backend: string, order = 0): BackendVersion => ({ version, backend, order })
@@ -120,13 +123,48 @@ describe('getSupportedFeatures (Rust test_get_supported_features_* and driver-fl
       })
     }
   })
-  it('lets Turing, Blackwell and an unknown capability through', () => {
-    for (const cc of ['7.5', '10.0', '12.0', '']) {
+  it('lets Ampere, Blackwell and an unknown capability through on the 581.15 floor', () => {
+    for (const cc of ['8.0', '8.6', '10.0', '12.0', '']) {
       expect(getSupportedFeatures('windows', [], [nvidia('581.42', cc)]).cuda13).toBe(true)
     }
     expect(getSupportedFeatures('windows', [], [{ driver_version: '581.42', nvidia_info: {} }]).cuda13).toBe(
       true
     )
+  })
+  // Windows telemetry, CC 7.5 on CUDA 13.x builds: drivers 581–610 crash at load with "the provided
+  // PTX was compiled with an unsupported toolchain", 616 and later load. CUDA 12.4 stays.
+  it.each([
+    ['581.57', false],
+    ['596.36', false],
+    ['610.47', false],
+    ['615.99', false],
+    ['616.00', true],
+    ['616.07', true],
+    ['621.12', true],
+  ])('Windows Turing (7.5) on driver %s → cuda13=%s, cuda12 kept', (driver, cuda13) => {
+    expect(getSupportedFeatures('windows', [], [nvidia(driver, '7.5')])).toMatchObject({
+      cuda12: true,
+      cuda13,
+    })
+    expect(gpuMeetsCuda13DriverForArch('windows', '7.5', driver)).toBe(cuda13)
+  })
+  it('keeps CUDA 13 for Ampere on an R58x driver and gates nothing on Linux', () => {
+    expect(getSupportedFeatures('windows', [], [nvidia('581.15', '8.6')]).cuda13).toBe(true)
+    expect(getSupportedFeatures('windows', [], [nvidia('581.57', '8.6')]).cuda13).toBe(true)
+    expect(getSupportedFeatures('linux', [], [nvidia('580.65', '7.5')]).cuda13).toBe(true)
+    expect(gpuMeetsCuda13DriverForArch('linux', '7.5', '580.65')).toBe(true)
+    expect(gpuMeetsCuda13DriverForArch('windows', '', '581.57')).toBe(true)
+    expect(gpuMeetsCuda13DriverForArch('windows', undefined, '581.57')).toBe(true)
+    expect(CUDA13_DRIVER_GATED_BELOW_COMPUTE_CAPABILITY).toEqual([8, 0])
+    expect(WINDOWS_PRE_AMPERE_CUDA13_MIN_DRIVER).toBe('616.00')
+  })
+  it('lets one Turing card on an old driver veto CUDA 13 next to an Ampere card', () => {
+    const r = getSupportedFeatures('windows', [], [nvidia('596.36', '8.6'), nvidia('596.36', '7.5')])
+    expect(r).toMatchObject({ cuda12: true, cuda13: false })
+    expect(determineSupportedBackends('windows', 'x86_64', normalizeFeatures(r))).toEqual([
+      'win-cpu-x64',
+      'win-cuda-12.4-x64',
+    ])
   })
   it('lets one old GPU veto CUDA 13 for the whole host', () => {
     const r = getSupportedFeatures('windows', [], [nvidia('581.42', '8.9'), nvidia('581.42', '7.0')])

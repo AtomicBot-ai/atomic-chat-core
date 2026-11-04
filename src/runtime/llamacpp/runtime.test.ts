@@ -10,16 +10,18 @@ import {
   FAKE_LLAMA_SCRIPT,
 } from '../../../test/helpers/fake-llama-server.js'
 import { scriptSpawn } from '../../../test/helpers/script-spawn.js'
+import { CUDA13_TURING_PTX_STDERR } from '../../../test/helpers/llamacpp-load-failures.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { CoreEvents } from '../../contracts/index.js'
-import { AtomicCoreError } from '../../contracts/index.js'
+import { AtomicCoreError, parseLoadDiag } from '../../contracts/index.js'
 import { ProcessJournal } from '../../lock/index.js'
 import { ModelRegistry } from '../../models/index.js'
 import { generateApiKey, hostPid, spawnManaged } from '../shared/index.js'
 import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
+import { formatExitCode } from './errors.js'
 
 /**
  * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
@@ -1300,5 +1302,312 @@ describe('fit on a unified-memory Mac below 16 GiB', () => {
     expect(flag('--fit-target')).toBe('1365')
     // The session still reports fit, so a context overflow is not answered with a reload.
     expect(await runtime.autoIncreaseCtx('small-mac')).toEqual({ ok: false, reason: 'fit' })
+  })
+})
+
+/** A backend that prints `stderr` and exits with `code` before it is ready. */
+const diesWith = (stderr: string, code: number) =>
+  scriptSpawn(`process.stderr.write(${JSON.stringify(stderr)}); process.exit(${code})`)
+
+const diagOf = (error: unknown) => parseLoadDiag((error as AtomicCoreError).details)
+
+describe('the diag line of a failed load', () => {
+  it('ends the details of a failed spawn, after the engine output, with where and on what it stopped', async () => {
+    await data.writeModel('oom')
+    const runtime = await makeRuntime({ spawn: fakeLlamaSpawn({ mode: 'oom' }) })
+    const error = await runtime.load('oom').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'OUT_OF_MEMORY' })
+    const details = (error as AtomicCoreError).details ?? ''
+    expect(details).toMatch(/failed to allocate 4096\.00 MiB/)
+    expect(details.split('\n').at(-1)).toMatch(/^atomic-core-diag \{/)
+    expect(diagOf(error)).toEqual({
+      exit_code: formatExitCode(1, process.platform),
+      stage: 'load',
+      backend: 'macos-arm64',
+      build: 'b6325',
+    })
+    expect((error as AtomicCoreError).diagnostic).toMatchObject({ engineVersion: 'b6325/macos-arm64' })
+  })
+
+  it('says a process that never started stopped at spawn with an empty stderr', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime({
+      ensureBackendReady: async (backend, version) => ({
+        backend,
+        version,
+        exePath: join(data.root, 'no-such-llama-server'),
+      }),
+      spawn: undefined,
+    })
+    const error = await runtime.load('demo').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'IO_ERROR' })
+    expect(diagOf(error)).toEqual({
+      stage: 'spawn',
+      backend: 'macos-arm64',
+      build: 'b6325',
+      empty_stderr: true,
+    })
+  })
+
+  it('says a backend that died before printing anything stopped at spawn', async () => {
+    await data.writeModel('demo')
+    const runtime = await makeRuntime({ spawn: diesWith('', 3) })
+    const error = await runtime.load('demo').catch((e: unknown) => e)
+    expect(diagOf(error)).toEqual({
+      exit_code: formatExitCode(3, process.platform),
+      stage: 'spawn',
+      backend: 'macos-arm64',
+      build: 'b6325',
+      empty_stderr: true,
+    })
+  })
+
+  it('says a backend that loaded its weights and then hung stopped at ready', async () => {
+    await data.writeModel('stuck')
+    const runtime = await makeRuntime({
+      spawn: (spec, opts) =>
+        scriptSpawn("console.error('main: model loaded'); setInterval(() => {}, 1000)")(spec, {
+          ...opts,
+          timeoutMs: 400,
+        }),
+    })
+    const error = await runtime.load('stuck').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'MODEL_LOAD_TIMED_OUT' })
+    expect(diagOf(error)).toEqual({ stage: 'ready', backend: 'macos-arm64', build: 'b6325' })
+  })
+})
+
+describe('a build that cannot run on this machine', () => {
+  const cuda13 = (): RuntimeSettings => ({
+    ...settings(),
+    config: { ...settings().config, version_backend: 'b12019/win-cuda-13.3-x64' },
+  })
+
+  it('loads once more on the next installed build, reports the swap and logs it', async () => {
+    await data.writeModel('demo')
+    const asked: unknown[] = []
+    const logs: string[] = []
+    const argv: string[][] = []
+    const runtime = await makeRuntime({
+      readSettings: async () => cuda13(),
+      spawn: (spec, opts) => {
+        argv.push(spec.args)
+        return argv.length === 1
+          ? diesWith(CUDA13_TURING_PTX_STDERR, 1)(spec, opts)
+          : fakeLlamaSpawn()(spec, opts)
+      },
+      backendFallback: async (failed, reason) => {
+        asked.push({ failed, reason })
+        return { version: 'b12019', backend: 'win-cuda-12.4-x64' }
+      },
+      log: (_level, message) => logs.push(message),
+    })
+
+    const info = await runtime.load('demo')
+
+    expect(info.model_id).toBe('demo')
+    expect(asked).toEqual([
+      { failed: { version: 'b12019', backend: 'win-cuda-13.3-x64' }, reason: 'GPU_BACKEND_INCOMPATIBLE' },
+    ])
+    expect(argv).toHaveLength(2)
+    expect(payloads('backend:runtime-reported')).toMatchObject([
+      {
+        configuredVersionBackend: 'b12019/win-cuda-13.3-x64',
+        effectiveVersionBackend: 'b12019/win-cuda-12.4-x64',
+        mismatch: true,
+      },
+    ])
+    expect(logs).toContainEqual(
+      'b12019/win-cuda-13.3-x64 cannot run llamacpp-upstream/demo on this machine (GPU_BACKEND_INCOMPATIBLE); retrying once on b12019/win-cuda-12.4-x64'
+    )
+    expect(logs).toContainEqual(
+      'llamacpp-upstream/demo loaded on b12019/win-cuda-12.4-x64 after win-cuda-13.3-x64 could not run on this machine'
+    )
+    expect(runtime.gpuOccupancy()).toMatchObject([{ model_id: 'demo', cards: 'all', state: 'ready' }])
+  })
+
+  it('tries one other build only, and ends with its error and the fallback in the diag', async () => {
+    await data.writeModel('demo')
+    let spawned = 0
+    let asked = 0
+    const runtime = await makeRuntime({
+      readSettings: async () => cuda13(),
+      // The fallback build refuses this card as well.
+      spawn: (spec, opts) => {
+        spawned++
+        return diesWith(CUDA13_TURING_PTX_STDERR, 1)(spec, opts)
+      },
+      backendFallback: async () => {
+        asked++
+        return { version: 'b12019', backend: 'win-vulkan-x64' }
+      },
+    })
+
+    const error = await runtime.load('demo').catch((e: unknown) => e)
+
+    expect(spawned).toBe(2)
+    expect(asked).toBe(1)
+    expect(error).toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(diagOf(error)).toEqual({
+      exit_code: formatExitCode(1, process.platform),
+      stage: 'load',
+      backend: 'win-vulkan-x64',
+      build: 'b12019',
+      fallback_from: 'win-cuda-13.3-x64',
+      fallback_to: 'win-vulkan-x64',
+      fallback_ok: false,
+    })
+    expect(runtime.gpuOccupancy()).toEqual([])
+  })
+
+  it('retries a GPU build that died before printing anything, and never a CPU build', async () => {
+    await data.writeModel('demo')
+    const reasons: string[] = []
+    let spawned = 0
+    const vulkan = await makeRuntime({
+      readSettings: async () => ({
+        ...settings(),
+        config: { ...settings().config, version_backend: 'b12019/win-vulkan-x64' },
+      }),
+      spawn: (spec, opts) => (++spawned === 1 ? diesWith('', 3)(spec, opts) : fakeLlamaSpawn()(spec, opts)),
+      backendFallback: async (_failed, reason) => {
+        reasons.push(reason)
+        return { version: 'b12019', backend: 'win-cpu-x64' }
+      },
+    })
+    await vulkan.load('demo')
+    expect(reasons).toEqual(['EMPTY_STDERR_CRASH'])
+    // The CPU fallback holds no GPU.
+    expect(vulkan.gpuOccupancy()).toMatchObject([{ model_id: 'demo', cards: [] }])
+
+    const cpu = await makeRuntime({
+      readSettings: async () => ({
+        ...settings(),
+        config: { ...settings().config, version_backend: 'b12019/win-cpu-x64' },
+      }),
+      spawn: diesWith('', 3),
+      backendFallback: async (_failed, reason) => {
+        reasons.push(reason)
+        return { version: 'b12019', backend: 'win-cpu-x64' }
+      },
+    })
+    await expect(cpu.load('demo')).rejects.toMatchObject({ code: 'LLAMA_CPP_PROCESS_ERROR' })
+    expect(reasons).toEqual(['EMPTY_STDERR_CRASH'])
+  })
+
+  it('keeps the original error when there is nothing to fall back to, the hook fails or the caller named the binary', async () => {
+    await data.writeModel('demo')
+    const logs: string[] = []
+    const nothing = await makeRuntime({
+      readSettings: async () => cuda13(),
+      spawn: diesWith(CUDA13_TURING_PTX_STDERR, 1),
+      backendFallback: async () => undefined,
+    })
+    const error = await nothing.load('demo').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(diagOf(error)).toEqual({
+      exit_code: formatExitCode(1, process.platform),
+      stage: 'load',
+      backend: 'win-cuda-13.3-x64',
+      build: 'b12019',
+    })
+
+    const throwing = await makeRuntime({
+      readSettings: async () => cuda13(),
+      spawn: diesWith(CUDA13_TURING_PTX_STDERR, 1),
+      backendFallback: async () => {
+        throw new Error('disk is read-only')
+      },
+      log: (_level, message) => logs.push(message),
+    })
+    await expect(throwing.load('demo')).rejects.toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(logs).toContainEqual(
+      'backend fallback for llamacpp-upstream/demo failed: Error: disk is read-only'
+    )
+
+    let asked = 0
+    const explicit = await makeRuntime({
+      spawn: diesWith(CUDA13_TURING_PTX_STDERR, 1),
+      backendFallback: async () => {
+        asked++
+        return { version: 'b12019', backend: 'win-cpu-x64' }
+      },
+    })
+    // A real file, so the named binary passes the existence check on every OS.
+    const named = await data.writeBackend('llamacpp-upstream', 'b12019', 'win-cuda-13.3-x64')
+    await expect(
+      explicit.load('demo', { exePath: named, versionBackend: 'b12019/win-cuda-13.3-x64' })
+    ).rejects.toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(asked).toBe(0)
+  })
+
+  it('keeps the original error, with the attempt in its diag, when the fallback cannot be planned', async () => {
+    await data.writeModel('demo')
+    const exePath = await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
+    const logs: string[] = []
+    const runtime = await makeRuntime({
+      readSettings: async () => cuda13(),
+      ensureBackendReady: async (backend, version) => {
+        if (backend === 'win-cuda-12.4-x64') throw new AtomicCoreError('BINARY_NOT_FOUND', 'gone')
+        return { backend, version, exePath }
+      },
+      spawn: diesWith(CUDA13_TURING_PTX_STDERR, 1),
+      backendFallback: async () => ({ version: 'b12019', backend: 'win-cuda-12.4-x64' }),
+      log: (_level, message) => logs.push(message),
+    })
+    const error = await runtime.load('demo').catch((e: unknown) => e)
+    expect(error).toMatchObject({ code: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(diagOf(error)).toMatchObject({
+      backend: 'win-cuda-13.3-x64',
+      fallback_from: 'win-cuda-13.3-x64',
+      fallback_to: 'win-cuda-12.4-x64',
+      fallback_ok: false,
+    })
+    expect(logs).toContainEqual(
+      'could not plan the fallback on b12019/win-cuda-12.4-x64: gone [BINARY_NOT_FOUND]'
+    )
+  })
+
+  it('does not fall back for a load the user cancelled while the fallback was being found', async () => {
+    await data.writeModel('demo')
+    const controller = new AbortController()
+    let spawned = 0
+    const runtime = await makeRuntime({
+      readSettings: async () => cuda13(),
+      spawn: (spec, opts) => {
+        spawned++
+        return diesWith(CUDA13_TURING_PTX_STDERR, 1)(spec, opts)
+      },
+      backendFallback: async () => {
+        controller.abort()
+        return { version: 'b12019', backend: 'win-cpu-x64' }
+      },
+    })
+    await expect(runtime.load('demo', { signal: controller.signal })).rejects.toMatchObject({
+      code: 'MODEL_LOAD_CANCELLED',
+    })
+    expect(spawned).toBe(1)
+  })
+})
+
+describe('reloads core starts itself keep the model settings', () => {
+  it('restarts a poisoned engine with the model fit_ctx it was loaded with', async () => {
+    await data.writeModel('demo')
+    const argv: string[][] = []
+    const spawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      spawn: (spec, opts) => {
+        argv.push(spec.args)
+        return spawn(spec, opts)
+      },
+    })
+    await runtime.load('demo', { overrides: { fit: true, fit_ctx: '16384' } })
+    expect(await runtime.recreateSession('demo')).toMatchObject({ ok: true })
+    expect(argv).toHaveLength(2)
+    for (const args of argv)
+      expect(args.slice(args.indexOf('--fit-ctx'), args.indexOf('--fit-ctx') + 2)).toEqual([
+        '--fit-ctx',
+        '16384',
+      ])
   })
 })

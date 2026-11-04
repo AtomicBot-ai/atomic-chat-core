@@ -1,4 +1,5 @@
-import type { FailureObserver } from '../../contracts/index.js'
+import type { FailureDiagnostic, FailureObserver } from '../../contracts/index.js'
+import { withLoadDiag } from '../../contracts/index.js'
 /**
  * Installing and updating llama.cpp backends (PLAN.md §4, stage 3c).
  *
@@ -28,14 +29,21 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import { samePath } from '../../diffusion/containment.js'
 import type { LocalProviderId } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
-import { validateProxyConfig } from '../../downloads/index.js'
-import type { DownloadItem, Downloader, ProxyConfig } from '../../downloads/index.js'
+import {
+  DOWNLOAD_CANCELLED,
+  diskFaultMessage,
+  heldFileFaultTag,
+  retryTransientFs,
+  validateProxyConfig,
+} from '../../downloads/index.js'
+import type { DownloadItem, Downloader, FsRetryOptions, ProxyConfig } from '../../downloads/index.js'
 import { extractArchive, normalizeBackendLayout } from '../../downloads/index.js'
 import {
   findPrismRelease,
   getBackendArchiveName,
   getCudartArchiveName,
   getCudartDownloadUrl,
+  getCudaToolkitVersion,
   prismArchiveSources,
   prismTagBuild,
   resolveBackendArchiveSource,
@@ -47,12 +55,20 @@ import {
   listInstalledBackendPacks,
   readBundledLlamacppPack,
 } from '../installed/index.js'
-import { scanInstalledBackends } from '../installed/index.js'
+import { missingWindowsCudaRuntimeDlls, scanInstalledBackends } from '../installed/index.js'
 import { llamaServerExeName } from '../../config/index.js'
-import type { InstalledBackendPack, UpstreamManifest } from '../types.js'
+import type { BackendArchiveSource, InstalledBackendPack, UpstreamManifest } from '../types.js'
 import type { OptimalBackendStore, OptimalState, OptimalUpdate } from '../optimal/index.js'
-import { ensureTurboquantCudart, readTurboquantIndexedAsset, turboquantArchiveUrl } from '../turboquant.js'
+import {
+  ensureTurboquantCudart,
+  ensureUpstreamCudart,
+  readTurboquantIndexedAsset,
+  turboquantArchiveUrl,
+  turboquantCudaToolkit,
+} from '../turboquant.js'
 import { parseBackendVersion, parseBinaryVersion, stripBom } from '../version.js'
+import { verifyWindowsBackendBinary } from './windows-launch-check.js'
+import { deliverWindowsCudaRuntime } from './cuda-runtime-source.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -76,6 +92,43 @@ function launchFailure(error: unknown): Error {
     .slice(-3)
     .join(' | ')
   return new Error(`llama-server --version failed (${how})${said ? `: ${said}` : ''}`)
+}
+
+/** The retry policy of the moves an install makes; `platform` decides whether it waits (`fs-retry.ts`). */
+export type InstallMoveRetry = Omit<FsRetryOptions, 'platform'>
+
+/**
+ * A rename or removal of what this install has just written. On Windows it waits while a scanner or
+ * the indexer holds the files (`retryTransientFs`); a failure that outlasts the wait is rethrown as
+ * the downloader renders its disk failures — a plain `Error` whose message carries the disk tag
+ * (`Error: [disk_file_locked] …`, `[disk_permission]`, `[disk_full]`), the shape the app's telemetry
+ * reads — with the fs error as its `cause` and the failure diagnostic attached for the core's reporter.
+ */
+export async function moveWithRetry(
+  op: () => Promise<void>,
+  what: string,
+  platform: NodeJS.Platform,
+  retry: InstallMoveRetry = {}
+): Promise<void> {
+  try {
+    await retryTransientFs(op, { ...retry, platform })
+  } catch (error) {
+    const tag = heldFileFaultTag(error, platform)
+    const message = error instanceof Error ? error.message : String(error)
+    const diagnostic: FailureDiagnostic = {
+      component: 'backend',
+      operation: 'install',
+      stage: 'persist',
+      ...(tag !== 'disk_fs_limit' ? { reason: tag } : {}),
+    }
+    throw Object.defineProperty(
+      new Error(diskFaultMessage(tag, `${what}: ${message}`), { cause: error }),
+      'diagnostic',
+      {
+        value: Object.freeze(diagnostic),
+      }
+    )
+  }
 }
 
 /** Same launch gate as the former macOS extension, run on staging before replacing a working pack. */
@@ -107,7 +160,11 @@ export async function verifyMacBackendBinary(
  * The Linux cudart companion unpacks into its own `cudart-llama-<tag>-bin-…/` directory, outside the
  * `build/bin` the runtime puts on `LD_LIBRARY_PATH`; its libraries are moved there.
  */
-export async function mergeCudartIntoBin(staging: string): Promise<void> {
+export async function mergeCudartIntoBin(
+  staging: string,
+  platform: NodeJS.Platform = process.platform,
+  retry: InstallMoveRetry = {}
+): Promise<void> {
   const bin = join(staging, 'build', 'bin')
   for (const entry of await readdir(staging, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('cudart-')) continue
@@ -115,10 +172,22 @@ export async function mergeCudartIntoBin(staging: string): Promise<void> {
     await mkdir(bin, { recursive: true })
     for (const inner of await readdir(dir)) {
       const to = join(bin, inner)
-      await rm(to, { recursive: true, force: true })
-      await rename(join(dir, inner), to)
+      await moveWithRetry(
+        async () => {
+          await rm(to, { recursive: true, force: true })
+          await rename(join(dir, inner), to)
+        },
+        `Could not move ${inner} into the backend`,
+        platform,
+        retry
+      )
     }
-    await rm(dir, { recursive: true, force: true })
+    await moveWithRetry(
+      () => rm(dir, { recursive: true, force: true }),
+      `Could not remove ${entry.name}`,
+      platform,
+      retry
+    )
   }
 }
 
@@ -168,7 +237,12 @@ export async function verifyPrismBackendBinary(
  * A companion archive (the Windows CUDA runtime) unpacked into `build/bin`, beside `llama-server`:
  * flat, or under one top directory, which is dropped.
  */
-export async function mergeCompanionIntoBin(staging: string, archive: string): Promise<void> {
+export async function mergeCompanionIntoBin(
+  staging: string,
+  archive: string,
+  platform: NodeJS.Platform = process.platform,
+  retry: InstallMoveRetry = {}
+): Promise<void> {
   const scratch = join(staging, '.companion')
   await rm(scratch, { recursive: true, force: true })
   await mkdir(scratch, { recursive: true })
@@ -180,10 +254,40 @@ export async function mergeCompanionIntoBin(staging: string, archive: string): P
   await mkdir(bin, { recursive: true })
   for (const inner of await readdir(from)) {
     const to = join(bin, inner)
-    await rm(to, { recursive: true, force: true })
-    await rename(join(from, inner), to)
+    await moveWithRetry(
+      async () => {
+        await rm(to, { recursive: true, force: true })
+        await rename(join(from, inner), to)
+      },
+      `Could not move ${inner} into the backend`,
+      platform,
+      retry
+    )
   }
-  await rm(scratch, { recursive: true, force: true })
+  await moveWithRetry(
+    () => rm(scratch, { recursive: true, force: true }),
+    'Could not remove the unpacked companion',
+    platform,
+    retry
+  )
+}
+
+/**
+ * Where the CUDA runtime companion of an upstream pack comes from: the signed mirror, against its
+ * hash and size, when the release list lists that asset (the rule `resolveBackendArchiveSource`
+ * applies to the pack itself); otherwise the ggml-org CDN without a checksum, as before.
+ */
+export function companionSource(
+  version: string,
+  name: string,
+  cdnUrl: string,
+  manifest: UpstreamManifest | null | undefined
+): BackendArchiveSource {
+  const tag = stripBom(version)
+  if (!manifest || manifest.tag_name !== tag || !manifest.download_base) return { url: cdnUrl }
+  const asset = (manifest.assets ?? []).find((a) => a.name === name)
+  if (!asset?.sha256 || !asset.size) return { url: cdnUrl }
+  return { url: `${manifest.download_base}/${tag}/${name}`, sha256: asset.sha256, size: asset.size }
 }
 
 /** The server executable inside a pack; the only name `normalizeBackendLayout` looks for. */
@@ -213,6 +317,12 @@ export interface BackendServiceDeps {
   prismCatalog?: Pick<PrismCatalogService, 'catalog'>
   /** Test seam for the PrismML launch gate. */
   verifyPrismBackend?: (staging: string, version: string) => Promise<void>
+  /** Test seam for the Windows launch gate of the upstream and TurboQuant packs. */
+  verifyWindowsBackend?: (staging: string, version: string, backend: string) => Promise<void>
+  /** The environment a model load starts from, for the Windows launch gate; `process.env` by default. */
+  env?: NodeJS.ProcessEnv
+  /** Test seam for the waits of `moveWithRetry`. */
+  moveRetry?: InstallMoveRetry
   /**
    * What runs this provider's packs (change `unify-engine-lifecycle`, task 2.4): the runtime's load
    * queue, and the pack directories its sessions and the decision and embedding models run from.
@@ -227,6 +337,12 @@ export interface BackendServiceDeps {
    */
   onChanged?: (reason: 'install' | 'uninstall') => void
   log?: (message: string) => void
+  /**
+   * The fetch for NVIDIA's CUDA redistributable manifests, by the install's proxy. Absent — the
+   * NVIDIA source is skipped and the CUDA runtime comes from local packs, a host toolkit or the
+   * ggml-org companions only.
+   */
+  cudaRuntimeFetchFor?: (proxy: ProxyConfig | null) => typeof fetch
 }
 
 export interface BackendHost {
@@ -373,6 +489,59 @@ export class BackendService {
    * downloaded again, because the updater screen calls this for every row it offers and a user
    * clicking twice should not re-fetch half a gigabyte.
    */
+  /**
+   * Before a load: make an installed Windows CUDA pack carry its whole CUDA runtime. The provider's
+   * own repair runs first (its companion, as it always did); whatever it could not supply comes from
+   * another pack, a host toolkit, NVIDIA's redistributables or the pinned companions. Rejects when no
+   * source could, which is what makes the load guard pick another pack. PrismML packs are installed
+   * with their runtime and are left alone; other platforms have nothing to do.
+   */
+  async repairCudaRuntime(version: string, backend: string): Promise<void> {
+    const provider = this.deps.provider
+    if (provider === 'atomic-prism') return
+    const platform = this.deps.platform ?? process.platform
+    const backendDir = join(this.deps.layout.provider(provider).backendsDir, version, backend)
+    const taskId = `${provider}-cudart-${version}/${backend}`.replace(/[^A-Za-z0-9_/:-]/g, '_')
+    const deps = {
+      layout: this.deps.layout,
+      downloader: this.deps.downloader,
+      platform,
+      ...(this.deps.log ? { log: this.deps.log } : {}),
+    }
+    await (
+      provider === 'llamacpp'
+        ? ensureTurboquantCudart(backend, backendDir, taskId, deps)
+        : ensureUpstreamCudart(version, backend, backendDir, taskId, deps)
+    ).catch((error: unknown) => {
+      if (error instanceof Error && error.message === DOWNLOAD_CANCELLED) throw error
+      this.deps.log?.(`cudart repair for ${version}/${backend}: ${String(error)}`)
+    })
+    if (platform !== 'win32') return
+    const companionName = getCudartArchiveName(backend, version)
+    const companionUrl = getCudartDownloadUrl(version, backend)
+    const releaseCompanion =
+      provider === 'llamacpp-upstream' && companionName && companionUrl
+        ? companionSource(
+            version,
+            companionName,
+            companionUrl,
+            await this.deps.readManifest(stripBom(version)).catch(() => null)
+          )
+        : null
+    await deliverWindowsCudaRuntime(
+      { provider, version, backend, packDir: backendDir },
+      {
+        layout: this.deps.layout,
+        downloader: this.deps.downloader,
+        taskId,
+        releaseCompanion,
+        ...(this.deps.cudaRuntimeFetchFor ? { fetch: this.deps.cudaRuntimeFetchFor(null) } : {}),
+        ...(this.deps.env ? { env: this.deps.env } : {}),
+        ...(this.deps.log ? { log: this.deps.log } : {}),
+      }
+    )
+  }
+
   async install(
     version: string,
     backend: string,
@@ -399,6 +568,7 @@ export class BackendService {
           : await this.upstreamDownloads(version, backend, staging, options)
     const platform = this.deps.platform ?? process.platform
 
+    const retry = this.deps.moveRetry ?? {}
     await rm(staging, { recursive: true, force: true })
     await mkdir(staging, { recursive: true })
     try {
@@ -410,11 +580,27 @@ export class BackendService {
       // Companions go first: a flat pack (PrismML's Windows CUDA zip) is normalised by moving every
       // entry at the staging root into `build/bin`, the companion archive still waiting there with them.
       for (const companion of plan.companions ?? []) {
-        await mergeCompanionIntoBin(staging, companion)
+        await mergeCompanionIntoBin(staging, companion, platform, retry)
         await rm(companion, { force: true })
       }
       await normalizeBackendLayout(staging, llamaServerExeName(platform))
-      await mergeCudartIntoBin(staging)
+      await mergeCudartIntoBin(staging, platform, retry)
+
+      if (this.deps.provider === 'llamacpp') {
+        // Some fork zips ship without the CUDA runtime. The extension repaired it after installing and
+        // only warned on failure: the pack may still run on a host with a CUDA toolkit. It is repaired
+        // in staging, so the Windows launch gate below sees the pack as a load will.
+        await ensureTurboquantCudart(backend, staging, options.taskId, {
+          layout: this.deps.layout,
+          downloader: this.deps.downloader,
+          ...(this.deps.platform ? { platform: this.deps.platform } : {}),
+          ...(options.proxy ? { proxy: options.proxy } : {}),
+          ...(this.deps.log ? { log: this.deps.log } : {}),
+        }).catch((e: unknown) => {
+          if (e instanceof Error && e.message === DOWNLOAD_CANCELLED) throw e
+          this.deps.log?.(`cudart repair for ${version}/${backend} failed: ${String(e)}`)
+        })
+      }
 
       const verify =
         this.deps.provider === 'atomic-prism'
@@ -430,31 +616,77 @@ export class BackendService {
             `The downloaded ${version}/${backend} backend failed its launch check (${String(error)}). Keeping the current backend.`
           )
         }
+      } else if (platform === 'win32') {
+        // A Windows CUDA pack is only installed with its whole CUDA runtime beside it: without cudart or
+        // cuBLAS, ggml-cuda.dll does not load and the "CUDA" pack quietly runs on the CPU. `--version`
+        // does not load the CUDA backend, so the launch check below cannot see this. What the archive
+        // and its companion did not bring is fetched from the best source this machine has; only when
+        // none can supply it is the install refused.
+        await deliverWindowsCudaRuntime(
+          { provider: this.deps.provider, version, backend, packDir: staging },
+          {
+            layout: this.deps.layout,
+            downloader: this.deps.downloader,
+            taskId: options.taskId,
+            proxy: options.proxy ?? null,
+            ...(this.deps.cudaRuntimeFetchFor
+              ? { fetch: this.deps.cudaRuntimeFetchFor(options.proxy ?? null) }
+              : {}),
+            ...(this.deps.env ? { env: this.deps.env } : {}),
+            ...(this.deps.log ? { log: this.deps.log } : {}),
+          }
+        ).catch((error: unknown) => {
+          if (error instanceof AtomicCoreError && error.code === 'ENGINE_BINARY_BROKEN')
+            throw new AtomicCoreError(
+              error.code,
+              error.message,
+              withLoadDiag(error.details, { stage: 'spawn', backend, build: version })
+            )
+          throw error
+        })
+        const toolkit =
+          this.deps.provider === 'llamacpp' ? turboquantCudaToolkit(backend) : getCudaToolkitVersion(backend)
+        const missing = toolkit
+          ? await missingWindowsCudaRuntimeDlls(join(staging, 'build', 'bin'), toolkit)
+          : []
+        if (missing.length > 0) {
+          throw new AtomicCoreError(
+            'ENGINE_BINARY_BROKEN',
+            `The ${version}/${backend} backend is missing its CUDA runtime (${missing.join(', ')}). Install it again to download the runtime, or pick another backend.`,
+            withLoadDiag(undefined, { stage: 'spawn', backend, build: version })
+          )
+        }
+        // Throws ENGINE_BINARY_BROKEN / CPU_INSTRUCTION_UNSUPPORTED with the load-diag line as is.
+        await (
+          this.deps.verifyWindowsBackend ??
+          ((dir, tag, id) =>
+            verifyWindowsBackendBinary(dir, tag, id, {
+              ...(this.deps.env ? { env: this.deps.env } : {}),
+              ...(this.deps.log ? { log: this.deps.log } : {}),
+            }))
+        )(staging, version, backend)
       }
 
-      await rm(target, { recursive: true, force: true })
-      await mkdir(join(target, '..'), { recursive: true })
-      await rename(staging, target)
+      await moveWithRetry(
+        async () => {
+          await rm(target, { recursive: true, force: true })
+          await mkdir(join(target, '..'), { recursive: true })
+          await rename(staging, target)
+        },
+        `Could not move the new ${version}/${backend} backend into place`,
+        platform,
+        retry
+      )
     } catch (e) {
       this.deps.onFailure?.(e, { component: 'backend', operation: 'install' })
       // Nothing half-installed survives: a partial pack would be picked up by backend selection and
-      // would fail later as a model that will not load.
-      await rm(staging, { recursive: true, force: true })
+      // would fail later as a model that will not load. A staging directory Windows still holds is
+      // left to the next install (which clears it first) rather than hiding why this one failed.
+      await retryTransientFs(() => rm(staging, { recursive: true, force: true }), {
+        ...retry,
+        platform,
+      }).catch((cleanup: unknown) => this.deps.log?.(`could not remove ${staging}: ${String(cleanup)}`))
       throw e
-    }
-
-    if (this.deps.provider === 'llamacpp') {
-      // Some fork zips ship without the CUDA runtime. The extension repaired it after installing and
-      // only warned on failure: the pack may still run on a host with a CUDA toolkit.
-      await ensureTurboquantCudart(backend, target, options.taskId, {
-        layout: this.deps.layout,
-        downloader: this.deps.downloader,
-        ...(this.deps.platform ? { platform: this.deps.platform } : {}),
-        ...(options.proxy ? { proxy: options.proxy } : {}),
-        ...(this.deps.log ? { log: this.deps.log } : {}),
-      }).catch((e: unknown) =>
-        this.deps.log?.(`cudart repair for ${version}/${backend} failed: ${String(e)}`)
-      )
     }
 
     if (options.operation === undefined) this.deps.onChanged?.('install')
@@ -491,7 +723,14 @@ export class BackendService {
     ]
     const archives = [archivePath]
     if (cudartName && cudartUrl) {
-      items.push({ url: cudartUrl, save_path: join(staging, cudartName), ...proxy })
+      const companion = companionSource(version, cudartName, cudartUrl, manifest)
+      items.push({
+        url: companion.url,
+        save_path: join(staging, cudartName),
+        ...(companion.sha256 ? { sha256: companion.sha256 } : {}),
+        ...(companion.size ? { size: companion.size } : {}),
+        ...proxy,
+      })
       archives.push(join(staging, cudartName))
     }
     return { items, archives }

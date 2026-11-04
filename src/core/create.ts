@@ -67,13 +67,12 @@ import {
 import {
   BackendAdvisor,
   BackendService,
+  CudaRuntimeGuard,
   PrismCatalogService,
   TurboquantCatalogService,
   UpstreamReleasesCatalogService,
   upstreamManifestForTag,
-  ensureBackend,
-  ensureTurboquantCudart,
-  ensureUpstreamCudart,
+  llamaBackendFallback,
   OptimalBackendStore,
   readRuntimeSettings,
   resolveBackendExe,
@@ -258,6 +257,9 @@ export async function createAtomicCore(
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
       ['atomic-prism', new ModelRegistry(layout, 'atomic-prism')],
     ])
+    // A Windows CUDA pack whose CUDA runtime could not be repaired leaves backend selection for this
+    // run instead of dying at load with an empty stderr (`backend/install/cuda-guard.ts`).
+    const cudaGuard = new CudaRuntimeGuard({ platform, env, log })
     // The three llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
     const llamacppRuntime = (provider: LlamacppProviderId) =>
@@ -268,35 +270,28 @@ export async function createAtomicCore(
         provider,
         journal,
         emit: (name, payload) => emitter.emit(name, payload),
-        readSettings: () => readRuntimeSettings(settings, provider, layout, hardware),
+        readSettings: () =>
+          readRuntimeSettings(settings, provider, layout, cudaGuard.facts(provider, hardware)),
         ensureBackendReady: (backend, version) =>
-          ensureBackend(
+          cudaGuard.ensureBackend(
             layout,
             provider,
             backend,
             version,
             hardware,
             process.arch,
-            (repairBackend, repairVersion) => {
-              const backendDir = join(layout.provider(provider).backendsDir, repairVersion, repairBackend)
-              const taskId = `${provider}-cudart-${repairVersion}/${repairBackend}`.replace(
-                /[^A-Za-z0-9_/:-]/g,
-                '_'
-              )
-              const deps = { layout, downloader, platform, log: (message: string) => log('warn', message) }
-              // A PrismML pack is installed with its CUDA runtime in place; there is nothing to repair.
-              if (provider === 'atomic-prism') return Promise.resolve()
-              const repair =
-                provider === 'llamacpp'
-                  ? ensureTurboquantCudart(repairBackend, backendDir, taskId, deps)
-                  : ensureUpstreamCudart(repairVersion, repairBackend, backendDir, taskId, deps)
-              return repair.then(
-                () => {},
-                (e: unknown) =>
-                  log('warn', `cudart pre-flight for ${repairVersion}/${repairBackend} failed: ${String(e)}`)
-              )
-            }
+            // The provider's own companion first, then whatever source can supply the rest of the
+            // runtime; a rejection is what makes the guard pick another pack.
+            (repairBackend, repairVersion) =>
+              backendService(provider).repairCudaRuntime(repairVersion, repairBackend)
           ),
+        // A GPU build this card or driver cannot run (CUDA 13 on Turing before R616, a pack Windows
+        // cannot load) is remembered and the load is retried once on the next installed build.
+        backendFallback: (failed, reason) =>
+          llamaBackendFallback(layout, provider, hardware, failed, reason, {
+            hostArch: process.arch,
+            log: (message) => log('warn', message),
+          }),
         cpuInfo: async () => {
           // Unknown flags stay `undefined`: the no-AVX preflight fires on a positive signal only.
           const facts = await hardware.facts()
@@ -678,6 +673,7 @@ export async function createAtomicCore(
         optimalStore,
         prismCatalog,
         resourcesDir: options.resourcesDir,
+        log: (message) => log('warn', message),
         // An install or removal by any route; an update and an activation report themselves.
         onChanged: (reason) =>
           emitter.emit('engine:changed', { engine: provider as LlamacppProviderId, reason }),
@@ -698,6 +694,7 @@ export async function createAtomicCore(
         },
         readManifest: async (tag, proxy) =>
           upstreamManifestForTag((await upstreamCatalog.catalog({ proxy: proxy ?? null })).catalog, tag),
+        cudaRuntimeFetchFor: (proxy) => fetchFor(proxy),
       })
       backendServices.set(provider, created)
       return created

@@ -132,6 +132,13 @@ export interface SystemInfo {
 /** Where the facts came from: the core's own probe, or an injected override that replaces it. */
 export type HardwareSource = 'probe' | 'override'
 
+/**
+ * Which enumeration produced the probe's GPU list on Windows: the PowerShell CIM + registry run, the
+ * `reg.exe` read of the display class key when PowerShell could not run or CIM answered nothing,
+ * `nvidia-smi` alone when neither answered, or `none`.
+ */
+export type HardwareGpuSource = 'powershell' | 'registry' | 'nvidia-smi' | 'none'
+
 /** Body of `GET /hardware/info` and `POST /hardware/refresh`. */
 export interface HardwareInfoResponse {
   info: SystemInfo
@@ -140,4 +147,6 @@ export interface HardwareInfoResponse {
   probed_at: number
   /** What the probe could not read, one line each; empty when everything answered. */
   warnings: string[]
+  /** Windows only, and only while `source` is `probe`: where the GPU list came from. Additive. */
+  gpu_source?: HardwareGpuSource
 }

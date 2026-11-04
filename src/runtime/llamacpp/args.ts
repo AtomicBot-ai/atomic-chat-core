@@ -421,7 +421,9 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   } else {
     if (cfg.ctx_size > 0 && !cfg.fit) push('--ctx-size', String(cfg.ctx_size))
     else if (cfg.fit && !ik && input.fitCtxCeiling !== undefined && input.fitCtxCeiling > 0)
-      push('--ctx-size', String(input.fitCtxCeiling))
+      // Never below the floor fit is given: `--ctx-size` ends fit's search, so a ceiling under a raised
+      // `fit_ctx` (how the app grows a model's window under fit) would make raising it do nothing.
+      push('--ctx-size', String(Math.max(Math.floor(input.fitCtxCeiling), fitCtxTokens(cfg.fit_ctx))))
     if (cfg.n_predict > 0) push('--n-predict', String(cfg.n_predict))
     // The thinking budget: llama.cpp applies it to requests that set none, and only to templates with
     // a thinking end tag (`tools/server/server-common.cpp:1517-1531`). -1 (or absent) leaves thinking
@@ -469,7 +471,8 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   if (!ik) {
     push('--fit', cfg.fit ? 'on' : 'off')
     if (cfg.fit) {
-      if (cfg.fit_ctx !== '' && cfg.fit_ctx !== '4096') push('--fit-ctx', cfg.fit_ctx)
+      const fitCtx = fitCtxText(cfg.fit_ctx)
+      if (fitCtx !== '' && fitCtx !== '4096') push('--fit-ctx', fitCtx)
       if (cfg.fit_target !== '' && cfg.fit_target !== '1024') push('--fit-target', cfg.fit_target)
     }
   }
@@ -492,6 +495,30 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   }
 
   return { argv, warnings, version, backend }
+}
+
+/**
+ * The `fit_ctx` a load runs with: the model's own value when it is a window — a positive whole number
+ * of tokens, as a number or as its text — otherwise the provider's. The app grows the window under
+ * fit by reloading a model with its own `fit_ctx`; an empty, absent or unusable model value must not
+ * wipe the provider's.
+ */
+export function resolveFitCtx(providerValue: unknown, modelValue: unknown): string {
+  const model = fitCtxTokens(modelValue)
+  return model > 0 ? String(model) : fitCtxText(providerValue)
+}
+
+/** `fit_ctx` in tokens: a positive whole number, or 0 when it names no window. */
+export function fitCtxTokens(value: unknown): number {
+  const text = fitCtxText(value)
+  const tokens = /^\d+$/.test(text) ? Number(text) : 0
+  return Number.isSafeInteger(tokens) && tokens > 0 ? tokens : 0
+}
+
+/** `fit_ctx` as llama-server takes it: a number in its decimal text, a string trimmed, anything else `''`. */
+export function fitCtxText(value: unknown): string {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? String(Math.floor(value)) : ''
+  return typeof value === 'string' ? value.trim() : ''
 }
 
 /** Convenience: argv only. */

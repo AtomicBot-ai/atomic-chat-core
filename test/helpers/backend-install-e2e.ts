@@ -1,5 +1,6 @@
 /** An isolated HTTPS mirror behind a CONNECT proxy for compiled-binary backend-install tests. */
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createHttpsServer } from 'node:https'
@@ -50,10 +51,11 @@ export async function startBackendInstallFixture(
   const exe = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'
   const archive =
     process.platform === 'win32'
-      ? storedZip(`build/bin/${exe}`, Buffer.from('fixture backend'))
+      ? storedZip(`build/bin/${exe}`, await windowsFixtureExe())
       : await createTar(folder, exe)
   const companionName = 'cudart-llama-bin-win-cuda-13.3-x64.zip'
-  const companion = storedZip('build/bin/cudart.dll', Buffer.from('fixture CUDA runtime'))
+  // The whole Windows CUDA runtime: a pack is only installed with cudart and both cuBLAS DLLs.
+  const companion = cudaRuntimeZip(13, 'build/bin/')
   const sha256 = createHash('sha256').update(archive).digest('hex')
   const manifest = Buffer.from(
     JSON.stringify({
@@ -169,6 +171,16 @@ export async function startBackendInstallFixture(
   }
 }
 
+/**
+ * A real Windows executable that answers `--version` with exit code 0, for the install's Windows
+ * launch gate: System32's `curl.exe` (in every Windows 10 1803+ and Server 2019+, importing system
+ * DLLs only, so it runs from any folder), else the Node running the tests.
+ */
+async function windowsFixtureExe(): Promise<Buffer> {
+  const curl = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'curl.exe')
+  return readFile(existsSync(curl) ? curl : process.execPath)
+}
+
 async function createTar(folder: string, exe: string): Promise<Buffer> {
   const dir = join(folder, 'archive-source')
   await mkdir(join(dir, 'build', 'bin'), { recursive: true })
@@ -218,6 +230,40 @@ export function storedZip(filename: string, content: Buffer): Buffer {
   end.writeUInt32LE(central.length + name.length, 12)
   end.writeUInt32LE(local.length + name.length + content.length, 16)
   return Buffer.concat([local, name, content, central, name, end])
+}
+
+/** A stored (uncompressed) zip with several files, built from single-file `storedZip` archives. */
+export function storedZipFiles(files: ReadonlyArray<readonly [string, Buffer]>): Buffer {
+  const locals: Buffer[] = []
+  const centrals: Buffer[] = []
+  let offset = 0
+  for (const [filename, content] of files) {
+    const one = storedZip(filename, content)
+    const nameLength = Buffer.byteLength(filename)
+    const localLength = 30 + nameLength + content.length
+    const central = Buffer.from(one.subarray(localLength, localLength + 46 + nameLength))
+    central.writeUInt32LE(offset, 42)
+    locals.push(one.subarray(0, localLength))
+    centrals.push(central)
+    offset += localLength
+  }
+  const centralSize = centrals.reduce((sum, c) => sum + c.length, 0)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0)
+  end.writeUInt16LE(files.length, 8)
+  end.writeUInt16LE(files.length, 10)
+  end.writeUInt32LE(centralSize, 12)
+  end.writeUInt32LE(offset, 16)
+  return Buffer.concat([...locals, ...centrals, end])
+}
+
+/** The DLLs of a Windows CUDA runtime companion for a CUDA major, as a zip under `prefix`. */
+export function cudaRuntimeZip(major: 12 | 13, prefix = 'bin/'): Buffer {
+  return storedZipFiles(
+    [`cudart64_${major}.dll`, `cublas64_${major}.dll`, `cublasLt64_${major}.dll`].map(
+      (name) => [`${prefix}${name}`, Buffer.from('dll')] as const
+    )
+  )
 }
 
 function listen(server: ReturnType<typeof createHttpServer> | ReturnType<typeof createHttpsServer>) {

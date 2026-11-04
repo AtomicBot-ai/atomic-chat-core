@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
@@ -105,4 +105,21 @@ describe('normalizeBackendLayout', () => {
       /was not found at expected path/
     )
   })
+  // A read-only build/bin refuses the move as a held directory would on Windows (where it is retried).
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'tags a move that fails with the disk cause',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-held-'))
+      await writeFile(join(dir, 'llama-server'), 'x')
+      await mkdir(join(dir, 'build/bin'), { recursive: true })
+      await chmod(join(dir, 'build/bin'), 0o555)
+      try {
+        await expect(normalizeBackendLayout(dir, 'llama-server')).rejects.toThrow(
+          /^Error: \[disk_permission\] Failed to move backend entry .*llama-server -> /
+        )
+      } finally {
+        await chmod(join(dir, 'build/bin'), 0o755)
+      }
+    }
+  )
 })

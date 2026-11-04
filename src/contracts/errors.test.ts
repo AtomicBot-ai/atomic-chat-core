@@ -21,7 +21,7 @@ describe('AtomicCoreError', () => {
     expect(err.details).toBe('d')
   })
 
-  it('keeps the six disk tags the app telemetry parses', () => {
+  it('keeps the seven disk tags the app telemetry parses', () => {
     expect([...DISK_ERROR_TAGS]).toEqual([
       'disk_full',
       'disk_permission',
@@ -29,6 +29,7 @@ describe('AtomicCoreError', () => {
       'disk_path_too_long',
       'disk_device_lost',
       'disk_io',
+      'disk_fs_limit',
     ])
   })
 

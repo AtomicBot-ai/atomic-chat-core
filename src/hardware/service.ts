@@ -6,9 +6,15 @@
  * is still starting; the first caller that needs the facts (`facts()`, a backend load, `info()`)
  * waits for that probe, and every later one reads the answer. Nothing is persisted, for the reasons
  * `override.ts` gives: hardware changes between runs.
+ *
+ * An answer the probe marks `degraded` (it threw, or on Windows PowerShell failed and nothing made up
+ * for it) is not kept for the core's lifetime: the first request after `DEGRADED_RETRY_MS` probes
+ * again, the wait doubling with each degraded answer in a row up to `DEGRADED_RETRY_MAX_MS`, so a
+ * PowerShell that is blocked for good costs one more try now and then, not one per request.
  */
 
 import type {
+  HardwareGpuSource,
   HardwareInfoResponse,
   HardwareOverride,
   HardwareOverrideInput,
@@ -19,6 +25,11 @@ import { factsOf, osTypeOf, rustArch, systemInfoWithOverride } from './facts.js'
 import type { HardwareFacts, HardwareFactsSource } from './facts.js'
 import { HardwareOverrideStore } from './override.js'
 import type { HardwareProbeResult } from './probe-common.js'
+
+/** The first wait before a degraded answer is probed again. */
+export const DEGRADED_RETRY_MS = 60_000
+/** The longest wait between probes while every answer comes back degraded. */
+export const DEGRADED_RETRY_MAX_MS = 15 * 60_000
 
 export interface HardwareServiceOptions {
   /** Measure the machine. Expected not to throw; when it does, the answer is cpu/os/memory only. */
@@ -44,6 +55,9 @@ interface Probed {
   info: SystemInfo
   warnings: string[]
   probedAt: number
+  gpuSource?: HardwareGpuSource
+  /** Set on a degraded answer: from then on a request probes again. */
+  retryAt?: number
 }
 
 export class HardwareService implements HardwareFactsSource, HardwareControlSurface {
@@ -54,6 +68,8 @@ export class HardwareService implements HardwareFactsSource, HardwareControlSurf
   private readonly override: HardwareOverrideStore
   private inFlight: Promise<Probed> | undefined
   private last: Probed | undefined
+  /** Degraded answers in a row; the wait before the next try doubles with each. */
+  private degradedRun = 0
 
   constructor(private readonly options: HardwareServiceOptions) {
     this.arch = rustArch(options.arch)
@@ -107,7 +123,8 @@ export class HardwareService implements HardwareFactsSource, HardwareControlSurf
   }
 
   private current(): Promise<Probed> {
-    if (this.last) return Promise.resolve(this.last)
+    const last = this.last
+    if (last && (last.retryAt === undefined || this.now() < last.retryAt)) return Promise.resolve(last)
     return this.inFlight ?? this.run()
   }
 
@@ -116,18 +133,30 @@ export class HardwareService implements HardwareFactsSource, HardwareControlSurf
     const attempt = this.options
       .probe()
       .then(
-        (result) => ({ info: result.info, warnings: [...result.warnings], probedAt: started }),
-        (error: unknown) => {
+        (result): Probed & { degraded: boolean } => ({
+          info: result.info,
+          warnings: [...result.warnings],
+          probedAt: started,
+          ...(result.gpuSource ? { gpuSource: result.gpuSource } : {}),
+          degraded: result.degraded === true,
+        }),
+        (error: unknown): Probed & { degraded: boolean } => {
           const message = error instanceof Error ? error.message : String(error)
           this.log('warn', `hardware probe failed: ${message}`)
           return {
             info: this.minimalInfo(),
             warnings: [`hardware probe failed: ${message}`],
             probedAt: started,
+            degraded: true,
           }
         }
       )
-      .then((probed) => {
+      .then(({ degraded, ...probed }) => {
+        if (degraded) {
+          this.degradedRun += 1
+          const wait = Math.min(DEGRADED_RETRY_MAX_MS, DEGRADED_RETRY_MS * 2 ** (this.degradedRun - 1))
+          probed.retryAt = this.now() + wait
+        } else this.degradedRun = 0
         this.last = probed
         for (const warning of probed.warnings) this.log('info', `hardware probe: ${warning}`)
         return probed
@@ -146,6 +175,7 @@ export class HardwareService implements HardwareFactsSource, HardwareControlSurf
       source: override ? 'override' : 'probe',
       probed_at: probed.probedAt,
       warnings: [...probed.warnings],
+      ...(!override && probed.gpuSource ? { gpu_source: probed.gpuSource } : {}),
     }
   }
 

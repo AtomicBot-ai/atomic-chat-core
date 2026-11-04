@@ -11,11 +11,13 @@
  */
 
 import type { DiskErrorTag } from '../contracts/index.js'
+import { isTransientFsError } from './fs-retry.js'
 
 const CODE_TO_TAG: Record<string, DiskErrorTag> = {
   ENOSPC: 'disk_full',
   EDQUOT: 'disk_full',
-  EFBIG: 'disk_full',
+  // "File too large": the volume's own size limit for one file (FAT32's 4 GiB), not a full disk.
+  EFBIG: 'disk_fs_limit',
   EACCES: 'disk_permission',
   EPERM: 'disk_permission',
   EROFS: 'disk_permission',
@@ -40,6 +42,39 @@ export function classifyIoError(error: unknown): DiskErrorTag {
 export function diskErrToString(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return `Error: [${classifyIoError(error)}] ${message}`
+}
+
+/** The largest file a FAT/FAT32 volume can hold: 4 GiB minus one byte. */
+export const FAT32_MAX_FILE_BYTES = 2 ** 32 - 1
+
+/**
+ * The tag of a failed write of `length` bytes at `offset`. FAT32 refuses exactly the write that takes
+ * a file past 4 GiB − 1, and Windows words that refusal as a full disk (or an error libuv has no name
+ * for): a write that crosses that line and fails as anything but a permission or a lock is the
+ * volume's file-size limit. Every other failed write is tagged as `classifyIoError` tags it.
+ */
+export function writeFaultTag(error: unknown, offset: number, length: number): DiskErrorTag {
+  const tag = classifyIoError(error)
+  const crosses = offset <= FAT32_MAX_FILE_BYTES && offset + length > FAT32_MAX_FILE_BYTES
+  return crosses && (tag === 'disk_full' || tag === 'disk_io' || tag === 'disk_fs_limit')
+    ? 'disk_fs_limit'
+    : tag
+}
+
+/** `diskErrToString` for a failed write, with the FAT32 rule of `writeFaultTag`. */
+export function diskWriteErrToString(error: unknown, offset: number, length: number): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return `Error: [${writeFaultTag(error, offset, length)}] ${message}`
+}
+
+/**
+ * The tag of a rename or removal that still failed after `retryTransientFs` waited. On Windows a
+ * denial on a directory this process has just written is a handle someone else holds (antivirus,
+ * the indexer, a server running from the old copy), not a missing permission: the process could
+ * write there a moment ago. Elsewhere, and for every other code, `classifyIoError` decides.
+ */
+export function heldFileFaultTag(error: unknown, platform: NodeJS.Platform | string): DiskErrorTag {
+  return platform === 'win32' && isTransientFsError(error) ? 'disk_file_locked' : classifyIoError(error)
 }
 
 /** Same shape for a preflight refusal that has no fs error behind it. */

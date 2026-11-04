@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SystemInfo } from '../contracts/index.js'
 import type { HardwareProbeResult } from './probe-common.js'
-import { HardwareService } from './service.js'
+import { DEGRADED_RETRY_MAX_MS, DEGRADED_RETRY_MS, HardwareService } from './service.js'
 
 const probed: SystemInfo = {
   cpu: {
@@ -227,5 +227,56 @@ describe('HardwareService', () => {
       }),
     })
     expect((await blank.service.facts()).arch).toBe('x86_64')
+  })
+  it('probes a degraded answer again after a doubling wait, and keeps a good one for the run', async () => {
+    const answers: HardwareProbeResult[] = [
+      { info: { ...structuredClone(probed), gpus: [] }, warnings: ['powershell: blocked'], degraded: true },
+      { info: { ...structuredClone(probed), gpus: [] }, warnings: ['powershell: blocked'], degraded: true },
+      { info: structuredClone(probed), warnings: [], gpuSource: 'powershell' },
+    ]
+    let probes = 0
+    const h = harness({
+      probe: async () => answers[Math.min(probes++, answers.length - 1)] as HardwareProbeResult,
+    })
+    expect((await h.service.facts()).gpus).toEqual([])
+    h.clock.now += DEGRADED_RETRY_MS - 1
+    expect((await h.service.facts()).gpus).toEqual([])
+    expect(probes).toBe(1)
+    h.clock.now += 1
+    expect((await h.service.facts()).gpus).toEqual([])
+    expect(probes).toBe(2)
+    // The second degraded answer in a row waits twice as long.
+    h.clock.now += 2 * DEGRADED_RETRY_MS - 1
+    await h.service.info()
+    expect(probes).toBe(2)
+    h.clock.now += 1
+    const recovered = await h.service.info()
+    expect(probes).toBe(3)
+    expect(recovered).toMatchObject({ gpu_source: 'powershell', warnings: [] })
+    expect(recovered.info.gpus).toHaveLength(1)
+    h.clock.now += 10 * DEGRADED_RETRY_MAX_MS
+    await h.service.facts()
+    expect(probes).toBe(3)
+  })
+
+  it('caps the wait between degraded probes, retries a probe that threw, and omits gpu_source under an override', async () => {
+    let probes = 0
+    const h = harness({
+      probe: async () => {
+        probes += 1
+        if (probes === 1) throw new Error('powershell on fire')
+        return { info: structuredClone(probed), warnings: [], gpuSource: 'registry', degraded: true }
+      },
+    })
+    await h.service.info()
+    h.clock.now += DEGRADED_RETRY_MS
+    expect(await h.service.info()).toMatchObject({ gpu_source: 'registry' })
+    for (let i = 0; i < 6; i++) {
+      h.clock.now += DEGRADED_RETRY_MAX_MS
+      await h.service.info()
+    }
+    expect(probes).toBe(8)
+    h.service.setOverride({ gpus: [] })
+    expect((await h.service.info()).gpu_source).toBeUndefined()
   })
 })

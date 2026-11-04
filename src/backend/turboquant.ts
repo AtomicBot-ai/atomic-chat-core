@@ -22,11 +22,11 @@ import type { DataLayout } from '../config/index.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { Downloader, ProxyConfig } from '../downloads/index.js'
 import { extractArchive } from '../downloads/index.js'
-import { cudaRuntimeLibName, isCudaInstalled } from './installed/index.js'
+import { cudaRuntimeLibName, isCudaInstalled, missingWindowsCudaRuntimeDlls } from './installed/index.js'
 import { getCudartArchiveName, getCudartDownloadUrl, getCudaToolkitVersion } from './catalog/index.js'
 import type { BackendFeatures, BackendVersion, GpuProbeInfo, SupportedFeatures } from './types.js'
 import { compareVersions, parseBackendVersion, parseRustU32, stripBom } from './version.js'
-import { gpuMeetsCuda13ArchFloor, isAmdGpu } from './select/index.js'
+import { gpuMeetsCuda13ArchFloor, gpuMeetsCuda13DriverForArch, isAmdGpu } from './select/index.js'
 
 export const TURBOQUANT_DOWNLOAD_BASE =
   'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download'
@@ -37,6 +37,20 @@ export const TURBOQUANT_RELEASE_INDEX_CACHE_FILE = 'release-index.cache.json'
 export const GGML_ORG_CUDART_DOWNLOAD_BASE = 'https://github.com/ggml-org/llama.cpp/releases/download'
 /** The ggml-org tag that ships `cudart-llama-bin-win-cuda-{12.4,13.3}-x64.zip` (a real pin, see the extension). */
 export const GGML_ORG_CUDART_PINNED_TAG = 'b10205'
+/**
+ * GitHub's digests and sizes of the pinned companions, so a TurboQuant repair is verified like an
+ * upstream install whose release list names the asset. Read from the b10205 release assets.
+ */
+export const GGML_ORG_CUDART_PINNED_ASSETS: Readonly<Record<string, { sha256: string; size: number }>> = {
+  'cudart-llama-bin-win-cuda-12.4-x64.zip': {
+    sha256: '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6',
+    size: 391_443_627,
+  },
+  'cudart-llama-bin-win-cuda-13.3-x64.zip': {
+    sha256: '1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e',
+    size: 390_970_417,
+  },
+}
 
 /**
  * A GPU below this many MiB keeps the CPU build ahead of Vulkan and ROCm (the extension's
@@ -254,6 +268,8 @@ export function getTurboquantSupportedFeatures(
       if (compareVersions(driver, floors.cuda12) >= 0) features.cuda12 = true
       if (compareVersions(driver, floors.cuda13) >= 0) features.cuda13 = true
       if (!gpuMeetsCuda13ArchFloor(gpu.nvidia_info.compute_capability)) allNvidiaMeetCuda13Arch = false
+      if (!gpuMeetsCuda13DriverForArch(osType, gpu.nvidia_info.compute_capability, driver))
+        allNvidiaMeetCuda13Arch = false
     }
     if (gpu.vulkan_info) features.vulkan = true
   }
@@ -548,7 +564,8 @@ export async function ensureUpstreamCudart(
       rename,
     },
   })
-  if (present) return 'present'
+  // cudart alone is not enough: ggml-cuda.dll also imports cuBLAS, and a pack without it runs on the CPU.
+  if (present && (await missingWindowsCudaRuntimeDlls(bin, toolkit)).length === 0) return 'present'
 
   const tmp = deps.layout.provider('llamacpp-upstream').tmpDir
   const archive = join(tmp, name)
@@ -574,9 +591,12 @@ export async function ensureUpstreamCudart(
         }
       }
     }
-    const lib = cudaRuntimeLibName('windows', toolkit)
-    if (!copied || !lib || !(await exists(join(bin, lib)))) {
-      throw new AtomicCoreError('IO_ERROR', `cudart archive for ${backend} did not contain ${lib}`)
+    const missing = await missingWindowsCudaRuntimeDlls(bin, toolkit)
+    if (!copied || missing.length > 0) {
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `cudart archive for ${backend} did not contain ${missing.join(', ') || 'any DLL'}`
+      )
     }
     return 'downloaded'
   } finally {
@@ -607,7 +627,7 @@ export async function ensureTurboquantCudart(
   const lib = toolkit ? cudaRuntimeLibName('windows', toolkit) : null
   if (!toolkit || !url || !archiveName || !lib) return 'not-needed'
   const bin = join(backendDir, 'build', 'bin')
-  if (await exists(join(bin, lib))) return 'present'
+  if ((await missingWindowsCudaRuntimeDlls(bin, toolkit)).length === 0) return 'present'
   await mkdir(bin, { recursive: true })
 
   const donor = await findUpstreamCudaDonor(deps.layout, toolkit)
@@ -616,7 +636,7 @@ export async function ensureTurboquantCudart(
       deps.log?.(`copy-from-upstream cudart for ${backend} failed, will download: ${String(e)}`)
       return 0
     })
-    if (copied > 0 && (await exists(join(bin, lib)))) return 'copied'
+    if (copied > 0 && (await missingWindowsCudaRuntimeDlls(bin, toolkit)).length === 0) return 'copied'
   }
 
   const tmp = deps.layout.provider('llamacpp').tmpDir
@@ -624,8 +644,16 @@ export async function ensureTurboquantCudart(
   const extractDir = join(tmp, `cudart-${backend}-${toolkit}`)
   await mkdir(tmp, { recursive: true })
   try {
+    const pinned = GGML_ORG_CUDART_PINNED_ASSETS[archiveName]
     await deps.downloader.download(taskId, [
-      { url, save_path: archive, ...(deps.proxy ? { proxy: deps.proxy } : {}) },
+      {
+        url,
+        save_path: archive,
+        ...(pinned && url === turboquantCudartUrl(backend)
+          ? { sha256: pinned.sha256, size: pinned.size }
+          : {}),
+        ...(deps.proxy ? { proxy: deps.proxy } : {}),
+      },
     ])
     await mkdir(extractDir, { recursive: true })
     await extractArchive(archive, extractDir)
@@ -643,6 +671,12 @@ export async function ensureTurboquantCudart(
       }
     }
     if (moved === 0) throw new AtomicCoreError('IO_ERROR', `cudart archive for ${backend} contained no DLLs`)
+    const missing = await missingWindowsCudaRuntimeDlls(bin, toolkit)
+    if (missing.length > 0)
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        `cudart archive for ${backend} did not contain ${missing.join(', ')}`
+      )
     return 'downloaded'
   } finally {
     await rm(archive, { force: true }).catch(() => {})

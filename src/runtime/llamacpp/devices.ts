@@ -63,6 +63,29 @@ export function parseDeviceLine(rawLine: string): DeviceInfo | undefined {
   return { id, name, mem: total, free }
 }
 
+/**
+ * A `--device` value checked against what the build lists: the names it has (llama.cpp matches them
+ * case-insensitively, `ggml_backend_dev_by_name`) and `none` are kept in the order given, every other
+ * name is dropped. llama-server exits on a name it does not have ("use --list-devices to see a list of
+ * available devices"), which is what a value copied from a CUDA build does on a Vulkan or ROCm one.
+ * `device` is `''` when nothing is left: llama.cpp then picks its devices itself.
+ */
+export function validateDeviceList(
+  requested: string,
+  devices: readonly DeviceInfo[]
+): { device: string; dropped: string[] } {
+  const known = new Set(devices.map((d) => d.id.toLowerCase()))
+  const kept: string[] = []
+  const dropped: string[] = []
+  for (const raw of String(requested).split(',')) {
+    const name = raw.trim()
+    if (name === '') continue
+    if (name.toLowerCase() === 'none' || known.has(name.toLowerCase())) kept.push(name)
+    else dropped.push(name)
+  }
+  return { device: kept.join(','), dropped }
+}
+
 /** Throws `DEVICE_LIST_PARSE_FAILED` (details = the whole output) when the header is missing. */
 export function parseDeviceOutput(output: string): DeviceInfo[] {
   const devices: DeviceInfo[] = []

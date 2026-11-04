@@ -62,23 +62,19 @@ export function discoverCudaPaths(e: CudaProbeEnv): CudaPaths {
   const libs = new Set<string>()
   const bins = new Set<string>()
   if (e.platform === 'win32') {
-    const cudaPath = e.env['CUDA_PATH']
-    if (cudaPath) {
-      const bin = `${cudaPath}\\bin`
-      if (e.exists(bin)) bins.add(bin)
+    // CUDA 13 moved the toolkit's DLLs from `bin` to `bin\x64`; `bin` alone would put a folder with
+    // no runtime on PATH and report a toolkit that cannot serve the pack.
+    const addRoot = (root: string) => {
+      for (const bin of [`${root}\\bin\\x64`, `${root}\\bin`]) if (e.exists(bin)) bins.add(bin)
     }
+    const cudaPath = e.env['CUDA_PATH']
+    if (cudaPath) addRoot(cudaPath)
     for (const [key, value] of Object.entries(e.env)) {
-      if (key.startsWith('CUDA_PATH_V') && value) {
-        const bin = `${value}\\bin`
-        if (e.exists(bin)) bins.add(bin)
-      }
+      if (key.startsWith('CUDA_PATH_V') && value) addRoot(value)
     }
     const programFiles = e.env['ProgramFiles'] ?? 'C:\\Program Files'
     const toolkit = `${programFiles}\\NVIDIA GPU Computing Toolkit\\CUDA`
-    for (const name of e.listDir(toolkit)) {
-      const bin = `${toolkit}\\${name}\\bin`
-      if (e.exists(bin)) bins.add(bin)
-    }
+    for (const name of e.listDir(toolkit)) addRoot(`${toolkit}\\${name}`)
   } else if (e.platform === 'linux') {
     const home = e.env['CUDA_HOME'] ?? e.env['CUDA_PATH']
     if (home) {

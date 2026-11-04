@@ -44,6 +44,7 @@ export const FAILURE_REASONS = [
   'disk_permission',
   'disk_file_locked',
   'disk_path_too_long',
+  'disk_fs_limit',
   'disk_device_lost',
   'disk_io',
   'network',

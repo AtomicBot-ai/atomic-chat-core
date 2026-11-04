@@ -6,6 +6,8 @@ import {
   backendExePathCandidates,
   backendTypeEquivalents,
   cudaRuntimeLibName,
+  missingWindowsCudaRuntimeDlls,
+  windowsCudaRuntimeDlls,
   deletableBackendPack,
   findCompatibleInstalledBackend,
   getBackendDir,
@@ -226,6 +228,38 @@ describe('mergeBackendOptions (app backend.test.ts)', () => {
         ],
       ])
     ).toEqual([{ value: 'b10344/win-cpu-x64', name: 'bom' }])
+  })
+})
+
+describe('windowsCudaRuntimeDlls / missingWindowsCudaRuntimeDlls', () => {
+  it('names cudart and both cuBLAS DLLs per CUDA major, nothing for another major', () => {
+    expect(windowsCudaRuntimeDlls('12.4')).toEqual([
+      'cudart64_12.dll',
+      'cublas64_12.dll',
+      'cublasLt64_12.dll',
+    ])
+    expect(windowsCudaRuntimeDlls('13.3')).toEqual([
+      'cudart64_13.dll',
+      'cublas64_13.dll',
+      'cublasLt64_13.dll',
+    ])
+    expect(windowsCudaRuntimeDlls('11.7')).toEqual([
+      'cudart64_110.dll',
+      'cublas64_11.dll',
+      'cublasLt64_11.dll',
+    ])
+    expect(windowsCudaRuntimeDlls('10.2')).toBeNull()
+  })
+
+  it('compares case-insensitively and misses everything in a missing directory', async () => {
+    const list = async () => ['CUDART64_13.DLL', 'cublas64_13.dll', 'ggml-cuda.dll']
+    expect(await missingWindowsCudaRuntimeDlls('bin', '13.3', list)).toEqual(['cublasLt64_13.dll'])
+    expect(await missingWindowsCudaRuntimeDlls('bin', '9.0', list)).toEqual([])
+    expect(await missingWindowsCudaRuntimeDlls('/no/such/dir', '12.4')).toEqual([
+      'cudart64_12.dll',
+      'cublas64_12.dll',
+      'cublasLt64_12.dll',
+    ])
   })
 })
 
