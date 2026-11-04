@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
@@ -160,11 +160,20 @@ describe('InstanceLock.acquire', () => {
         instanceLock: join(data.layout.core.dir, 'l'.repeat(260)),
       },
     }
+    const nativeAcquireErr = (await open(tooLongLayout.core.instanceLock, 'wx')
+      .then((handle) => handle.close())
+      .catch((e: unknown) => e)) as NodeJS.ErrnoException
+    expect(nativeAcquireErr).toBeInstanceOf(Error)
     const acquireErr = (await InstanceLock.acquire(tooLongLayout).catch((e: unknown) => e)) as AtomicCoreError
     expect(acquireErr).toBeInstanceOf(AtomicCoreError)
     expect(acquireErr.code).toBe('IO_ERROR')
     expect(acquireErr.cause).toBeInstanceOf(Error)
-    expect((acquireErr.cause as NodeJS.ErrnoException).code).toBe('ENAMETOOLONG')
+    expect(acquireErr.cause).toMatchObject({
+      code: nativeAcquireErr.code,
+      message: nativeAcquireErr.message,
+      path: nativeAcquireErr.path,
+      syscall: nativeAcquireErr.syscall,
+    })
     expect(acquireErr.toJSON()).toEqual({
       code: 'IO_ERROR',
       message: `Cannot create the instance lock at ${tooLongLayout.core.instanceLock}`,
@@ -175,9 +184,9 @@ describe('InstanceLock.acquire', () => {
       component: 'core',
       operation: 'startup',
       category: 'operational',
-      reason: 'disk_path_too_long',
+      reason: classifyFailure(nativeAcquireErr, { component: 'core', operation: 'startup' }).reason,
     })
-    expect(diagnosticTags(acquireErr, diagnostic).cause_code).toBe('ENAMETOOLONG')
+    expect(diagnosticTags(acquireErr, diagnostic).cause_code).toBe(nativeAcquireErr.code)
 
     // 2. readLockRecord failing with a non-ENOENT error (EISDIR on a directory).
     await mkdir(data.layout.core.dir, { recursive: true })
@@ -210,12 +219,21 @@ describe('InstanceLock.acquire', () => {
         instanceLock: borderlineLock,
       },
     }
+    const nativeTakeoverErr = (await open(`${borderlineLock}.takeover`, 'wx')
+      .then((handle) => handle.close())
+      .catch((e: unknown) => e)) as NodeJS.ErrnoException
+    expect(nativeTakeoverErr).toBeInstanceOf(Error)
     const takeoverErr = (await InstanceLock.acquire(takeoverLayout).catch(
       (e: unknown) => e
     )) as AtomicCoreError
     expect(takeoverErr).toBeInstanceOf(AtomicCoreError)
     expect(takeoverErr.code).toBe('IO_ERROR')
-    expect((takeoverErr.cause as NodeJS.ErrnoException).code).toBe('ENAMETOOLONG')
+    expect(takeoverErr.cause).toMatchObject({
+      code: nativeTakeoverErr.code,
+      message: nativeTakeoverErr.message,
+      path: nativeTakeoverErr.path,
+      syscall: nativeTakeoverErr.syscall,
+    })
   })
 })
 

@@ -10,3 +10,5 @@ title: "Await download write streams and settle multi-file transfers"
 - **Consequences:** callers that clean up a staging directory after `Downloader.download` rejects no longer race with background `WriteStream` opens or open file descriptors, and any filesystem open failure is surfaced as a standard `Error: [disk_*]` rejection instead of an uncaught exception. Public contracts, progress events and retry semantics are unchanged.
 - **Owner:** `team`.
 - **Links:** `src/downloads/downloader.ts`, `src/downloads/downloader.test.ts`.
+
+The regression coverage also retains the early-cancellation and asynchronous open-error cases from PR #73. One implementation covers both the macOS staging cleanup and Windows companion-download failures.
