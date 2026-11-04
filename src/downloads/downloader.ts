@@ -92,6 +92,65 @@ interface Task {
   progress?: DownloadProgress
 }
 
+interface OpenWriteStream {
+  write(chunk: Uint8Array): Promise<void>
+  close(): Promise<void>
+}
+
+/**
+ * Open a `.tmp` write stream with an error listener attached before `open` settles on the threadpool,
+ * and resolve `close()` only once the underlying file descriptor has closed.
+ */
+async function openWriteStream(
+  path: string,
+  flags: 'a' | 'w',
+  disk: (e: unknown) => Error
+): Promise<OpenWriteStream> {
+  const writer = createWriteStream(path, { flags })
+  let streamError: unknown
+  writer.on('error', (err) => {
+    streamError ??= err
+  })
+  await new Promise<void>((ok, fail) => {
+    const onOpen = () => {
+      writer.off('error', onError)
+      ok()
+    }
+    const onError = (err: Error) => {
+      writer.off('open', onOpen)
+      fail(disk(err))
+    }
+    writer.once('open', onOpen)
+    writer.once('error', onError)
+  })
+  let closing: Promise<void> | undefined
+  const close = (): Promise<void> => {
+    if (closing) return closing
+    closing = new Promise<void>((ok, fail) => {
+      const finish = () => (streamError ? fail(disk(streamError)) : ok())
+      if (writer.closed) return finish()
+      writer.once('close', finish)
+      if (!writer.destroyed) {
+        writer.end((err?: Error | null) => {
+          if (err) streamError ??= err
+        })
+      }
+    })
+    return closing
+  }
+  const write = (chunk: Uint8Array): Promise<void> =>
+    new Promise<void>((ok, fail) => {
+      if (streamError) return fail(disk(streamError))
+      writer.write(chunk, (err) => {
+        if (err) {
+          streamError ??= err
+          fail(disk(err))
+        } else ok()
+      })
+    })
+  return { write, close }
+}
+
 export async function defaultAvailableSpace(path: string): Promise<number | undefined> {
   let probe = path
   for (;;) {
@@ -282,18 +341,31 @@ export class Downloader {
       this.deps.emit('download:progress', current)
     }
 
-    const results = await Promise.all(
+    const batch = new AbortController()
+    const batchSignal = AbortSignal.any([signal, batch.signal])
+    let firstError: unknown
+    let failed = false
+    const settled = await Promise.allSettled(
       items.map((item, i) =>
         this.downloadOne(item, savePaths[i] as string, `${taskId}-${i}`, sizes.get(item.url) ?? 0, {
           headers,
           resume,
-          signal,
+          signal: batchSignal,
           progress,
           emitProgress,
           reportStage,
+        }).catch((error: unknown) => {
+          if (!failed) {
+            failed = true
+            firstError = error
+            batch.abort()
+          }
+          throw error
         })
       )
     )
+    if (failed) throw firstError
+    const results = settled.map((outcome) => (outcome as PromiseFulfilledResult<string>).value)
 
     if (items.some((it) => it.sha256 != null || it.size != null)) {
       const modelId =
@@ -535,13 +607,14 @@ export class Downloader {
       )
     }
 
-    let writer = createWriteStream(tmpPath, { flags: shouldResume ? 'a' : 'w' })
-    const write = (chunk: Uint8Array) =>
-      new Promise<void>((ok, fail) => {
-        writer.write(chunk, (e) => (e ? fail(disk(e)) : ok()))
-      })
-    const close = () =>
-      new Promise<void>((ok, fail) => writer.end((e?: Error | null) => (e ? fail(disk(e)) : ok())))
+    if (signal.aborted) {
+      await res.body?.cancel().catch(() => {})
+      throw new Error(DOWNLOAD_CANCELLED)
+    }
+    let writer = await openWriteStream(tmpPath, shouldResume ? 'a' : 'w', disk).catch(async (e) => {
+      await res.body?.cancel().catch(() => {})
+      throw e
+    })
 
     let body = res.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })
     let reader = body.getReader()
@@ -549,109 +622,131 @@ export class Downloader {
     let retryCount = 0
     let sinceReset = 0
 
-    for (;;) {
-      let streamError: string | undefined
-      try {
-        const { done, value } = await reader.read()
-        if (done) {
-          if (expectedSize > 0 && totalTransferred < expectedSize) {
-            streamError = `stream ended after ${totalTransferred} of ${expectedSize} bytes`
-          } else break
-        } else if (value) {
-          if (signal.aborted) {
-            await close().catch(() => {})
-            this.deps.log('info', `Download cancelled: ${item.url}`)
-            throw new Error(DOWNLOAD_CANCELLED)
-          }
-          await write(value)
-          delta += value.byteLength
-          totalTransferred += value.byteLength
-          sinceReset += value.byteLength
-          if (sinceReset >= RETRY_RESET_PROGRESS_BYTES) {
-            retryCount = 0
-            sinceReset = 0
-          }
-          if (delta >= PROGRESS_EMIT_INTERVAL_BYTES) {
-            progress.set(fileId, totalTransferred)
-            emitProgress()
-            delta = 0
-          }
-        }
-      } catch (e) {
-        if ((e as Error).message === DOWNLOAD_CANCELLED || (e as Error).message.startsWith('Error: ['))
-          throw e
-        if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
-        streamError = (e as Error).message
-      }
-      if (streamError === undefined) continue
-
-      await close().catch((e) => {
-        throw new Error(
-          `${(e as Error).message} (failed to flush partial download before retrying '${item.url}')`
-        )
-      })
-      const durable = (
-        await stat(tmpPath).catch((e) => {
-          throw disk(e)
-        })
-      ).size
-      if (durable !== totalTransferred) {
-        throw new Error(
-          `Partial download size mismatch for '${item.url}': tracked ${totalTransferred} bytes but persisted ${durable} bytes`
-        )
-      }
+    try {
       for (;;) {
-        if (retryCount >= MAX_STREAM_RETRIES) {
-          throw new Error(
-            `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`,
-            { cause: streamError }
-          )
-        }
-        if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
-        this.deps.log(
-          'warn',
-          `Stream error at byte ${durable} for '${item.url}': ${streamError}. Retry ${retryCount + 1}/${MAX_STREAM_RETRIES}`
-        )
-        await this.deps.sleep(retryDelayMs(retryCount, this.deps.retryBaseMs), signal)
-        retryCount++
+        let streamError: string | undefined
         try {
-          res = await this.request(fetchImpl, item, headers, durable, expectedSize, signal)
-          writer = createWriteStream(tmpPath, { flags: 'a' })
-          break
-        } catch (e) {
-          if (e instanceof DownloadRequestError && e.kind === 'restart') {
-            try {
-              res = await this.request(fetchImpl, item, headers, 0, expectedSize, signal)
-              writer = createWriteStream(tmpPath, { flags: 'w' })
-              progress.set(fileId, 0)
-              totalTransferred = 0
-              delta = 0
+          const { done, value } = await reader.read()
+          if (done) {
+            if (expectedSize > 0 && totalTransferred < expectedSize) {
+              streamError = `stream ended after ${totalTransferred} of ${expectedSize} bytes`
+            } else break
+          } else if (value) {
+            if (signal.aborted) {
+              await writer.close().catch(() => {})
+              this.deps.log('info', `Download cancelled: ${item.url}`)
+              throw new Error(DOWNLOAD_CANCELLED)
+            }
+            await writer.write(value)
+            delta += value.byteLength
+            totalTransferred += value.byteLength
+            sinceReset += value.byteLength
+            if (sinceReset >= RETRY_RESET_PROGRESS_BYTES) {
+              retryCount = 0
               sinceReset = 0
-              this.deps.log(
-                'warn',
-                `Server cannot resume '${item.url}' (${e.message}); restarted from byte 0`
-              )
-              break
-            } catch (e2) {
-              if (e2 instanceof DownloadRequestError && e2.kind === 'retryable') {
-                this.deps.log('warn', `Full-download reconnect for '${item.url}' failed: ${e2.message}`)
-                continue
-              }
-              throw rethrowAsString(e2)
+            }
+            if (delta >= PROGRESS_EMIT_INTERVAL_BYTES) {
+              progress.set(fileId, totalTransferred)
+              emitProgress()
+              delta = 0
             }
           }
-          if (e instanceof DownloadRequestError && e.kind === 'retryable') {
-            this.deps.log('warn', `Range reconnect at byte ${durable} for '${item.url}' failed: ${e.message}`)
-            continue
-          }
-          throw rethrowAsString(e)
+        } catch (e) {
+          if ((e as Error).message === DOWNLOAD_CANCELLED || (e as Error).message.startsWith('Error: ['))
+            throw e
+          if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
+          streamError = (e as Error).message
         }
-      }
-      body = res.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })
-      reader = body.getReader()
-    }
+        if (streamError === undefined) continue
 
-    await close()
+        await writer.close().catch((e) => {
+          throw new Error(
+            `${(e as Error).message} (failed to flush partial download before retrying '${item.url}')`
+          )
+        })
+        const durable = (
+          await stat(tmpPath).catch((e) => {
+            throw disk(e)
+          })
+        ).size
+        if (durable !== totalTransferred) {
+          throw new Error(
+            `Partial download size mismatch for '${item.url}': tracked ${totalTransferred} bytes but persisted ${durable} bytes`
+          )
+        }
+        for (;;) {
+          if (retryCount >= MAX_STREAM_RETRIES) {
+            throw new Error(
+              `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`,
+              { cause: streamError }
+            )
+          }
+          if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
+          this.deps.log(
+            'warn',
+            `Stream error at byte ${durable} for '${item.url}': ${streamError}. Retry ${retryCount + 1}/${MAX_STREAM_RETRIES}`
+          )
+          await this.deps.sleep(retryDelayMs(retryCount, this.deps.retryBaseMs), signal)
+          retryCount++
+          try {
+            res = await this.request(fetchImpl, item, headers, durable, expectedSize, signal)
+            if (signal.aborted) {
+              await res.body?.cancel().catch(() => {})
+              throw new Error(DOWNLOAD_CANCELLED)
+            }
+            writer = await openWriteStream(tmpPath, 'a', disk).catch(async (e) => {
+              await res.body?.cancel().catch(() => {})
+              throw e
+            })
+            break
+          } catch (e) {
+            if (e instanceof DownloadRequestError && e.kind === 'restart') {
+              try {
+                res = await this.request(fetchImpl, item, headers, 0, expectedSize, signal)
+                if (signal.aborted) {
+                  await res.body?.cancel().catch(() => {})
+                  throw new Error(DOWNLOAD_CANCELLED)
+                }
+                writer = await openWriteStream(tmpPath, 'w', disk).catch(async (e2) => {
+                  await res.body?.cancel().catch(() => {})
+                  throw e2
+                })
+                progress.set(fileId, 0)
+                totalTransferred = 0
+                delta = 0
+                sinceReset = 0
+                this.deps.log(
+                  'warn',
+                  `Server cannot resume '${item.url}' (${e.message}); restarted from byte 0`
+                )
+                break
+              } catch (e2) {
+                if (e2 instanceof DownloadRequestError && e2.kind === 'retryable') {
+                  this.deps.log('warn', `Full-download reconnect for '${item.url}' failed: ${e2.message}`)
+                  continue
+                }
+                throw rethrowAsString(e2)
+              }
+            }
+            if (e instanceof DownloadRequestError && e.kind === 'retryable') {
+              this.deps.log(
+                'warn',
+                `Range reconnect at byte ${durable} for '${item.url}' failed: ${e.message}`
+              )
+              continue
+            }
+            throw rethrowAsString(e)
+          }
+        }
+        body = res.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() })
+        reader = body.getReader()
+      }
+
+      await writer.close()
+    } finally {
+      await writer.close().catch(() => {})
+      await reader.cancel().catch(() => {})
+    }
     const persisted = (
       await stat(tmpPath).catch((e) => {
         throw disk(e)
