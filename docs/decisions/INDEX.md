@@ -13,6 +13,7 @@ add a new one that says which record it supersedes.
 
 - **2026-11-02** — [Classify tensor-layout mismatches without claiming corruption](2026-11-02-tensor-layout-error.md) — "wrong number of tensors" is `MODEL_ARCH_NOT_SUPPORTED` on upstream llama.cpp too; truncation, invalid magic and EOF stay corrupt.
 
+- [2026-11-03 — Serve coding agents with their window, bounded output and two shared-KV slots](2026-11-03-serve-coding-agents-with-their-window-and-bounded-output.md)
 - [2026-11-02 — Wait for audio lifecycle cleanup and reject superseded jobs](2026-11-02-wait-for-audio-lifecycle-cleanup.md)
 
 - **2026-10-29** — [Serve /v1/audio/speech from the loaded audio model through the job runner](2026-10-29-serve-v1-audio-speech-from-the-loaded-audio-model.md) — answered by the core, not forwarded: OpenAI body (`input` ≤ 4096, `voice`, `speed`, `instructions`, `response_format` wav/pcm) → a speech job via `AudioService.speechBackend()`, clip bytes + `X-Atomic-*` headers; a hang-up cancels; music/effects model → `model_not_loaded`, other `model` → 404; no OpenAI name aliases yet; not in `/openapi.json` until the app's iteration.
@@ -165,3 +166,6 @@ add a new one that says which record it supersedes.
 - **2026-09-15** — [Serialize owner lifecycle and preserve serve flags](2026-09-15-serialize-owner-lifecycle-and-preserve-serve-flags.md)
 
 - **2026-11-01** — [Read HF metadata at an immutable model revision](2026-11-01-pin-model-download-plans.md).
+- [Strip a leading UTF-8 BOM when reading settings.json](2026-11-03-strip-utf8-bom-when-reading-settings-json.md)
+- **2026-11-03** — [Keep failure diagnostics outside the wire contract](2026-11-03-keep-failure-diagnostics-outside-the-wire-contract.md).
+- [Preserve filesystem cause on instance lock IO_ERRORs](2026-11-03-preserve-filesystem-cause-on-instance-lock-io-errors.md)

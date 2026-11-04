@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../../contracts/index.js'
 /**
  * How the owner builds the managed-runtime service, and what the control API sees of it.
  *
@@ -159,6 +160,8 @@ export function environmentAvailability(
 }
 
 export interface WireManagedRuntimesOptions {
+  onFailure?: FailureObserver
+
   env: DataFolderEnv
   instanceId: string
   platform: NodeJS.Platform
@@ -385,6 +388,7 @@ export function wireManagedRuntimes(options: WireManagedRuntimesOptions): Manage
   const operations = new Map<string, EnvironmentOperation>()
 
   const service = new EnvironmentService({
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     store,
     environmentId: DEFAULT_ENVIRONMENT_ID,
     instanceId: options.instanceId,

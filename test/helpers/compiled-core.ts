@@ -75,6 +75,13 @@ export const runCliAsync = (dataFolder: string, args: string[]) =>
   })
 
 /**
+ * How long a daemon may take to print its ready line. A cold start on a Windows CI runner (Windows
+ * arm64 above all) spends 10-15 s in the PowerShell hardware probe and has gone past 20 s on a slow
+ * runner; elsewhere it is a second or two.
+ */
+const READY_TIMEOUT_MS = process.platform === 'win32' ? 45_000 : 20_000
+
+/**
  * Start `daemon` and wait for the ready line it prints on stdout. The child is added to `daemons`.
  * `stderr` returns everything the daemon has written there so far, from its first line on.
  */
@@ -106,7 +113,10 @@ export async function startDaemon(
       }
     })
     child.once('exit', (code) => reject(new Error(`daemon exited with ${code}\n${stderr}`)))
-    setTimeout(() => reject(new Error(`no ready line in 20s\n${stderr}`)), 20_000).unref()
+    setTimeout(
+      () => reject(new Error(`no ready line in ${READY_TIMEOUT_MS / 1000}s\n${stderr}`)),
+      READY_TIMEOUT_MS
+    ).unref()
   })
   return { ready, child, stderr: () => stderr }
 }

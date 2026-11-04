@@ -22,7 +22,26 @@ describe('configureMimo', () => {
     await configureMimo(agentInput(home.fs))
     const tree = await home.tree()
     expect(Object.keys(tree)).toEqual([PATH])
-    expect(JSON.parse(tree[PATH] ?? '')['$schema']).toBe('https://mimo.xiaomi.com/config.json')
+    expect(JSON.parse(tree[PATH] ?? '')['$schema']).toBe('https://mimo.xiaomi.com/mimocode/config.json')
+  })
+
+  it("corrects the $schema an earlier release wrote, and keeps anyone else's", async () => {
+    home = await makeAgentHome()
+    await home.seed(PATH, '{"$schema": "https://mimo.xiaomi.com/config.json"}')
+    await configureMimo(agentInput(home.fs))
+    expect(JSON.parse((await home.read(PATH)) ?? '')['$schema']).toBe(
+      'https://mimo.xiaomi.com/mimocode/config.json'
+    )
+    await home.seed(PATH, '{"$schema": "https://example.com/mine.json"}')
+    await configureMimo(agentInput(home.fs))
+    expect(JSON.parse((await home.read(PATH)) ?? '')['$schema']).toBe('https://example.com/mine.json')
+  })
+
+  it('writes under an absolute $MIMOCODE_HOME and ignores a relative one', async () => {
+    home = await makeAgentHome()
+    await configureMimo(agentInput(home.fs, { env: { MIMOCODE_HOME: `${home.path}/mh` } }))
+    await configureMimo(agentInput(home.fs, { env: { MIMOCODE_HOME: 'relative' } }))
+    expect(Object.keys(await home.tree())).toEqual([PATH, 'mh/config/mimocode.json'])
   })
 
   it("produces OpenCode's file field for field — only the path and $schema differ", async () => {
@@ -38,11 +57,11 @@ describe('configureMimo', () => {
     expect(mimo).toEqual(opencode)
   })
 
-  it('refuses comments — this file is strict JSON', async () => {
+  it('reads comments and trailing commas as MiMo does', async () => {
     home = await makeAgentHome()
     await home.seed(PATH, '{ "theme": "nord", } // trailing\n')
-    await expect(configureMimo(agentInput(home.fs))).rejects.toThrow(/Failed to parse/)
-    expect(await home.tree()).toEqual({ [PATH]: '{ "theme": "nord", } // trailing\n' })
+    await configureMimo(agentInput(home.fs))
+    expect(JSON.parse((await home.read(PATH)) ?? '').theme).toBe('nord')
   })
 
   it('rejects a config whose root is not an object', async () => {

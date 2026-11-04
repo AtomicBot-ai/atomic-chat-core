@@ -365,9 +365,10 @@ describe.skipIf(!existsSync(core.BIN) || process.platform === 'win32')('the vllm
     expect(containersOf('vllm')[0]?.gpus).toBe(`device=${SECOND_GPU}`)
   })
 
-  it('Невалидная настройка: zero concurrent requests refuses the load with INVALID_ARGUMENT before any container', async () => {
+  it('Невалидная настройка: negative concurrent requests refuse the load with INVALID_ARGUMENT before any container', async () => {
     const { ready } = await start()
-    const res = await post(ready, '/models/vllm/qwen3/load', { overrides: { max_num_seqs: 0 } })
+    // 0 is the automatic count (auto-limits.ts); below it is refused.
+    const res = await post(ready, '/models/vllm/qwen3/load', { overrides: { max_num_seqs: -1 } })
     expect(await res.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
     expect(dockerState().calls).not.toContain('create')
   })

@@ -10,6 +10,7 @@
  * it to decide whether to offer a larger context or a smaller model.
  */
 
+import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/generation-limits.js'
 import { isJsonObject, serdeToString } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
 
@@ -22,11 +23,16 @@ import type { JsonValue } from '../shims/index.js'
 const LLAMA_CONTEXT_OVERFLOW = /request \(\d+ tokens\) exceeds the available context size/i
 export const LLAMA_CONTEXT_OVERFLOW_TYPE = 'exceed_context_size_error'
 
+/** A specific engine refusal suitable for excluding an oversized prompt from error reporting. */
+export function isLlamaContextOverflow(body: string): boolean {
+  return LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE
+}
+
 /** A request that no longer fits the loaded context window, as llama.cpp and MLX word it. */
 export function isContextLimitError(status: number, body: string): boolean {
   if (![400, 413, 500, 503].includes(status)) return false
   const b = body.toLowerCase()
-  if (LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE) return true
+  if (isLlamaContextOverflow(body)) return true
   // Older builds' wording.
   if (b.includes('the request exceeds the available context size')) return true
   if (b.includes('max_kv_size') || b.includes('max-kv-size') || b.includes('max kv size')) return true
@@ -141,6 +147,42 @@ function errorTypeOf(body: string): string | undefined {
   return typeof type === 'string' ? type : undefined
 }
 
+/** The prompt size and window of a llama.cpp context overflow, from its fields or its message. */
+function llamaOverflowSizes(body: string): { prompt: number; window: number } | undefined {
+  const parsed = parseJson(body)
+  const error = isJsonObject(parsed) ? parsed['error'] : undefined
+  if (isJsonObject(error)) {
+    const prompt = asU64(error['n_prompt_tokens'])
+    const window = asU64(error['n_ctx'])
+    if (prompt !== undefined && window !== undefined && window > 0) return { prompt, window }
+  }
+  const message = isJsonObject(error) && typeof error['message'] === 'string' ? error['message'] : body
+  const sizes =
+    /request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)/i.exec(message) ??
+    /input \((\d+) tokens\) is larger than the max context size \((\d+) tokens\)/i.exec(message)
+  return sizes ? { prompt: Number(sizes[1]), window: Number(sizes[2]) } : undefined
+}
+
+/**
+ * A llama.cpp context overflow as the Anthropic API words one: a 400 `invalid_request_error` whose
+ * message is exactly `prompt is too long: N tokens > M maximum`. Claude Code matches that wording to
+ * compact the conversation and retry; any other text it shows as a failed turn. `undefined` for any
+ * other error, or an overflow that does not say both sizes.
+ */
+export function anthropicPromptTooLong(status: number, body: string): string | undefined {
+  if (status !== 400) return undefined
+  if (!isLlamaContextOverflow(body)) return undefined
+  const sizes = llamaOverflowSizes(body)
+  if (sizes === undefined) return undefined
+  return serdeToString({
+    type: 'error',
+    error: {
+      type: 'invalid_request_error',
+      message: `prompt is too long: ${sizes.prompt} tokens > ${sizes.window} maximum`,
+    },
+  })
+}
+
 function isStructuredErrorBody(body: string): boolean {
   const parsed = parseJson(body)
   return isJsonObject(parsed) && isJsonObject(parsed['error'])
@@ -175,18 +217,29 @@ export function clientMaxTokens(requestBody: Buffer): number | undefined {
 
 /**
  * A 200 whose `finish_reason` is `length` because the context window ran out rather than because
- * the client capped the output. With no client cap, `length` can only mean the window. With a cap,
- * only a stop clearly short of it counts; an unknown token count is taken as client-driven, so a
- * `max_tokens: 16` health check never grows the context.
+ * an output cap was reached. The cap is the client's `max_tokens` or, without one, the engine's own:
+ * core starts llama.cpp with `--n-predict` (DEFAULT_N_PREDICT unless the user set another,
+ * `engineCap`), so a `length` with no client cap is no longer always the window. Either way only a
+ * stop clearly short of the cap counts. An unknown token count is taken as client-driven under a
+ * client cap, so a `max_tokens: 16` health check never grows the context, and as the window under
+ * the engine's alone, as before. `engineCap` `null` (an engine started without a cap) keeps the
+ * old rule: with no client cap, `length` can only mean the window.
  */
-export function isContextOverflowFinishLength(response: JsonValue, requestBody: Buffer): boolean {
+export function isContextOverflowFinishLength(
+  response: JsonValue,
+  requestBody: Buffer,
+  engineCap: number | null = DEFAULT_N_PREDICT
+): boolean {
   const choices = isJsonObject(response) ? response['choices'] : undefined
   const hasLength =
     Array.isArray(choices) && choices.some((c) => isJsonObject(c) && c['finish_reason'] === 'length')
   if (!hasLength) return false
-  const cap = clientMaxTokens(requestBody)
-  if (cap === undefined) return true
+  const clientCap = clientMaxTokens(requestBody)
+  const cap = clientCap ?? engineCap
+  if (cap === null) return true
   const usage = isJsonObject(response) ? response['usage'] : undefined
   const done = asU64(isJsonObject(usage) ? usage['completion_tokens'] : undefined)
-  return done !== undefined && done + 1 < cap
+  // Without a count, only the client's own cap is a known reason; the engine's is not proven.
+  if (done === undefined) return clientCap === undefined
+  return done + 1 < cap
 }

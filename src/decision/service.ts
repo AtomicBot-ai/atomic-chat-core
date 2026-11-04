@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * The decision module's surface: one decision `llama-server` at most (the fork's `--decision`, or
  * stock llama.cpp for an upstream decision GGUF), its lifecycle, and the calls the rest of the core
@@ -92,6 +93,8 @@ export interface DecisionCallOptions {
 }
 
 export interface DecisionServiceDeps {
+  onFailure?: FailureObserver
+
   /** The core's data folder: relative model and spec paths are resolved against it. */
   dataFolder: string
   readSettings: () => DecisionSettings
@@ -604,6 +607,11 @@ export class DecisionService {
     } catch (error) {
       const body = errorOf(error)
       if (body.code === 'DECISION_UNAVAILABLE') throw error
+      this.deps.onFailure?.(error, {
+        component: 'decision',
+        operation: mode === 'restart' ? 'restart' : 'load',
+        ...(engine?.version_backend ? { engineVersion: engine.version_backend } : {}),
+      })
       if (mode === 'restart') {
         this.onRestartFailed(body)
         throw error
@@ -667,6 +675,13 @@ export class DecisionService {
       message: `The decision model exited unexpectedly with ${describeExit(exit)}.`,
       ...(tail ? { details: tail } : {}),
     }
+    this.deps.onFailure?.(new AtomicCoreError('DECISION_UNAVAILABLE', error.message, error.details), {
+      component: 'decision',
+      operation: 'exit',
+      reason: 'process_exit',
+      exitCode: exit.code,
+      signal: exit.signal,
+    })
     this.deps.log('warn', error.message)
     this.deps.emit('decision:error', error)
     const restarts = nextRestartCount(this.state.restarts, this.now() - this.readySince)
@@ -769,12 +784,27 @@ export class DecisionService {
           timeoutMs: options.timeoutMs ?? settings.timeout_ms,
           ...(options.signal ? { signal: options.signal } : {}),
         })
+        if (answer.status >= 500)
+          this.deps.onFailure?.(new Error('Decision inference failed'), {
+            component: 'decision',
+            operation: 'inference',
+            reason: 'upstream',
+            category: 'operational',
+          })
         return outcomeFromAnswer(answer.status, answer.text, elapsed(), check)
       } finally {
         this.inFlight--
         this.armIdle()
       }
     } catch (error) {
+      if (!(error instanceof DecisionAbortedError))
+        this.deps.onFailure?.(error, {
+          component: 'decision',
+          operation: 'inference',
+          ...(error instanceof DecisionTimeoutError
+            ? ({ category: 'operational', reason: 'timeout' } as const)
+            : {}),
+        })
       if (error instanceof DecisionTimeoutError)
         return unavailable(
           'timeout',

@@ -42,8 +42,14 @@ function parseLocation(location: string): { path: string; line?: number; column?
  * Parse a V8- or JavaScriptCore-style `error.stack` into Sentry frames, oldest call first (the order
  * Sentry expects; `error.stack` lists the innermost call first).
  */
-export function parseStack(stack: string | undefined): StackFrame[] {
+export function parseStack(stack: string | undefined, message?: string): StackFrame[] {
   if (!stack) return []
+  // V8 puts the complete message before its frames. A prompt can contain an apparent "at" line.
+  if (message?.includes('\n')) {
+    const start = stack.indexOf(message)
+    if (start < 0 || stack.slice(0, start).includes('\n')) return []
+    stack = stack.slice(start + message.length)
+  }
   const frames: StackFrame[] = []
   for (const line of stack.split('\n')) {
     const at = /^\s*at\s+(.+?)\s*$/.exec(line)

@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../../contracts/index.js'
 /**
  * Installing and updating llama.cpp backends (PLAN.md §4, stage 3c).
  *
@@ -191,6 +192,8 @@ export function backendExeName(osType: string): string {
 }
 
 export interface BackendServiceDeps {
+  onFailure?: FailureObserver
+
   layout: DataLayout
   provider: LocalProviderId
   downloader: Downloader
@@ -433,6 +436,7 @@ export class BackendService {
       await mkdir(join(target, '..'), { recursive: true })
       await rename(staging, target)
     } catch (e) {
+      this.deps.onFailure?.(e, { component: 'backend', operation: 'install' })
       // Nothing half-installed survives: a partial pack would be picked up by backend selection and
       // would fail later as a model that will not load.
       await rm(staging, { recursive: true, force: true })

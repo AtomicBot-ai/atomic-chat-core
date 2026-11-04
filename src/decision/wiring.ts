@@ -1,3 +1,4 @@
+import type { FailureObserver } from '../contracts/index.js'
 /**
  * How the owner builds the decision service: the settings section, the engine gate over the data
  * folder, the CPU facts from the hardware service, and the child journal (a decision process is
@@ -21,6 +22,8 @@ import { DecisionService } from './service.js'
 import type { DecisionServiceDeps } from './service.js'
 
 export interface WireDecisionOptions {
+  onFailure?: FailureObserver
+
   layout: DataLayout
   settings: {
     readonly decision: DecisionSettings
@@ -146,6 +149,7 @@ export function wireDecision(options: WireDecisionOptions): DecisionService {
     spawn,
     http,
     emit: options.emit,
+    ...(options.onFailure ? { onFailure: options.onFailure } : {}),
     log: options.log,
     ...(options.overrides?.schedule ? { schedule: options.overrides.schedule } : {}),
   })

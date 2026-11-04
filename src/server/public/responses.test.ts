@@ -110,6 +110,85 @@ describe('/responses', () => {
     expect(seen).toEqual(['/v1/chat/completions', '/v1/responses'])
   })
 
+  it("offers Codex's MCP namespace tools to llama.cpp as functions and names their calls back", async () => {
+    // How Codex sends an MCP server's tools, and calls one of them earlier in the conversation.
+    const namespace = {
+      type: 'namespace',
+      name: 'mcp__docs',
+      description: 'Tools for working with Docs.',
+      tools: [
+        { type: 'function', name: 'search', description: '', strict: false, parameters: { type: 'object' } },
+        { type: 'custom', name: 'freeform', description: 'x', format: { type: 'grammar' } },
+      ],
+    }
+    const sent: Array<Record<string, unknown>> = []
+    let streamed = false
+    const { port } = await startUpstream((_req, body, res) => {
+      sent.push(JSON.parse(body))
+      const call = {
+        id: 'call_2',
+        type: 'function',
+        function: { name: 'mcp__docs__search', arguments: '{}' },
+      }
+      if (!streamed) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({ choices: [{ message: { role: 'assistant', content: null, tool_calls: [call] } }] })
+        )
+        return
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.end(
+        `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, ...call }] } }] })}\n\ndata: [DONE]\n\n`
+      )
+    })
+    const server = await startPublic({ sessions: [localSession(port)] })
+    const request = {
+      model: 'demo',
+      tools: [{ type: 'function', name: 'shell', parameters: { type: 'object' } }, namespace],
+      input: [
+        { type: 'message', role: 'user', content: 'find it' },
+        { type: 'function_call', call_id: 'call_1', name: 'search', namespace: 'mcp__docs', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_1', output: 'nothing' },
+      ],
+    }
+
+    const whole = (await postJson(server, '/responses', request).then((r) => r.json())) as { output: unknown }
+    expect(sent[0]?.['tools']).toEqual([
+      { type: 'function', function: { name: 'shell', parameters: { type: 'object' } } },
+      {
+        type: 'function',
+        function: {
+          name: 'mcp__docs__search',
+          description: 'Tools for working with Docs.',
+          parameters: { type: 'object' },
+        },
+      },
+    ])
+    expect((sent[0]?.['messages'] as Array<Record<string, unknown>>)[1]).toMatchObject({
+      tool_calls: [{ id: 'call_1', function: { name: 'mcp__docs__search' } }],
+    })
+    expect(whole.output).toEqual([
+      expect.objectContaining({
+        type: 'function_call',
+        call_id: 'call_2',
+        name: 'search',
+        namespace: 'mcp__docs',
+      }),
+    ])
+
+    streamed = true
+    const events = await postJson(server, '/responses', { ...request, stream: true }).then((r) => r.text())
+    const done = events
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)) as { type: string; item?: unknown })
+      .filter((event) => event.type === 'response.output_item.done')
+    expect(done.map((event) => event.item)).toEqual([
+      expect.objectContaining({ call_id: 'call_2', name: 'search', namespace: 'mcp__docs' }),
+    ])
+  })
+
   it('passes an engine error through with its status', async () => {
     const { port } = await startUpstream((_req, _body, res) => {
       res.writeHead(503, { 'content-type': 'text/plain' })

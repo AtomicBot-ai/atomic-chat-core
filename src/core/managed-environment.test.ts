@@ -158,14 +158,16 @@ describe('wireManagedEnvironment on Windows (change add-tensorrt-llm-windows, ta
 
   it('offers the WSL environment with its recipe, no executor before the distribution, and the provider’s WSL context', async () => {
     const machine = await testWindows()
-    const wired = wireManagedEnvironment(
-      options({
+    const failures: unknown[] = []
+    const wired = wireManagedEnvironment({
+      ...options({
         ATOMIC_MANAGED_TEST_WINDOWS: machine,
         // Nothing reaches the network: neither conf document is there.
         ATOMIC_ENVIRONMENT_MANIFEST_URL: `file://${join(dir, 'none.json')}`,
         ATOMIC_RUNTIME_DESCRIPTOR_URL: `file://${join(dir, 'none.json')}`,
-      })
-    )
+      }),
+      onFailure: (error) => failures.push(error),
+    })
     expect(wired.platform).toBe('win32')
     expect(wired.arch).toBe('x64')
     expect(wired.managed.environments()[0]?.executor).toBe('wsl-docker')
@@ -180,6 +182,7 @@ describe('wireManagedEnvironment on Windows (change add-tensorrt-llm-windows, ta
     })
     // No manifest is served in this test: Windows without one and without a distribution is unsupported.
     expect(plan.availability).toBe('unsupported')
+    expect(failures).toEqual([])
     await wired.managed.shutdown(AbortSignal.timeout(1_000))
   })
 })

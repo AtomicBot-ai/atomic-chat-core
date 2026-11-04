@@ -57,6 +57,10 @@ export const SGLANG_CONTAINER_PORT = 30000
 
 /** What core decides for a launch from the card as it stands right before the container (design D4). */
 export interface SglangLaunchPlan {
+  /** `--context-length`: the window setting, or the automatic one the memory rule picked (`sglangLimits`). */
+  contextLength: number
+  /** `--max-running-requests`: the request count setting, or the automatic one. */
+  maxRunningRequests: number
   /**
    * `--mem-fraction-static`: the share of the memory SGLang finds free at start-up that it keeps for
    * weights and KV cache; the rest is its room for activations and CUDA graphs.
@@ -72,7 +76,10 @@ export interface SglangLaunchPlan {
 function isPlan(value: unknown): value is SglangLaunchPlan {
   if (value === null || typeof value !== 'object') return false
   const plan = value as Record<string, unknown>
+  const positiveInteger = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0
   return (
+    positiveInteger(plan['contextLength']) &&
+    positiveInteger(plan['maxRunningRequests']) &&
     typeof plan['memFractionStatic'] === 'number' &&
     plan['memFractionStatic'] > 0 &&
     plan['memFractionStatic'] < 1 &&
@@ -85,10 +92,10 @@ function isPlan(value: unknown): value is SglangLaunchPlan {
  * once (`--cuda-graph-max-bs-decode`), so they cost little memory; `on` is SGLang's own range; `off`
  * disables both phases. `--disable-cuda-graph` is deprecated in v0.5.21 and never used.
  */
-function cudaGraphArgs(settings: SglangSettings): string[] {
+function cudaGraphArgs(settings: SglangSettings, maxRunningRequests: number): string[] {
   switch (settings.cuda_graphs) {
     case 'auto':
-      return ['--cuda-graph-max-bs-decode', String(settings.max_running_requests)]
+      return ['--cuda-graph-max-bs-decode', String(maxRunningRequests)]
     case 'on':
       return []
     case 'off':
@@ -134,9 +141,9 @@ export function buildSglangLaunch(context: ManagedLaunchContext<SglangSettings>)
     '--port',
     String(SGLANG_CONTAINER_PORT),
     '--context-length',
-    String(settings.context_length),
+    String(context.plan.contextLength),
     '--max-running-requests',
-    String(settings.max_running_requests),
+    String(context.plan.maxRunningRequests),
     '--mem-fraction-static',
     String(Number(context.plan.memFractionStatic.toFixed(4))),
   ]
@@ -147,7 +154,7 @@ export function buildSglangLaunch(context: ManagedLaunchContext<SglangSettings>)
   if (!settings.enable_prefix_caching) argv.push('--disable-radix-cache')
   if (settings.dtype !== 'auto') argv.push('--dtype', settings.dtype)
   if (settings.seed !== null) argv.push('--random-seed', String(settings.seed))
-  argv.push(...cudaGraphArgs(settings))
+  argv.push(...cudaGraphArgs(settings, context.plan.maxRunningRequests))
   if (settings.kv_cache_dtype === 'fp8' && supportsFp8KvCache(context.gpuComputeCapability)) {
     argv.push('--kv-cache-dtype', 'fp8_e4m3')
   }

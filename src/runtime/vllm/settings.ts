@@ -11,13 +11,15 @@ import {
   type GenerationDefaults,
 } from '../managed-text/generation-defaults.js'
 import { settingValues } from '../managed-text/setting-values.js'
+import { MANAGED_AUTO_CONTEXTS } from '../managed-models/auto-limits.js'
 
 export interface VllmSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
   gpu_id: string | null
+  /** `--max-model-len`; 0 is automatic, the widest window the memory rule passes (`auto-limits.ts`). */
   context_length: number
   max_output_tokens: number
-  /** `--max-num-seqs`. */
+  /** `--max-num-seqs`; 0 is automatic, 2 when the memory rule passes, else 1 (`auto-limits.ts`). */
   max_num_seqs: number
   /**
    * `--kv-cache-memory-bytes`, in GiB; `null` passes nothing, and vLLM sizes the KV cache itself from
@@ -77,10 +79,12 @@ const KEYS = [
 
 const DEFAULTS: VllmSettings = {
   gpu_id: null,
-  context_length: 8192,
+  // Automatic (integrations audit 2026-11-03, S2): 8192 tokens and one request — the owner's first
+  // decision — refused every coding agent's 13-27K-token prompt. The load picks 64K/32K and two
+  // requests where the card has room, down to the old 8K and one request where it has not.
+  context_length: 0,
   max_output_tokens: 4096,
-  // One request at a time (owner's decision).
-  max_num_seqs: 1,
+  max_num_seqs: 0,
   kv_cache_memory_gib: null,
   gpu_memory_utilization: null,
   cuda_graphs: 'auto',
@@ -108,11 +112,11 @@ export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings
     }
     settings.gpu_id = raw['gpu_id'] as string
   }
-  if (raw['context_length'] !== undefined)
+  if (raw['context_length'] !== undefined && raw['context_length'] !== 0)
     settings.context_length = integer('context_length', raw['context_length'], 512, 1_048_576)
   if (raw['max_output_tokens'] !== undefined)
     settings.max_output_tokens = integer('max_output_tokens', raw['max_output_tokens'], 1, 1_048_576)
-  if (raw['max_num_seqs'] !== undefined)
+  if (raw['max_num_seqs'] !== undefined && raw['max_num_seqs'] !== 0)
     settings.max_num_seqs = integer('max_num_seqs', raw['max_num_seqs'], 1, 256)
   if (raw['kv_cache_memory_gib'] !== undefined && raw['kv_cache_memory_gib'] !== null)
     settings.kv_cache_memory_gib = decimal(
@@ -157,11 +161,13 @@ export function validateVllmSettings(raw: Record<string, unknown>): VllmSettings
   if (raw['async_scheduling'] !== undefined)
     settings.async_scheduling = yesNo('async_scheduling', raw['async_scheduling'])
   settings.generation = readGenerationDefaults('vllm', raw)
-  if (settings.max_output_tokens >= settings.context_length) {
+  // An automatic window is only ever one of the candidates above the output cap (`auto-limits.ts`).
+  const widest = settings.context_length === 0 ? MANAGED_AUTO_CONTEXTS[0] : settings.context_length
+  if (settings.max_output_tokens >= widest) {
     invalid(
       'max_output_tokens',
       settings.max_output_tokens,
-      `must be less than the context length (${settings.context_length})`
+      `must be less than the context length (${widest})`
     )
   }
   return settings

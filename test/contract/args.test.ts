@@ -14,6 +14,27 @@ interface ArgsInput {
 }
 type ArgsExpected = { argv: string[] } | { error: string }
 
+/**
+ * Deliberate divergences from the Rust builder these fixtures were emitted by (integrations audit
+ * 2026-11-03): core sends `-kvu` whatever the slot count (S3: one KV pool shared by every slot), and
+ * continuous batching both ways (P3: llama.cpp has it on unless sent `--no-cont-batching`). Compared
+ * without those two tokens; that they are there is checked on its own, and where they go is pinned by
+ * src/runtime/llamacpp/args.test.ts.
+ */
+const DIVERGENT = new Set(['-kvu', '--no-cont-batching'])
+function withoutKnownDivergence(argv: string[]): string[] {
+  return argv.filter((token) => !DIVERGENT.has(token))
+}
+function expectKnownDivergence(argv: string[], config: LlamacppConfig): void {
+  expect(argv.filter((token) => token === '-kvu')).toHaveLength(1)
+  const ik = (config.version_backend.split('/')[1] ?? '')
+    .trim()
+    .replace(/^\uFEFF/, '')
+    .startsWith('ik')
+  const batching = config.cont_batching || config.concurrent_mode
+  expect(argv.includes('--no-cont-batching')).toBe(!batching && !ik)
+}
+
 for (const set of ['args', 'args-llamacpp']) {
   const { index, cases } = loadFixtureSet<ArgsInput, ArgsExpected>(set)
 
@@ -43,7 +64,9 @@ for (const set of ['args', 'args-llamacpp']) {
           expect((e as AtomicCoreError).details).toBe(c.expected.error)
         }
       } else {
-        expect(run()).toEqual(c.expected.argv)
+        const argv = run()
+        expect(withoutKnownDivergence(argv)).toEqual(withoutKnownDivergence(c.expected.argv))
+        expectKnownDivergence(argv, c.input.config)
       }
     })
   })

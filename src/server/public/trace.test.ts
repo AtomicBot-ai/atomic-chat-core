@@ -1,3 +1,4 @@
+import type { ServerResponse } from 'node:http'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ApiRequestEvent } from '../../contracts/index.js'
 import { endpointFromPath } from './trace.js'
@@ -36,6 +37,53 @@ const SSE = [
   `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}\n\n`,
   'data: [DONE]\n\n',
 ]
+
+/**
+ * A thinking model's reply framed as llama.cpp b12019 streams it: the role chunk, reasoning, content,
+ * the finish chunk, then — only when asked — the usage trailer, which takes `timings` over from the
+ * finish chunk, and `[DONE]`.
+ */
+function llamaCppReply(includeUsage: boolean): string[] {
+  const meta = {
+    created: 1,
+    id: 'chatcmpl-1',
+    model: 'demo',
+    system_fingerprint: 'b12019',
+    object: 'chat.completion.chunk',
+  }
+  const chunk = (delta: object, finish: string | null = null, extra: object = {}) =>
+    `data: ${JSON.stringify({ choices: [{ finish_reason: finish, index: 0, delta }], ...meta, ...extra })}\n\n`
+  const timings = { prompt_n: 13730, predicted_n: 46, prompt_per_second: 680, predicted_per_second: 57 }
+  const usage = {
+    completion_tokens: 46,
+    prompt_tokens: 13730,
+    total_tokens: 13776,
+    prompt_tokens_details: { cached_tokens: 0 },
+  }
+  return [
+    chunk({ role: 'assistant', content: null }),
+    chunk({ reasoning_content: 'The user wants the marker.' }),
+    chunk({ content: 'AC-VERIFY-KILO' }),
+    chunk({ content: '-FINAL-1102: 45' }),
+    chunk({}, 'stop', includeUsage ? {} : { timings }),
+    ...(includeUsage ? [`data: ${JSON.stringify({ choices: [], ...meta, usage, timings })}\n\n`] : []),
+    'data: [DONE]\n\n',
+  ]
+}
+
+/** Writes `text` in small pieces, a few cut between an event's two newlines, so reads split events. */
+async function writeSplit(res: ServerResponse, text: string): Promise<void> {
+  const cuts = new Set<number>()
+  for (let i = 11; i < text.length; i += 11) cuts.add(i)
+  for (let i = text.indexOf('\n\n'); i >= 0; i = text.indexOf('\n\n', i + 1)) cuts.add(i + 1)
+  let from = 0
+  for (const cut of [...cuts].sort((a, b) => a - b)) {
+    res.write(text.slice(from, cut))
+    from = cut
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  res.end(text.slice(from))
+}
 
 describe('api:request analytics', () => {
   it('reports every product request with its outcome, but no previews while nobody watches', async () => {
@@ -153,6 +201,40 @@ describe('api:request analytics', () => {
     expect(done?.finish?.ttft_ms).toEqual(expect.any(Number))
     expect(events.map((e) => e.phase)).toEqual(['finished'])
     expect(JSON.stringify(events)).not.toContain('secret')
+  })
+
+  it('keeps the window the session served with each request, and the cached part of its prompt (QA B04)', async () => {
+    let window = 32768
+    const { port } = await startUpstream((_req, _body, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+          usage: {
+            prompt_tokens: 9040,
+            completion_tokens: 1,
+            prompt_tokens_details: { cached_tokens: 9000 },
+          },
+        })
+      )
+    })
+    const { server, finished } = await observed(false, {
+      sessions: [localSession(port)],
+      remote: [remoteProvider({ baseUrl: `http://127.0.0.1:${port}/v1` })],
+      contextWindow: () => Promise.resolve(window),
+    })
+    const ask = (model: string) =>
+      postJson(server, '/chat/completions', { model, messages: [{ role: 'user', content: 'hi' }] })
+
+    await (await ask('demo')).text()
+    // The model is reloaded with a larger window: the first request keeps the one it ran with.
+    window = 65536
+    await (await ask('demo')).text()
+    await (await ask('cloud-model')).text()
+
+    const done = await finished(3)
+    expect(done.map((d) => d.finish?.ctx_len)).toEqual([32768, 65536, null])
+    expect(done[0]?.finish).toMatchObject({ prompt_tokens: 9040, cached_tokens: 9000 })
   })
 
   it('keeps model polling, docs, preflight, scanners and hidden paths out of analytics', async () => {
@@ -275,6 +357,68 @@ describe('api:request inspector', () => {
       { model: 'demo', stream: true, stream_options: { include_usage: false } },
       { model: 'cloud-model', stream: true },
     ])
+  })
+
+  it("relays llama.cpp's stream byte for byte to a client that asked for usage, however reads split it", async () => {
+    // Kilo Code (AI SDK openai-compatible) and OpenClaude both ask for usage themselves: their request
+    // and every byte of the reply pass untouched, watched or not (B11).
+    const stream = llamaCppReply(true).join('')
+    const bodies: string[] = []
+    const { port } = await startUpstream((_req, body, res) => {
+      bodies.push(body)
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      void writeSplit(res, stream)
+    })
+    const request = {
+      model: 'demo',
+      stream: true,
+      stream_options: { include_usage: true },
+      max_tokens: 32000,
+      messages: [{ role: 'user', content: 'Reply exactly AC-VERIFY-KILO-FINAL-1102: 45' }],
+    }
+
+    for (const inspecting of [true, false]) {
+      const { server, finished } = await observed(inspecting, { sessions: [localSession(port)] })
+      const text = await (await postJson(server, '/chat/completions', request)).text()
+
+      expect(text, `inspecting=${inspecting}`).toBe(stream)
+      expect(bodies.at(-1)).toBe(JSON.stringify(request))
+      const [done] = await finished()
+      expect(done?.finish).toMatchObject({
+        status: 200,
+        aborted: false,
+        finish_reason: 'stop',
+        prompt_tokens: 13730,
+        completion_tokens: 46,
+        total_tokens: 13776,
+        reply_preview: inspecting ? 'AC-VERIFY-KILO-FINAL-1102: 45' : null,
+      })
+    }
+  })
+
+  it('drops only the usage trailer it asked for itself, even when reads split the stream mid-event', async () => {
+    const frames = llamaCppReply(true)
+    let sentBody = ''
+    const { port } = await startUpstream((_req, body, res) => {
+      sentBody = body
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      void writeSplit(res, frames.join(''))
+    })
+    const { server, finished } = await observed(true, { sessions: [localSession(port)] })
+
+    const text = await (
+      await postJson(server, '/chat/completions', {
+        model: 'demo',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+    ).text()
+
+    expect(JSON.parse(sentBody)).toMatchObject({ stream_options: { include_usage: true } })
+    // The finish chunk and `[DONE]` survive whole; only the trailer the client never asked for goes.
+    expect(text).toBe(frames.filter((frame) => !frame.includes('"choices":[]')).join(''))
+    const [done] = await finished()
+    expect(done?.finish).toMatchObject({ finish_reason: 'stop', prompt_tokens: 13730, completion_tokens: 46 })
   })
 
   it('reads telemetry from a whole local reply without a time to first token', async () => {

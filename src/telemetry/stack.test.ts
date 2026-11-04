@@ -62,6 +62,12 @@ describe('parseStack', () => {
     ])
   })
 
+  it('drops an ambiguous stack when a multiline message is missing or appears below the header', () => {
+    const message = 'untrusted\n    at text (src/private.ts:9:1)'
+    expect(parseStack('Error: redacted\n    at load (src/real.ts:1:2)', message)).toEqual([])
+    expect(parseStack(`Error: redacted\n${message}\n    at load (src/real.ts:1:2)`, message)).toEqual([])
+  })
+
   it('ignores lines that are not frames and caps a runaway stack', () => {
     expect(parseStack(undefined)).toEqual([])
     expect(parseStack('Error: only a message\ncaused by nothing\n    at fn ()')).toEqual([])

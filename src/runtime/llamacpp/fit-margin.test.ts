@@ -6,7 +6,9 @@ import {
   FIT_CTX_ALIGN,
   SMALL_UNIFIED_MEMORY_CTX_CAP,
   UNIFIED_MEMORY_LLAMA_SHARE,
+  PREVIOUS_DEFAULT_CTX,
   metalDevice,
+  smallMemoryDefaultCtx,
   smallUnifiedMemoryCtxCeiling,
   unifiedMemoryFitTargetMiB,
 } from './fit-margin.js'
@@ -254,5 +256,42 @@ describe('smallUnifiedMemoryCtxCeiling', () => {
             (ram * GiB) / 2
           )
         }
+  })
+})
+
+describe('smallMemoryDefaultCtx', () => {
+  const at = (totalGiB: number, weightsGiB: number, perTokenKiB: number | undefined, defaultCtx = 32_768) =>
+    smallMemoryDefaultCtx({
+      totalMemoryBytes: totalGiB * GiB,
+      weightsBytes: weightsGiB * GiB,
+      defaultCtx,
+      kvBytesAt: (ctx) => (perTokenKiB === undefined ? undefined : ctx * perTokenKiB * 1024),
+    })
+
+  it('leaves the default alone from 16 GiB of RAM up', () => {
+    expect(at(16, 4, 112)).toBeUndefined()
+    expect(at(64, 4, 112)).toBeUndefined()
+  })
+
+  it('narrows the default in 256-token steps until weights, KV and reserve fit half of RAM', () => {
+    // 8 GiB: 4096 − 1024 (weights) − 1024 (reserve) MiB = 2048 MiB at 64 KiB a token: 32768 fits.
+    expect(at(8, 1, 64)).toBe(32_768)
+    // At 112 KiB: 18724 tokens → 18688.
+    expect(at(8, 1, 112)).toBe(18_688)
+  })
+
+  it('steps an unaligned default down onto the 256-token grid first', () => {
+    // 20000 is 32 past 19968; the same 2048 MiB at 112 KiB a token then settles on 18688.
+    expect(at(8, 1, 112, 20_000)).toBe(18_688)
+    // At 64 KiB the unaligned default itself fits and is kept as given.
+    expect(at(8, 1, 64, 20_000)).toBe(20_000)
+  })
+
+  it('never goes below the previous 16K default, nor above the default it was given', () => {
+    expect(at(8, 2.5, 112)).toBe(PREVIOUS_DEFAULT_CTX)
+    expect(at(8, 7, 112)).toBe(PREVIOUS_DEFAULT_CTX)
+    expect(at(8, 1, 112, 8192)).toBe(8192)
+    // An estimate that cannot be made keeps the previous default.
+    expect(at(8, 1, undefined)).toBe(PREVIOUS_DEFAULT_CTX)
   })
 })

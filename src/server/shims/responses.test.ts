@@ -3,8 +3,10 @@ import type { JsonObject, JsonValue } from './json.js'
 import {
   ResponsesStreamConverter,
   chatResponseToResponses,
+  flatToolName,
   flattenContentToText,
-  mergeSystemMessages,
+  namespacedToolNames,
+  placeSystemMessages,
   newResponseId,
   responsesRequestToChat,
 } from './responses.js'
@@ -14,14 +16,14 @@ const messagesOf = (body: JsonValue): JsonValue[] =>
   obj(responsesRequestToChat(body))['messages'] as JsonValue[]
 
 describe('responsesRequestToChat', () => {
-  it('folds instructions, developer and late system messages into one leading system message', () => {
+  it('folds instructions and leading developer messages into one leading system message', () => {
     // Strict chat templates (Qwen3 GGUFs) reject a system message anywhere but first, or more than one.
     const messages = messagesOf({
       instructions: 'policy',
       input: [
-        { type: 'message', role: 'user', content: 'hi' },
         { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'rules' }] },
         { type: 'message', role: 'system', content: '' },
+        { type: 'message', role: 'user', content: 'hi' },
         { type: 'message', role: 'assistant', content: 'hello' },
       ],
     })
@@ -29,6 +31,56 @@ describe('responsesRequestToChat', () => {
       { role: 'system', content: 'policy\n\nrules' },
       { role: 'user', content: 'hi' },
       { role: 'assistant', content: 'hello' },
+    ])
+  })
+
+  it('keeps a later developer message in place as a reminder in the next user turn', () => {
+    // Moved to the leading system message it would change the start of the prompt, and llama.cpp
+    // would process the whole conversation again.
+    const messages = messagesOf({
+      instructions: 'policy',
+      input: [
+        { type: 'message', role: 'user', content: 'hi' },
+        { type: 'message', role: 'assistant', content: 'hello' },
+        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'plan mode' }] },
+        { type: 'message', role: 'system', content: '' },
+        { type: 'message', role: 'user', content: 'next' },
+      ],
+    })
+    expect(messages).toEqual([
+      { role: 'system', content: 'policy' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'user', content: '<system-reminder>\nplan mode\n</system-reminder>\n\nnext' },
+    ])
+  })
+
+  it('never puts a reminder between a tool call and its result', () => {
+    const call = { type: 'function_call', name: 'shell', arguments: '{}', call_id: 'c1' }
+    const reminder = { type: 'message', role: 'developer', content: 'note' }
+    const text = '<system-reminder>\nnote\n</system-reminder>'
+    // Between the call and its output, then before the next reply: at the end of the tool result.
+    expect(
+      messagesOf({
+        input: [
+          { type: 'message', role: 'user', content: 'go' },
+          call,
+          reminder,
+          { type: 'function_call_output', call_id: 'c1', output: 'ok' },
+          { type: 'message', role: 'assistant', content: 'done' },
+        ],
+      }).slice(2)
+    ).toEqual([
+      { role: 'tool', tool_call_id: 'c1', content: `ok\n\n${text}` },
+      { role: 'assistant', content: 'done' },
+    ])
+    // At the end after the assistant: a user message of its own; after a user turn: in it.
+    expect(messagesOf({ input: [{ type: 'message', role: 'assistant', content: 'a' }, reminder] })).toEqual([
+      { role: 'assistant', content: 'a' },
+      { role: 'user', content: text },
+    ])
+    expect(messagesOf({ input: [{ type: 'message', role: 'user', content: 'q' }, reminder] })).toEqual([
+      { role: 'user', content: `q\n\n${text}` },
     ])
   })
 
@@ -141,13 +193,69 @@ describe('responsesRequestToChat', () => {
   })
 })
 
-describe('mergeSystemMessages / flattenContentToText', () => {
+describe('namespaced tools', () => {
+  it('names a namespaced function <ns>__<name>, once, and a default-namespace one by its own name', () => {
+    expect(flatToolName('mcp__docs', 'search')).toBe('mcp__docs__search')
+    expect(flatToolName('mcp__foo__', 'opt_in')).toBe('mcp__foo__opt_in')
+    expect(flatToolName('functions', 'shell')).toBe('shell')
+    const names = namespacedToolNames({
+      tools: [
+        { type: 'namespace', name: 'functions', tools: [{ type: 'function', name: 'shell' }] },
+        {
+          type: 'namespace',
+          name: 'mcp__docs',
+          tools: [
+            { type: 'function', name: 'search' },
+            { type: 'custom', name: 'x' },
+          ],
+        },
+        { type: 'function', name: 'plain' },
+      ],
+    })
+    expect([...names]).toEqual([['mcp__docs__search', { namespace: 'mcp__docs', name: 'search' }]])
+  })
+
+  it('wraps a namespaced tool_choice under its chat name', () => {
+    expect(
+      obj(
+        responsesRequestToChat({
+          input: 'x',
+          tool_choice: { type: 'function', name: 'search', namespace: 'mcp__docs' },
+        })
+      )['tool_choice']
+    ).toEqual({ type: 'function', function: { name: 'mcp__docs__search' } })
+  })
+
+  it('leaves a call to a function it does not know by that name as the model named it', () => {
+    const names = namespacedToolNames({
+      tools: [{ type: 'namespace', name: 'mcp__docs', tools: [{ type: 'function', name: 'search' }] }],
+    })
+    const conv = new ResponsesStreamConverter('r', 'm', names)
+    conv.onChunk({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: 'c', function: { name: 'shell' } }] } }],
+    })
+    const done = conv
+      .finish()
+      .map(obj)
+      .find((e) => e['type'] === 'response.output_item.done')
+    expect(done?.['item']).toEqual({
+      type: 'function_call',
+      id: expect.any(String),
+      status: 'completed',
+      call_id: 'c',
+      name: 'shell',
+      arguments: '',
+    })
+  })
+})
+
+describe('placeSystemMessages / flattenContentToText', () => {
   it('returns the messages untouched when there is no system text to merge', () => {
     const msgs = [
       { role: 'user', content: 'a' },
       { role: 'system', content: [] },
     ]
-    expect(mergeSystemMessages(msgs)).toEqual([{ role: 'user', content: 'a' }])
+    expect(placeSystemMessages(msgs)).toEqual([{ role: 'user', content: 'a' }])
   })
 
   it('concatenates the string text of every part regardless of part type', () => {
@@ -200,6 +308,14 @@ describe('chatResponseToResponses', () => {
       chatResponseToResponses({ usage: { prompt_tokens: 3, completion_tokens: 2.5 } }, 'r', 'm')
     )['usage']
     expect(usage).toMatchObject({ input_tokens: 3, output_tokens: 0, total_tokens: 3 })
+  })
+
+  it("carries the prompt's cached part over, and says 0 only when the engine does not say", () => {
+    const usage = (u: JsonValue) => obj(chatResponseToResponses({ usage: u }, 'r', 'm'))['usage']
+    expect(
+      usage({ prompt_tokens: 9040, completion_tokens: 3, prompt_tokens_details: { cached_tokens: 9000 } })
+    ).toMatchObject({ input_tokens: 9040, input_tokens_details: { cached_tokens: 9000 } })
+    expect(usage({ prompt_tokens: 3 })).toMatchObject({ input_tokens_details: { cached_tokens: 0 } })
   })
 })
 

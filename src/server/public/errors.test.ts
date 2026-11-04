@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/generation-limits.js'
 import {
+  anthropicPromptTooLong,
   bodyIndicatesOom,
+  clientMaxTokens,
   computeErrorEnvelope,
   emptyMessagesRefusal,
   isComputeBackendError,
   isContextLimitError,
+  isLlamaContextOverflow,
   isContextOverflowFinishLength,
   modelNotFoundJson,
   selectedProviderUnavailableJson,
@@ -87,6 +91,102 @@ describe('isContextLimitError', () => {
       isContextLimitError(400, JSON.stringify({ error: { message: 'bad', type: 'invalid_request_error' } }))
     ).toBe(false)
   })
+
+  it("knows MLX's KV-cache wordings, and a KV-cache message that says nothing of an overflow is not one", () => {
+    expect(isContextLimitError(500, 'max-kv-size reached')).toBe(true)
+    expect(isContextLimitError(500, 'Max KV size reached')).toBe(true)
+    expect(isContextLimitError(500, 'KV cache exceeded')).toBe(true)
+    expect(isContextLimitError(500, 'kv cache overflow')).toBe(true)
+    expect(isContextLimitError(500, 'kv cache too small for this prompt')).toBe(true)
+    expect(isContextLimitError(500, 'kv cache allocated')).toBe(false)
+    // An error envelope that is not an object, or a type that is not a string, is read as text.
+    expect(isContextLimitError(400, JSON.stringify({ error: 'upstream went away' }))).toBe(false)
+    expect(isContextLimitError(400, JSON.stringify({ error: { type: 7 } }))).toBe(false)
+  })
+})
+
+describe('anthropicPromptTooLong', () => {
+  const upstream = (fields: Record<string, unknown>) =>
+    JSON.stringify({ error: { code: 400, type: 'exceed_context_size_error', ...fields } })
+  const message = (body: string | undefined) =>
+    (JSON.parse(body ?? 'null') as { error: { message: string } } | null)?.error.message
+
+  it("words llama.cpp's overflow as Anthropic's prompt-too-long, from its size fields", () => {
+    const body = upstream({
+      message: 'request (828 tokens) exceeds the available context size (128 tokens), try increasing it',
+      n_prompt_tokens: 828,
+      n_ctx: 128,
+    })
+    expect(JSON.parse(anthropicPromptTooLong(400, body) ?? 'null')).toEqual({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'prompt is too long: 828 tokens > 128 maximum' },
+    })
+  })
+
+  it('reads the sizes from the message when the fields are missing, unusable or a window of 0', () => {
+    // A build that sends no size fields.
+    expect(
+      message(
+        anthropicPromptTooLong(
+          400,
+          upstream({ message: 'request (900 tokens) exceeds the available context size (512 tokens)' })
+        )
+      )
+    ).toBe('prompt is too long: 900 tokens > 512 maximum')
+    // The other wording llama.cpp sends under the same error type.
+    expect(
+      message(
+        anthropicPromptTooLong(
+          400,
+          upstream({ message: 'input (5000 tokens) is larger than the max context size (4096 tokens)' })
+        )
+      )
+    ).toBe('prompt is too long: 5000 tokens > 4096 maximum')
+    // A window of 0 is no window: the message decides.
+    expect(
+      message(
+        anthropicPromptTooLong(
+          400,
+          upstream({
+            message: 'request (70 tokens) exceeds the available context size (64 tokens)',
+            n_prompt_tokens: 70,
+            n_ctx: 0,
+          })
+        )
+      )
+    ).toBe('prompt is too long: 70 tokens > 64 maximum')
+    // Plain text, not JSON at all.
+    expect(
+      message(anthropicPromptTooLong(400, 'request (9 tokens) exceeds the available context size (8 tokens)'))
+    ).toBe('prompt is too long: 9 tokens > 8 maximum')
+    // An `error` that is a string: the whole body is the message.
+    expect(
+      message(
+        anthropicPromptTooLong(
+          400,
+          JSON.stringify({ error: 'request (33 tokens) exceeds the available context size (32 tokens)' })
+        )
+      )
+    ).toBe('prompt is too long: 33 tokens > 32 maximum')
+  })
+
+  it('is undefined for another status, another error, or an overflow that does not state both sizes', () => {
+    const overflow = 'request (9 tokens) exceeds the available context size (8 tokens)'
+    expect(anthropicPromptTooLong(500, overflow)).toBeUndefined()
+    expect(anthropicPromptTooLong(400, 'bad request')).toBeUndefined()
+    expect(
+      anthropicPromptTooLong(
+        400,
+        JSON.stringify({ error: { type: 'invalid_request_error', message: 'bad' } })
+      )
+    ).toBeUndefined()
+    expect(
+      anthropicPromptTooLong(400, 'request (9 tokens) exceeds the available context size')
+    ).toBeUndefined()
+    expect(anthropicPromptTooLong(400, upstream({ message: 'too big' }))).toBeUndefined()
+    // A message that is not a string falls back to the body, which names no sizes either.
+    expect(anthropicPromptTooLong(400, upstream({ message: 42, n_prompt_tokens: 9 }))).toBeUndefined()
+  })
 })
 
 describe('compute failures', () => {
@@ -122,6 +222,49 @@ describe('isContextOverflowFinishLength', () => {
       false
     )
   })
+
+  it("does not take a stop at the engine's own --n-predict cap for a window cut-off", () => {
+    const noCap = Buffer.from('{}')
+    // Core starts llama.cpp with --n-predict DEFAULT_N_PREDICT: a client without max_tokens stops there.
+    expect(isContextOverflowFinishLength(response(DEFAULT_N_PREDICT), noCap)).toBe(false)
+    expect(isContextOverflowFinishLength(response(DEFAULT_N_PREDICT - 1), noCap)).toBe(false)
+    // Well short of it, the window ran out.
+    expect(isContextOverflowFinishLength(response(1200), noCap)).toBe(true)
+    // A user's own cap, passed by the caller.
+    expect(isContextOverflowFinishLength(response(4096), noCap, 4096)).toBe(false)
+    expect(isContextOverflowFinishLength(response(4096), noCap, 8192)).toBe(true)
+    // An engine started without a cap: any length stop is the window.
+    expect(isContextOverflowFinishLength(response(DEFAULT_N_PREDICT), noCap, null)).toBe(true)
+    // The client's cap still wins over the engine's.
+    expect(isContextOverflowFinishLength(response(511), request(512))).toBe(false)
+    expect(isContextOverflowFinishLength(response(500), request(512))).toBe(true)
+  })
+
+  it('finds no length stop in a response that is not an object or has no usable choices', () => {
+    const noCap = Buffer.from('{}')
+    expect(isContextOverflowFinishLength([], noCap)).toBe(false)
+    expect(isContextOverflowFinishLength({ choices: 'length' }, noCap)).toBe(false)
+    expect(isContextOverflowFinishLength({ choices: ['length', null] }, noCap)).toBe(false)
+    // A usage that is not an object counts as no count at all.
+    expect(isContextOverflowFinishLength({ choices: [{ finish_reason: 'length' }], usage: 7 }, noCap)).toBe(
+      true
+    )
+  })
+})
+
+describe('clientMaxTokens', () => {
+  it('takes the first positive cap of max_tokens, then max_completion_tokens', () => {
+    expect(clientMaxTokens(Buffer.from(JSON.stringify({ max_tokens: 256, max_completion_tokens: 64 })))).toBe(
+      256
+    )
+    expect(clientMaxTokens(Buffer.from(JSON.stringify({ max_tokens: 0, max_completion_tokens: 64 })))).toBe(
+      64
+    )
+    expect(clientMaxTokens(Buffer.from(JSON.stringify({ max_tokens: -1, max_completion_tokens: 1.5 })))).toBe(
+      undefined
+    )
+    expect(clientMaxTokens(Buffer.from('[16]'))).toBeUndefined()
+  })
 })
 
 describe('structureBackendErrorBody', () => {
@@ -139,5 +282,15 @@ describe('structureBackendErrorBody', () => {
     expect(structureBackendErrorBody('{"error":{"message":"x"}}', false, false)).toBe(
       '{"error":{"message":"x"}}'
     )
+    // Neither an overflow nor an OOM: a plain server error, even when `error` is not an envelope.
+    expect(JSON.parse(structureBackendErrorBody('{"error":"segfault"}', false, false))).toEqual({
+      error: { message: '{"error":"segfault"}', type: 'server_error', code: 'server_error' },
+    })
   })
+})
+
+it('recognizes a specific llama context overflow without hiding unrelated context failures', () => {
+  expect(isLlamaContextOverflow('{"error":{"type":"exceed_context_size_error"}}')).toBe(true)
+  expect(isLlamaContextOverflow('request (12 tokens) exceeds the available context size')).toBe(true)
+  expect(isLlamaContextOverflow('failed to initialize context size')).toBe(false)
 })

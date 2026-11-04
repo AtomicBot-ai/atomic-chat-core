@@ -22,7 +22,8 @@ describe('VLLM_ENGINE', () => {
 
   it('reads its own settings and refuses an invalid one before anything else', () => {
     expect(VLLM_ENGINE.settings({ max_num_seqs: 4 }).max_num_seqs).toBe(4)
-    expect(() => VLLM_ENGINE.settings({ max_num_seqs: 0 })).toThrow(
+    expect(VLLM_ENGINE.settings({ max_num_seqs: 0 }).max_num_seqs).toBe(0) // automatic
+    expect(() => VLLM_ENGINE.settings({ max_num_seqs: -1 })).toThrow(
       expect.objectContaining({ code: 'INVALID_ARGUMENT' })
     )
   })

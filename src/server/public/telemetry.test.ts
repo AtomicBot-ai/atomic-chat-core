@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { JsonValue } from '../shims/index.js'
 import { PREVIEW_MAX_CHARS, StreamTelemetry, extractReasoning, promptPreview } from './telemetry.js'
 
 // Parity with the Rust inspector is test/contract/inspector-telemetry.test.ts; these pin what the
@@ -33,6 +34,7 @@ describe('telemetry edges', () => {
     expect(telemetry.finishFields(0)).toEqual({
       ttft_ms: 3,
       prompt_tokens: 5,
+      cached_tokens: null,
       completion_tokens: 2,
       total_tokens: 7,
       tokens_estimated: false,
@@ -41,6 +43,51 @@ describe('telemetry edges', () => {
       finish_reason: 'stop',
       reply_preview: null,
       reply_chars: 14,
+    })
+  })
+
+  it('reports the cached part of the prompt, counted in the prompt, from every engine that says it', () => {
+    const fields = (frames: JsonValue[]) => {
+      const telemetry = new StreamTelemetry()
+      for (const frame of frames) telemetry.onJson(frame, 1)
+      return telemetry.finishFields(0)
+    }
+    // llama.cpp's timings: `prompt_n` is only what it processed.
+    expect(fields([{ choices: [], timings: { prompt_n: 40, cache_n: 9000, predicted_n: 3 } }])).toMatchObject(
+      {
+        prompt_tokens: 9040,
+        cached_tokens: 9000,
+      }
+    )
+    // OpenAI usage wins over the timings that come with it.
+    expect(
+      fields([
+        {
+          choices: [],
+          usage: {
+            prompt_tokens: 9040,
+            completion_tokens: 3,
+            prompt_tokens_details: { cached_tokens: 9000 },
+          },
+          timings: { prompt_n: 40, cache_n: 1 },
+        },
+      ])
+    ).toMatchObject({ prompt_tokens: 9040, cached_tokens: 9000 })
+    // Anthropic leaves the cache out of `input_tokens`, streamed or whole.
+    const usage = { input_tokens: 40, cache_read_input_tokens: 9000, cache_creation_input_tokens: 5 }
+    expect(
+      fields([
+        { type: 'message_start', message: { usage: { ...usage, output_tokens: 0 } } },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 3 } },
+      ])
+    ).toMatchObject({ prompt_tokens: 9045, cached_tokens: 9000, completion_tokens: 3 })
+    expect(
+      fields([{ type: 'message', stop_reason: 'tool_use', usage: { ...usage, output_tokens: 3 } }])
+    ).toMatchObject({
+      prompt_tokens: 9045,
+      cached_tokens: 9000,
+      completion_tokens: 3,
+      finish_reason: 'tool_use',
     })
   })
 

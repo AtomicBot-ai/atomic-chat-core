@@ -67,6 +67,26 @@ describe('isCrashExit', () => {
 })
 
 describe('classifyExit / classifyProcessOutput', () => {
+  it('retains native exit facts without changing the public error body', () => {
+    const error = classifyProcessOutput({ code: null, signal: 'SIGABRT' }, 'GGML_ASSERT(x)', '', 'linux')
+    expect(error.diagnostic).toEqual({
+      component: 'runtime',
+      operation: 'load',
+      stage: 'ready',
+      exitCode: null,
+      signal: 'SIGABRT',
+      nativeFailure: 'assertion',
+      reason: 'native_crash',
+    })
+    expect(JSON.parse(JSON.stringify(error))).toEqual({
+      code: 'LLAMA_CPP_PROCESS_ERROR',
+      message: CRASH_MESSAGE,
+      details: 'GGML_ASSERT(x)',
+    })
+    expect(
+      classifyProcessOutput({ code: 1, signal: null }, '', 'out of memory', 'linux').diagnostic
+    ).toMatchObject({ exitCode: 1, signal: null })
+  })
   it('upgrades only the generic error on a crash', () => {
     expect(classifyExit({ code: null, signal: 11 }, '', 'linux').message).toBe(CRASH_MESSAGE)
     expect(classifyExit({ code: null, signal: 11 }, 'out of memory', 'linux').code).toBe('OUT_OF_MEMORY')
@@ -80,8 +100,8 @@ describe('classifyExit / classifyProcessOutput', () => {
     expect(classifyProcessOutput(exit, 'out of memory', 'invalid magic', 'linux').code).toBe('OUT_OF_MEMORY')
   })
   // `tensor_layout_mismatch_is_backend_incompatibility_not_corruption` (TurboQuant `error.rs`,
-  // app commit ec1fd3ea7); the upstream plugin keeps it as corruption.
-  it('reads a tensor-count mismatch as an unsupported architecture only for TurboQuant', () => {
+  // app commit ec1fd3ea7); core applies the correction to every provider.
+  it('reads a tensor-count mismatch as an unsupported architecture on every provider', () => {
     const stdout = 'llama_model_load: done_getting_tensors: wrong number of tensors; expected 417, got 408\n'
     const exit = { code: 1, signal: null }
     expect(classifyProcessOutput(exit, '', stdout, 'linux', 'llamacpp').code).toBe('MODEL_ARCH_NOT_SUPPORTED')

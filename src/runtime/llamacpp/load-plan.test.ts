@@ -12,6 +12,7 @@ import {
   withPort,
 } from './load-plan.js'
 import type { LoadPlan, LoadPlanDeps } from './load-plan.js'
+import { DEFAULT_N_PREDICT } from './generation-limits.js'
 
 const baseConfig = (): LlamacppConfigInput => ({
   version_backend: 'b10405/macos-arm64',
@@ -298,6 +299,85 @@ describe('planLlamaLoad', () => {
   })
 })
 
+/** Integrations audit 2026-11-03: X6 (answer cap), S4 (fit-off window), S5 (prompt cache). */
+describe('planLlamaLoad — the limits core starts llama.cpp with', () => {
+  const GiB = 2 ** 30
+  const LONG = { 'general.architecture': 'llama', 'llama.context_length': '131072' }
+
+  it('caps an answer at 16384 tokens when n_predict is automatic, never above the window it knows', async () => {
+    const plan = (config: Partial<LlamacppConfigInput>, meta = LONG) =>
+      planLlamaLoad(input(config), deps({ meta }))
+    expect((await plan({ ctx_size: 32_768 })).config.n_predict).toBe(DEFAULT_N_PREDICT)
+    expect((await plan({ ctx_size: 8192 })).config.n_predict).toBe(8192)
+    // Fit on with no ceiling: the window is llama.cpp's, at most the trained context.
+    expect((await plan({ fit: true }, { ...LONG, 'llama.context_length': '4096' })).config.n_predict).toBe(
+      4096
+    )
+    expect((await plan({ fit: true })).config.n_predict).toBe(DEFAULT_N_PREDICT)
+    // The user's own: -1 is no limit, a number is theirs.
+    expect((await plan({ n_predict: -1 })).config.n_predict).toBe(-1)
+    expect((await plan({ n_predict: 500 })).config.n_predict).toBe(500)
+  })
+
+  it('gives a fit-off load without a window 32K, or the trained context when smaller', async () => {
+    const plan = (meta: Record<string, string>) => planLlamaLoad(input({ ctx_size: 0 }), deps({ meta }))
+    const long = await plan(LONG)
+    expect(long.config.ctx_size).toBe(32_768)
+    expect(long.warnings).toContain('No context size is set with fit off; loading "m" with 32768 tokens.')
+    expect((await plan({ ...LONG, 'llama.context_length': '8192' })).config.ctx_size).toBe(8192)
+    // A chosen window stands.
+    expect((await planLlamaLoad(input({ ctx_size: 12_000 }), deps({ meta: LONG }))).config.ctx_size).toBe(
+      12_000
+    )
+    // Fit on, or an embedding model: no window from core.
+    expect(
+      (await planLlamaLoad(input({ fit: true, ctx_size: 0 }), deps({ meta: LONG }))).config.ctx_size
+    ).toBe(0)
+  })
+
+  it('narrows that default toward the previous 16K on a small Mac, never below it', async () => {
+    // Llama 3.2 3B shaped: 112 KiB of KV a token. 8 GiB Mac: half is 4096 MiB, less 1926 MiB of
+    // weights and 1024 MiB of reserve leaves 1146 MiB — 10487 tokens, so the 16K floor.
+    const meta = {
+      'general.architecture': 'llama',
+      'llama.block_count': '28',
+      'llama.context_length': '131072',
+      'llama.attention.head_count': '24',
+      'llama.attention.head_count_kv': '8',
+      'llama.attention.key_length': '128',
+      'llama.attention.value_length': '128',
+    }
+    const files = { '/data/llamacpp/models/m/model.gguf': 2_019_377_696 }
+    const on = (totalMemoryBytes: number) =>
+      planLlamaLoad(
+        input({ ctx_size: 0 }),
+        deps({ meta, files, unifiedMemory: async () => ({ totalMemoryBytes }) })
+      )
+    expect((await on(8 * GiB)).config.ctx_size).toBe(16_384)
+    // 12 GiB: 6144 − 1926 − 1024 MiB = 3194 MiB, 29202 tokens → 29184.
+    expect((await on(12 * GiB)).config.ctx_size).toBe(29_184)
+    expect((await on(16 * GiB)).config.ctx_size).toBe(32_768)
+  })
+
+  it('narrows the host prompt cache on a machine with at most 16 GiB of RAM', async () => {
+    const cache = async (totalMemoryBytes: number | undefined, isEmbedding = false) =>
+      (
+        await planLlamaLoad(
+          { ...input(), isEmbedding },
+          deps({
+            systemMemory: async () => (totalMemoryBytes === undefined ? undefined : { totalMemoryBytes }),
+          })
+        )
+      ).cacheRamMiB
+    expect(await cache(8 * GiB)).toBe(1024)
+    expect(await cache(16 * GiB)).toBe(2048)
+    expect(await cache(18 * GiB)).toBeUndefined()
+    expect(await cache(undefined)).toBeUndefined()
+    expect(await cache(8 * GiB, true)).toBeUndefined()
+    expect('cacheRamMiB' in (await planLlamaLoad(input(), deps()))).toBe(false)
+  })
+})
+
 describe('planLlamaLoad — fit margin on unified memory', () => {
   const GiB = 2 ** 30
   const MODEL = '/data/llamacpp/models/m/model.gguf'
@@ -437,7 +517,7 @@ describe('planLlamaLoad — fit margin on unified memory', () => {
     ).toBe(HALF_OF_18)
   })
 
-  it('counts every shard and the minimum context of every slot toward what the model needs', async () => {
+  it('counts every shard and the minimum context of the one KV pool every slot shares', async () => {
     const shard = (i: number) => `/data/llamacpp/models/m/model-0000${i}-of-00003.gguf`
     const shards = { [shard(1)]: 3 * GiB, [shard(2)]: 3 * GiB, [shard(3)]: 3 * GiB }
     const sharded = await planLlamaLoad(
@@ -451,14 +531,14 @@ describe('planLlamaLoad — fit margin on unified memory', () => {
     // 9 GiB of weights + 352 MiB of KV at 4096 + 1 GiB of reserve = 10592 MiB, past half of 18 GiB:
     // the budget grows to hold it and the margin shrinks by as much.
     expect(sharded.config.fit_target).toBe(String(13_640 - 10_592))
-    // Four slots at a 32K floor: 11 GiB of KV alone, more than Metal leaves.
+    // Four slots at a 32K floor share one 32K pool under -kvu (`src/llama-context.cpp:389-390`):
+    // 2292 + 2816 + 1024 MiB, under half of 18 GiB. Before -kvu was always sent this counted 11 GiB.
     const slots = await planLlamaLoad(
       input({ fit: true, fit_target: '', fit_ctx: '32768', parallel: 4 } as Partial<LlamacppConfigInput>),
       fitDeps()
     )
-    expect(slots.config.fit_target).toBe('')
-    // Concurrent mode's slots count, not `parallel`: three slots at 32K are 8448 MiB of KV, and
-    // 2292 + 8448 + 1024 MiB needs more than half of 18 GiB.
+    expect(slots.config.fit_target).toBe(HALF_OF_18)
+    // Concurrent mode's slots likewise.
     const concurrent = await planLlamaLoad(
       input({
         fit: true,
@@ -470,7 +550,13 @@ describe('planLlamaLoad — fit margin on unified memory', () => {
       } as Partial<LlamacppConfigInput>),
       fitDeps()
     )
-    expect(concurrent.config.fit_target).toBe(String(13_640 - 11_765))
+    expect(concurrent.config.fit_target).toBe(HALF_OF_18)
+    // A model whose 32K pool alone tips the budget over still widens the margin by the pool only.
+    const big = await planLlamaLoad(
+      input({ fit: true, fit_target: '', fit_ctx: '32768', parallel: 4 } as Partial<LlamacppConfigInput>),
+      fitDeps({ files: { [MODEL]: 6 * GiB } })
+    )
+    expect(big.config.fit_target).toBe(String(13_640 - (6144 + 2816 + 1024)))
   })
 })
 
@@ -654,19 +740,48 @@ describe('planLlamaLoad — window ceiling on unified memory below 16 GiB', () =
     expect(plan.fitCtxCeiling).toBe(10_240)
   })
 
-  it('counts the ceiling across every slot, and drops it when one slot no longer fits the floor', async () => {
+  it('caps the pool the slots share, not a window per slot: more slots cost no more KV', async () => {
+    // -kvu is always sent (args.ts): two slots draw from the same 32768 cells one would.
     const two = await planLlamaLoad(
       input({ fit: true, fit_target: '', concurrent_mode: true, concurrent_slots: 2 }),
       smallMac()
     )
-    // Two slots of 32768 at 16 KiB: 1024 MiB of the 1475 MiB left.
-    expect(two.fitCtxCeiling).toBe(2 * 32_768)
-    // Four slots of Llama-3.2-3B: 4096 tokens each would need 1792 MiB of the 1487 MiB left.
+    expect(two.fitCtxCeiling).toBe(32_768)
+    const parallel = await planLlamaLoad(
+      input({ fit: true, fit_target: '', parallel: 2 } as Partial<LlamacppConfigInput>),
+      smallMac()
+    )
+    expect(parallel.fitCtxCeiling).toBe(32_768)
+    // Four slots of Llama-3.2-3B narrow exactly as one does: 10240 tokens.
     const four = await planLlamaLoad(
       input({ fit: true, fit_target: '', concurrent_mode: true, concurrent_slots: 4 }),
       smallMac({ meta: LLAMA32_3B_META, files: { [MODEL]: LLAMA32_3B_WEIGHTS } })
     )
-    expect(four.fitCtxCeiling).toBeUndefined()
+    expect(four.fitCtxCeiling).toBe(10_240)
+  })
+
+  it('counts a sliding-window layer once per slot of the shared pool', async () => {
+    // Gemma 3 shaped: 26 blocks (4 global, 22 sliding), 4 KV heads of 256, a 512-token window.
+    const gemma3 = {
+      'general.architecture': 'gemma3',
+      'gemma3.block_count': '26',
+      'gemma3.context_length': '131072',
+      'gemma3.attention.head_count': '8',
+      'gemma3.attention.head_count_kv': '4',
+      'gemma3.attention.key_length': '256',
+      'gemma3.attention.value_length': '256',
+      'gemma3.attention.sliding_window': '512',
+    }
+    const plan = (slots: number) =>
+      planLlamaLoad(
+        input({ fit: true, fit_target: '', parallel: slots } as Partial<LlamacppConfigInput>),
+        smallMac({ meta: gemma3, files: { [MODEL]: 2.5 * GiB } })
+      )
+    // 512 MiB left. One slot: 22 sliding layers × 1024 cells × 4 KiB = 88 MiB, the rest at 16 KiB a
+    // token for the 4 global layers: 27136 tokens.
+    expect((await plan(1)).fitCtxCeiling).toBe(27_136)
+    // Four slots: a window each, 2560 cells (220 MiB) — 18688 tokens, not a quarter of one slot's.
+    expect((await plan(4)).fitCtxCeiling).toBe(18_688)
   })
 
   it('leaves the window to llama.cpp on a 16 GiB Mac', async () => {

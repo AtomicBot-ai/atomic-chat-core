@@ -310,7 +310,10 @@ export interface ApiRequestFinishFields {
   headers_ms: number | null
   ttft_ms: number | null
   duration_ms: number | null
+  /** The whole prompt, its cached part included. */
   prompt_tokens: number | null
+  /** The part of the prompt the engine reused from its cache instead of processing it again. */
+  cached_tokens: number | null
   completion_tokens: number | null
   total_tokens: number | null
   tokens_estimated: boolean
@@ -319,6 +322,11 @@ export interface ApiRequestFinishFields {
   finish_reason: string | null
   reply_preview: string | null
   reply_chars: number | null
+  /**
+   * The context window of the session that served the request, as it was then: the log keeps it
+   * after the model is reloaded with another window or unloaded. `null` when it is not known.
+   */
+  ctx_len: number | null
 }
 
 export type ApiRequestEvent =

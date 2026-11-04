@@ -18,6 +18,7 @@
 import { randomUUID } from 'node:crypto'
 import type { JsonObject, JsonValue } from './json.js'
 import { isJsonObject, serdeToString } from './json.js'
+import { asSystemReminder } from './reminders.js'
 
 function uuidSimple(): string {
   return randomUUID().replace(/-/g, '')
@@ -82,7 +83,7 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
     }
   }
 
-  const out: JsonObject = { messages: mergeSystemMessages(messages) }
+  const out: JsonObject = { messages: placeSystemMessages(messages) }
 
   const model = field(body, 'model')
   if (model !== undefined) out['model'] = clone(model)
@@ -105,7 +106,7 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
 
   const tools = field(body, 'tools')
   if (Array.isArray(tools)) {
-    const chatTools = tools.map(responsesToolToChat).filter((t): t is JsonValue => t !== undefined)
+    const chatTools = tools.flatMap(responsesToolToChat)
     if (chatTools.length > 0) out['tools'] = chatTools
   }
   const toolChoice = field(body, 'tool_choice')
@@ -122,26 +123,65 @@ export function responsesRequestToChat(body: JsonValue): JsonValue {
 }
 
 /**
- * Collapse every `system`/`developer` message into a single leading `system` message, joined by a
- * blank line; messages whose flattened text is empty contribute nothing, and if nothing remains no
- * system message is emitted. Strict chat templates (notably Qwen3-family GGUFs) raise "System
- * message must be at the beginning" when a request carries more than one system message or places
- * one after the first turn — which Codex does by combining `instructions` with developer/system
- * input items. Order of the other messages is preserved.
+ * Place the `system`/`developer` messages for a strict chat template (notably Qwen3-family GGUFs,
+ * which raise "System message must be at the beginning" for a second system message or a later one;
+ * Codex sends `instructions` and developer input items). Those before the first turn become one
+ * leading `system` message, joined by a blank line. A later one stays where it is, as user text
+ * wrapped in `<system-reminder>`, so the start of the prompt does not change and llama.cpp keeps its
+ * prompt cache: it is put before the text of the user message that follows it, or else at the end
+ * of the user or tool message before it (never between a tool call and its result), or else in a
+ * user message of its own. Messages whose flattened text is empty contribute nothing; the order of
+ * the other messages is preserved.
  */
-export function mergeSystemMessages(messages: JsonValue[]): JsonValue[] {
-  const systemParts: string[] = []
-  const rest: JsonValue[] = []
-
-  for (const msg of messages) {
+export function placeSystemMessages(messages: JsonValue[]): JsonValue[] {
+  const isSystem = (msg: JsonValue): boolean => {
     const role = asStr(field(msg, 'role')) ?? ''
-    if (role === 'system' || role === 'developer') {
-      const text = flattenContentToText(field(msg, 'content'))
-      if (text !== '') systemParts.push(text)
+    return role === 'system' || role === 'developer'
+  }
+  const systemParts: string[] = []
+  let start = 0
+  for (; start < messages.length && isSystem(messages[start] as JsonValue); start++) {
+    const text = flattenContentToText(field(messages[start], 'content'))
+    if (text !== '') systemParts.push(text)
+  }
+
+  const rest: JsonValue[] = []
+  let pending: string[] = []
+  const flushBefore = () => {
+    if (pending.length === 0) return
+    const reminder = pending.join('\n\n')
+    pending = []
+    const previous = rest.at(-1)
+    const role = asStr(field(previous, 'role'))
+    const content = field(previous, 'content')
+    if ((role === 'user' || role === 'tool') && typeof content === 'string' && isJsonObject(previous)) {
+      rest[rest.length - 1] = {
+        ...previous,
+        content: content === '' ? reminder : `${content}\n\n${reminder}`,
+      }
     } else {
-      rest.push(msg)
+      rest.push({ role: 'user', content: reminder })
     }
   }
+  for (const msg of messages.slice(start)) {
+    if (isSystem(msg)) {
+      const text = flattenContentToText(field(msg, 'content'))
+      if (text.trim() !== '') pending.push(asSystemReminder(text))
+      continue
+    }
+    const role = asStr(field(msg, 'role'))
+    const content = field(msg, 'content')
+    if (pending.length > 0 && role === 'user' && typeof content === 'string' && isJsonObject(msg)) {
+      const reminder = pending.join('\n\n')
+      pending = []
+      rest.push({ ...msg, content: content === '' ? reminder : `${reminder}\n\n${content}` })
+      continue
+    }
+    // Tool results answer the assistant's calls directly; a reminder waits until they are all in.
+    if (role !== 'tool') flushBefore()
+    rest.push(msg)
+  }
+  flushBefore()
 
   if (systemParts.length === 0) return rest
   return [{ role: 'system', content: systemParts.join('\n\n') }, ...rest]
@@ -155,7 +195,10 @@ function responsesInputItemToChat(item: JsonValue): JsonValue | undefined {
       return { role, content: flattenContentToText(field(item, 'content')) }
     }
     case 'function_call': {
-      const name = asStr(field(item, 'name')) ?? ''
+      // A call Codex made in a namespace is replayed under the name the model saw for it.
+      const namespace = asStr(field(item, 'namespace'))
+      const bare = asStr(field(item, 'name')) ?? ''
+      const name = namespace === undefined ? bare : flatToolName(namespace, bare)
       const args = asStr(field(item, 'arguments')) ?? '{}'
       // Rust: `get("call_id").or_else(|| get("id"))` — the fallback to `id` happens only when
       // `call_id` is absent; a present non-string `call_id` (e.g. null) yields "" instead.
@@ -199,18 +242,79 @@ export function flattenContentToText(content: JsonValue | undefined): string {
   return ''
 }
 
-function responsesToolToChat(tool: JsonValue): JsonValue | undefined {
-  // A Responses function tool is flat: {type, name, description, parameters}. Built-in tools
-  // (web_search, etc.) have no Chat equivalent and are dropped, as is a function without `name`.
-  if (asStr(field(tool, 'type')) !== 'function') return undefined
-  const name = field(tool, 'name')
-  if (name === undefined) return undefined
+/** Codex's own namespace for its top-level tools: a function in it is called by its plain name. */
+const DEFAULT_FUNCTION_NAMESPACE = 'functions'
+
+/**
+ * The chat function name for function `name` in Responses namespace `namespace`: `<ns>__<name>`, the
+ * way MCP tools have always been named, and the plain name in Codex's default namespace. A namespace
+ * that already ends in the delimiter is not given a second one.
+ */
+export function flatToolName(namespace: string, name: string): string {
+  if (namespace === '' || namespace === DEFAULT_FUNCTION_NAMESPACE) return name
+  return namespace.endsWith('__') ? `${namespace}${name}` : `${namespace}__${name}`
+}
+
+/** The namespace and name of each function the request offered in a namespace, by its chat name. */
+export type NamespacedToolNames = ReadonlyMap<string, { namespace: string; name: string }>
+
+function namespaceFunctions(tool: JsonValue): Array<{ namespace: string; fn: JsonValue; name: string }> {
+  if (asStr(field(tool, 'type')) !== 'namespace') return []
+  const namespace = asStr(field(tool, 'name'))
+  const tools = field(tool, 'tools')
+  if (namespace === undefined || !Array.isArray(tools)) return []
+  const out: Array<{ namespace: string; fn: JsonValue; name: string }> = []
+  for (const fn of tools) {
+    const name = asStr(field(fn, 'name'))
+    if (asStr(field(fn, 'type')) === 'function' && name !== undefined) out.push({ namespace, fn, name })
+  }
+  return out
+}
+
+/**
+ * How to name a call back in the namespace it was offered in (Codex sends its MCP tools as
+ * `{type: "namespace", name, tools: [...]}` and runs a call only with its `namespace`). Functions in
+ * the default namespace need no entry: a call without one lands there.
+ */
+export function namespacedToolNames(body: JsonValue): NamespacedToolNames {
+  const names = new Map<string, { namespace: string; name: string }>()
+  const tools = field(body, 'tools')
+  if (!Array.isArray(tools)) return names
+  for (const tool of tools) {
+    for (const { namespace, name } of namespaceFunctions(tool)) {
+      const flat = flatToolName(namespace, name)
+      if (flat !== name && !names.has(flat)) names.set(flat, { namespace, name })
+    }
+  }
+  return names
+}
+
+function functionToChat(tool: JsonValue, name: JsonValue, namespaceDescription?: string): JsonValue {
   const func: JsonObject = { name: clone(name) }
-  const description = field(tool, 'description')
+  const own = field(tool, 'description')
+  // A function in a namespace that has no description of its own is described by the namespace's.
+  const description = (own === undefined || own === '') && namespaceDescription ? namespaceDescription : own
   if (description !== undefined) func['description'] = clone(description)
   const parameters = field(tool, 'parameters')
   if (parameters !== undefined) func['parameters'] = clone(parameters)
   return { type: 'function', function: func }
+}
+
+function responsesToolToChat(tool: JsonValue): JsonValue[] {
+  // A namespace (Codex's MCP servers) becomes its functions, each under its flat name, described by
+  // its own description or else the namespace's. Its freeform tools are dropped like top-level ones.
+  if (asStr(field(tool, 'type')) === 'namespace') {
+    const described = asStr(field(tool, 'description'))
+    return namespaceFunctions(tool).map(({ namespace, fn, name }) =>
+      functionToChat(fn, flatToolName(namespace, name), described)
+    )
+  }
+  // A Responses function tool is flat: {type, name, description, parameters}. Built-in tools
+  // (web_search, etc.) have no Chat equivalent and are dropped, as is a function without `name`.
+  if (asStr(field(tool, 'type')) !== 'function') return []
+  const name = field(tool, 'name')
+  if (name === undefined) return []
+  return [functionToChat(tool, name)]
 }
 
 function responsesToolChoiceToChat(toolChoice: JsonValue): JsonValue {
@@ -218,7 +322,12 @@ function responsesToolChoiceToChat(toolChoice: JsonValue): JsonValue {
   if (typeof toolChoice === 'string') return toolChoice
   if (isJsonObject(toolChoice)) {
     const name = asStr(field(toolChoice, 'name'))
-    return name !== undefined ? { type: 'function', function: { name } } : clone(toolChoice)
+    const namespace = asStr(field(toolChoice, 'namespace'))
+    if (name === undefined) return clone(toolChoice)
+    return {
+      type: 'function',
+      function: { name: namespace === undefined ? name : flatToolName(namespace, name) },
+    }
   }
   return 'auto'
 }
@@ -240,22 +349,33 @@ function responsesTextFormatToChat(format: JsonValue): JsonValue | undefined {
   }
 }
 
-/** Map a Chat Completions `usage` block to the Responses `usage` shape. */
+/**
+ * Map a Chat Completions `usage` block to the Responses `usage` shape. The cached part of the prompt
+ * is carried over (llama.cpp reports it as `prompt_tokens_details.cached_tokens`); Codex shows it and
+ * counts it, so a hard-coded 0 read as "nothing cached" on every turn.
+ */
 function mapUsage(usage: JsonValue): JsonValue {
   const input = asU64(field(usage, 'prompt_tokens')) ?? 0
   const output = asU64(field(usage, 'completion_tokens')) ?? 0
   const total = asU64(field(usage, 'total_tokens')) ?? input + output
+  const cached = asU64(field(field(usage, 'prompt_tokens_details'), 'cached_tokens')) ?? 0
   return {
     input_tokens: input,
-    input_tokens_details: { cached_tokens: 0 },
+    input_tokens_details: { cached_tokens: cached },
     output_tokens: output,
     output_tokens_details: { reasoning_tokens: 0 },
     total_tokens: total,
   }
 }
 
+/** A call's `name`, and its `namespace` when the request offered it in one. */
+function callName(name: JsonValue, names: NamespacedToolNames | undefined): JsonObject {
+  const named = typeof name === 'string' ? names?.get(name) : undefined
+  return named === undefined ? { name } : { name: named.name, namespace: named.namespace }
+}
+
 /** Build the `output` array (assistant message, then function_call items) from a Chat message. */
-function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
+function messageToOutputItems(message: JsonValue | undefined, names?: NamespacedToolNames): JsonValue[] {
   const output: JsonValue[] = []
   if (message === undefined) return output
 
@@ -280,7 +400,7 @@ function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
         type: 'function_call',
         id: newFcId(),
         call_id: asStr(field(tc, 'id')) ?? '',
-        name: name === undefined ? '' : clone(name),
+        ...callName(name === undefined ? '' : clone(name), names),
         arguments: asStr(field(fn, 'arguments')) ?? '',
         status: 'completed',
       })
@@ -298,7 +418,9 @@ function messageToOutputItems(message: JsonValue | undefined): JsonValue[] {
 export function chatResponseToResponses(
   chat: JsonValue,
   responseId: string,
-  modelFallback: string
+  modelFallback: string,
+  /** The request's namespaced functions (`namespacedToolNames`), whose calls are named back. */
+  names?: NamespacedToolNames
 ): JsonValue {
   const model = asStr(field(chat, 'model')) ?? modelFallback
   const created = asU64(field(chat, 'created')) ?? 0
@@ -307,7 +429,7 @@ export function chatResponseToResponses(
   const first = Array.isArray(choices) ? choices[0] : undefined
   const message = field(first, 'message')
 
-  const output = messageToOutputItems(message)
+  const output = messageToOutputItems(message, names)
   const usage = field(chat, 'usage')
 
   return {
@@ -354,10 +476,13 @@ export class ResponsesStreamConverter {
   private text = ''
   // tool calls keyed by the Chat `tool_calls[].index`
   private tools = new Map<number, ToolAcc>()
+  private readonly names: NamespacedToolNames | undefined
 
-  constructor(responseId: string, model: string) {
+  /** `names`: the request's namespaced functions (`namespacedToolNames`), whose calls are named back. */
+  constructor(responseId: string, model: string, names?: NamespacedToolNames) {
     this.responseId = responseId
     this.model = model
+    this.names = names
   }
 
   private nextSeq(): number {
@@ -468,7 +593,7 @@ export class ResponsesStreamConverter {
               id: acc.itemId,
               status: 'in_progress',
               call_id: acc.callId,
-              name: acc.name,
+              ...callName(acc.name, this.names),
               arguments: '',
             },
           })
@@ -552,7 +677,7 @@ export class ResponsesStreamConverter {
         id: acc.itemId,
         status: 'completed',
         call_id: acc.callId,
-        name: acc.name,
+        ...callName(acc.name, this.names),
         arguments: acc.args,
       })
       events.push({

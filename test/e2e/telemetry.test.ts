@@ -124,7 +124,12 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
       user: { id: 'device-42', ip_address: null },
       tags: { source: 'model_load', provider: 'llamacpp-upstream', quant: 'Q4_K_M', gpu_model: 'Apple M3' },
     })
-    expect(event.fingerprint?.slice(0, 2)).toEqual(['model-load-failure', 'llamacpp-upstream'])
+    expect(event.fingerprint?.slice(0, 4)).toEqual(['core-v1', 'runtime', 'load', 'llamacpp-upstream'])
+    expect(event.tags).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'runtime',
+      operation: 'load',
+    })
     expect(JSON.stringify(event)).not.toContain('hunter2')
     expectScrubbed()
 
@@ -148,11 +153,14 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     expect(stderr).toContain('ENOTDIR')
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ level: 'fatal', tags: { source: 'startup', error_code: 'ENOTDIR' } })
-    expect(events[0]?.exception.values[0]?.value).toContain('<data>/atomic-core')
+    expect(events[0]?.exception.values.at(-1)?.value).toBe('core startup: unknown')
     expectScrubbed()
   })
 
-  it('reports an engine that crashes after loading, and a compute failure behind the public API', async () => {
+  it.each([
+    ['chat/completions', 400],
+    ['messages', 500],
+  ] as const)('reports an engine crash and one compute failure behind /v1/%s', async (route, status) => {
     const marker = join(dataFolder, 'compute-error.marker')
     await core.writeModel(dataFolder, 'crashy')
     await core.writeFakeBackend(dataFolder, {
@@ -168,17 +176,21 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
       body: JSON.stringify({ port: 0 }),
     })
     const { port } = (await started.json()) as { port: number }
-    const chat = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    const chat = await fetch(`http://127.0.0.1:${port}/v1/${route}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'crashy', messages: [{ role: 'user', content: 'my secret prompt' }] }),
+      body: JSON.stringify({
+        model: 'crashy',
+        max_tokens: 32,
+        messages: [{ role: 'user', content: 'my secret prompt' }],
+      }),
     })
-    expect(chat.status).toBe(400)
+    expect(chat.status).toBe(status)
     await eventually(1)
     expect(events[0]).toMatchObject({
       level: 'warning',
-      fingerprint: ['inference-failure', 'llamacpp-upstream', 'compute'],
-      exception: { values: [{ type: 'InferenceFailure', value: 'Compute error.' }] },
+      fingerprint: ['core-v1', 'runtime', 'inference', 'llamacpp-upstream', 'compute', '', '', 'compute'],
+      exception: { values: [{ type: 'InferenceFailure', value: 'runtime inference: compute' }] },
     })
 
     const pid = Number(readFileSync(pidFile, 'utf8').trim().split('\n').at(-1))
@@ -186,7 +198,16 @@ describe.skipIf(!existsSync(APP_BIN) || process.platform === 'win32')('error rep
     await eventually(2)
     expect(events[1]).toMatchObject({
       level: 'error',
-      fingerprint: ['backend-crash', 'llamacpp-upstream', 'sigsegv'],
+      fingerprint: [
+        'core-v1',
+        'runtime',
+        'exit',
+        'llamacpp-upstream',
+        'process_exit',
+        'sigsegv',
+        '',
+        'process_exit',
+      ],
       tags: { source: 'backend_crash', signal: 'SIGSEGV' },
     })
     expect(JSON.stringify(events)).not.toContain('my secret prompt')

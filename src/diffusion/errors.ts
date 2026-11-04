@@ -38,8 +38,9 @@ export function isDiskFull(error: unknown): boolean {
  */
 export function ioError(context: string, error: unknown): AtomicCoreError {
   const reason = error instanceof Error ? error.message : String(error)
-  if (isDiskFull(error)) return diffusionError('DISK_FULL', 'The disk is full.', `${context}: ${reason}`)
-  return internalError(context, reason)
+  if (isDiskFull(error))
+    return new AtomicCoreError('DISK_FULL', 'The disk is full.', `${context}: ${reason}`, { cause: error })
+  return new AtomicCoreError('INTERNAL', context, reason, { cause: error })
 }
 
 export function isDiffusionErrorCode(code: unknown): code is DiffusionErrorCode {
@@ -68,5 +69,5 @@ export function errorBody(error: unknown): DiffusionErrorBody {
 export function toDiffusionError(error: unknown): AtomicCoreError {
   if (error instanceof AtomicCoreError && isDiffusionErrorCode(error.code)) return error
   const body = errorBody(error)
-  return diffusionError(body.code, body.message, body.details)
+  return new AtomicCoreError(body.code, body.message, body.details, { cause: error })
 }

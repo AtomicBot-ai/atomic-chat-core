@@ -58,14 +58,27 @@ export function codexProfilePath(dir: string): string {
 
 /**
  * The profile's exact bytes. Codex reads the key from the variable `env_key` names, never inline, so
- * a keyless server gets no `env_key` line at all and `launch` sets the variable on the child.
+ * a keyless server gets no `env_key` line at all and `launch` sets the variable on the child. A known
+ * served window is written as `model_context_window` (Codex otherwise assumes 272K for a model it
+ * does not know) with compaction at three quarters of it; an unknown one writes neither line.
  */
-export function renderCodexProfile(apiUrl: string, model: string, apiKey: string): string {
+export function renderCodexProfile(
+  apiUrl: string,
+  model: string,
+  apiKey: string,
+  contextLength?: number
+): string {
+  const window =
+    contextLength !== undefined && contextLength > 0
+      ? `model_context_window = ${contextLength}\n` +
+        `model_auto_compact_token_limit = ${Math.floor((contextLength * 3) / 4)}\n`
+      : ''
   return (
     `${CODEX_PROFILE_OWNER_PREFIX}: \`codex --profile ${CODEX_PROFILE}\` runs Codex on your local models.\n` +
     '# Atomic Chat rewrites this file when Codex is connected again and deletes it on disconnect.\n' +
     `model = "${tomlBasicStringEscape(model)}"\n` +
     `model_provider = "${CODEX_PROFILE}"\n` +
+    window +
     '\n' +
     `[model_providers.${CODEX_PROFILE}]\n` +
     'name = "Atomic Chat"\n' +
@@ -96,10 +109,11 @@ export async function writeCodexProfile(
   dir: string,
   apiUrl: string,
   model: string,
-  apiKey: string
+  apiKey: string,
+  contextLength?: number
 ): Promise<string> {
   const path = codexProfilePath(dir)
-  const contents = renderCodexProfile(apiUrl, model, apiKey)
+  const contents = renderCodexProfile(apiUrl, model, apiKey, contextLength)
   // Cannot fail with the escaping above; it keeps a future edit of the template from shipping a file
   // Codex would reject.
   parseToml(contents)
@@ -163,7 +177,7 @@ export async function configureCodex(input: ConfigureInput): Promise<void> {
   const repair = await repairLegacyCodexConfig(input.fs, dir, input.platform)
   if (repair.kind === 'conflict') throw new AtomicCoreError('IO_ERROR', repair.reason)
 
-  await writeCodexProfile(input.fs, dir, input.apiUrl, input.model, input.apiKey)
+  await writeCodexProfile(input.fs, dir, input.apiUrl, input.model, input.apiKey, input.contextLength)
 }
 
 registerWriter('codex', configureCodex)

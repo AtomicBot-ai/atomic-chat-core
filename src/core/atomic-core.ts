@@ -38,11 +38,11 @@ import { managedExternalRoutePolicy } from './managed-engines.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
 import type { SettingsStore } from '../settings/index.js'
-import { captureReport, loadFailureReport } from '../telemetry/index.js'
+import { captureReport, failureObserver, loadFailureReport } from '../telemetry/index.js'
 import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
-import { DynamicTrustedHosts } from '../server/index.js'
+import { DynamicTrustedHosts, SessionWindows } from '../server/index.js'
 import type { ClientRegistry, ControlServer, SessionSummary } from '../server/index.js'
 import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
@@ -149,6 +149,8 @@ export class AtomicCore {
   private readonly publicServer: PublicServerLifecycle
   /** What the public listener trusts beyond its configuration: the tunnel name, the socket's address. */
   private readonly trustedHosts = new DynamicTrustedHosts()
+  /** The window each loaded session serves, for `/v1/models` and the request log. */
+  private readonly sessionWindows = new SessionWindows()
   /** The Cloudflare quick tunnel in front of the public listener. */
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
@@ -201,6 +203,7 @@ export class AtomicCore {
       externalPolicy: managedExternalRoutePolicy,
     })
     this.remoteAccess = new RemoteAccessManager({
+      onFailure: failureObserver(parts.errors),
       ...parts.remoteAccess,
       server: () => this.publicServer.endpoint(),
       hosts: this.trustedHosts,
@@ -218,6 +221,7 @@ export class AtomicCore {
         ...(parts.publicApiKeys ? { apiKeys: parts.publicApiKeys } : {}),
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
+        contextWindow: (target) => this.sessionWindows.of(target),
         providers: () => this.cloud.routing(),
         selection: () => this.servedSelection,
         chatgpt: parts.chatgptBackend,

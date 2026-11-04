@@ -2,8 +2,8 @@
  * Classification of a failed `llama-server` process into the app's error contract. Port of
  * `src-tauri/plugins/tauri-plugin-llamacpp-upstream/src/error.rs` (`LlamacppError::from_stderr`,
  * `from_exit_status`, `from_process_output`). Pinned by `test/contract/errors.test.ts`. The
- * TurboQuant fork's `error.rs` differs in one rule, `wrong number of tensors` (app commit
- * `ec1fd3ea7`), so the provider is a parameter.
+ * recorded desktop fixture predates the tensor-layout correction: a tensor-count mismatch alone
+ * is backend incompatibility on every provider (2026-11-02-tensor-layout-error).
  *
  * The cascade is ordered: the first matching group wins. Messages are the app's user-facing strings
  * and are part of the contract. `details` is always set (the raw stream), even when empty.
@@ -177,11 +177,26 @@ export function classifyProcessOutput(
   provider: LocalProviderId = 'llamacpp-upstream'
 ): AtomicCoreError {
   const base = classifyExit(exit, stderr, platform, provider)
-  if (base.code !== 'LLAMA_CPP_PROCESS_ERROR') return base
   const fromStdout = classifyStderr(stdout, provider)
-  if (fromStdout.code !== 'LLAMA_CPP_PROCESS_ERROR') return fromStdout
-  if (stderr.trim() === '' && stdout.trim() !== '') {
-    return new AtomicCoreError(base.code, base.message, stdout)
-  }
-  return base
+  const selected =
+    base.code !== 'LLAMA_CPP_PROCESS_ERROR'
+      ? base
+      : fromStdout.code !== 'LLAMA_CPP_PROCESS_ERROR'
+        ? fromStdout
+        : stderr.trim() === '' && stdout.trim() !== ''
+          ? new AtomicCoreError(base.code, base.message, stdout)
+          : base
+  // Preserve the Rust-compatible body while retaining facts that disappear when details are scrubbed.
+  return new AtomicCoreError(selected.code, selected.message, selected.details, {
+    diagnostic: {
+      component: 'runtime',
+      operation: 'load',
+      stage: 'ready',
+      exitCode: exit.code,
+      signal: exit.signal,
+      ...(selected.code === 'LLAMA_CPP_PROCESS_ERROR' && /GGML_ASSERT/.test(stderr + stdout)
+        ? ({ nativeFailure: 'assertion', reason: 'native_crash' } as const)
+        : {}),
+    },
+  })
 }

@@ -35,6 +35,11 @@ export interface LlamacppConfig {
   llamacpp_env: string
   extra_args: string
   reasoning_preserve: boolean
+  /**
+   * `--reasoning-budget`: thinking tokens a request that names no budget may spend; -1 unbounded, 0 no
+   * thinking. Not in Rust `LlamacppConfig` (absent means -1 there).
+   */
+  reasoning_budget: number
   mtp: boolean
   mtp_draft_path: string
   dflash: boolean
