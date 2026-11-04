@@ -70,14 +70,36 @@ export function parseBadBackends(raw: unknown): BadBackendEntry[] {
 const sameKey = (e: BadBackendEntry, provider: string, backend: string, driver: string) =>
   e.provider === provider && e.backend === stripBom(backend) && e.driver === driver
 
-/** Whether `backend` of `provider` failed on this machine with the driver it has now. */
+/**
+ * How long a record lasts when its cause can go away without a driver update: a pack Windows could
+ * not load (`ENGINE_BINARY_BROKEN`: a DLL an antivirus quarantined, a VC++ runtime installed later)
+ * or one that died before printing anything. A card that cannot run the build at all
+ * (`GPU_BACKEND_INCOMPATIBLE`, e.g. CUDA 13 on Turing before R616) stays recorded until the driver
+ * changes.
+ */
+export const TRANSIENT_BAD_BACKEND_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+/** Reasons that only a driver update clears; any other record lapses after the TTL. */
+const DRIVER_BOUND_REASONS = new Set(['GPU_BACKEND_INCOMPATIBLE'])
+
+/** Whether a record still applies at `now`: driver-bound ones always, others for the TTL. */
+export function isBadBackendEntryLive(entry: BadBackendEntry, now: number = Date.now()): boolean {
+  if (DRIVER_BOUND_REASONS.has(entry.reason)) return true
+  const at = Date.parse(entry.at)
+  // A record without a readable time cannot be aged; keep it, as before the TTL existed.
+  if (Number.isNaN(at)) return true
+  return now - at < TRANSIENT_BAD_BACKEND_TTL_MS
+}
+
+/** Whether `backend` of `provider` failed on this machine with the driver it has now, and still counts. */
 export function isBackendMarkedBad(
   entries: readonly BadBackendEntry[],
   provider: string,
   backend: string,
-  driver: string
+  driver: string,
+  now: number = Date.now()
 ): boolean {
-  return entries.some((e) => sameKey(e, provider, backend, driver))
+  return entries.some((e) => sameKey(e, provider, backend, driver) && isBadBackendEntryLive(e, now))
 }
 
 /** `entries` with `entry` in place of any record of the same key, and without records of an older driver for it. */

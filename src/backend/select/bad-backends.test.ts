@@ -5,6 +5,8 @@ import {
   backendFallbackRank,
   gpuDriverKey,
   isBackendMarkedBad,
+  isBadBackendEntryLive,
+  TRANSIENT_BAD_BACKEND_TTL_MS,
   nextFallbackBackend,
   parseBadBackends,
   serializeBadBackends,
@@ -71,6 +73,32 @@ describe('the bad-backends document', () => {
     const other = entry({ backend: 'win-vulkan-x64' })
     const next = withBadBackend([entry(), other], entry({ driver: '610.47', at: 'later' }))
     expect(next).toEqual([other, entry({ driver: '610.47', at: 'later' })])
+  })
+})
+
+describe('how long a record counts', () => {
+  const at = Date.parse('2026-11-04T10:00:00.000Z')
+  const day = 24 * 60 * 60 * 1000
+
+  it('keeps a card-cannot-run record until the driver changes, however old', () => {
+    const ptx = entry({ reason: 'GPU_BACKEND_INCOMPATIBLE' })
+    expect(isBadBackendEntryLive(ptx, at + 365 * day)).toBe(true)
+    expect(isBackendMarkedBad([ptx], ptx.provider, ptx.backend, ptx.driver, at + 365 * day)).toBe(true)
+  })
+
+  it('lets a record whose cause can go away lapse after a week', () => {
+    for (const reason of ['ENGINE_BINARY_BROKEN', 'EMPTY_STDERR_CRASH', 'CPU_INSTRUCTION_UNSUPPORTED']) {
+      const record = entry({ reason })
+      expect(isBadBackendEntryLive(record, at + 6 * day)).toBe(true)
+      expect(isBadBackendEntryLive(record, at + TRANSIENT_BAD_BACKEND_TTL_MS)).toBe(false)
+      expect(
+        isBackendMarkedBad([record], record.provider, record.backend, record.driver, at + 8 * day)
+      ).toBe(false)
+    }
+  })
+
+  it('keeps a record whose time cannot be read', () => {
+    expect(isBadBackendEntryLive(entry({ reason: 'ENGINE_BINARY_BROKEN', at: '' }), at + 30 * day)).toBe(true)
   })
 })
 

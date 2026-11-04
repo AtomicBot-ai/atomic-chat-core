@@ -18,7 +18,9 @@ title: "Run only GPU builds the card can run, and retry a failed GPU load once o
   stderr is `GPU_BACKEND_INCOMPATIBLE` (OOM still wins); loader exit codes are `ENGINE_BINARY_BROKEN`, an
   illegal instruction `CPU_INSTRUCTION_UNSUPPORTED`. On those failures, or an empty-stderr crash of a GPU build,
   the load is retried once on the next installed build (CUDA 13 → CUDA 12 / ROCm → Vulkan → CPU) and the build
-  is recorded in `<data>/atomic-core/bad-backends.json`, keyed by provider, backend directory and GPU driver;
+  is recorded in `<data>/atomic-core/bad-backends.json`, keyed by provider, backend directory and GPU driver
+  (a `GPU_BACKEND_INCOMPATIBLE` record lasts until the driver changes; one whose cause can go away by itself —
+  a quarantined DLL, a missing VC++ runtime, an empty-stderr crash — lapses after 7 days);
   selection and the advisor's catalog skip recorded builds, and a driver update changes the key. Every
   llama.cpp load failure ends its `details` with one `atomic-core-diag {json}` line (exit code, stage, backend,
   build, fallback, empty stderr) for the app's telemetry. A `--device` the build does not list is dropped, and a
