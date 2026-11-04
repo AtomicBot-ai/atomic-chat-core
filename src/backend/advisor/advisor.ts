@@ -60,7 +60,8 @@ import type {
   TurboquantRelease,
   UpstreamOfferOptions,
 } from '../catalog/index.js'
-import { findLatestPrismVersionForBackend } from '../select/index.js'
+import { findLatestPrismVersionForBackend, gpuDriverKey, isBackendMarkedBad } from '../select/index.js'
+import { readBadBackends } from '../install/runtime-backend.js'
 import { CORE_VERSION } from '../../version.js'
 import { scanInstalledBackends } from '../installed/index.js'
 import { recheckOptimalBackend, refreshOptimalBackendCache } from '../optimal/index.js'
@@ -281,7 +282,14 @@ export class BackendAdvisor {
       this.installed(),
     ])
     const merged = this.policy.merge(remote, installed)
-    const available = this.policy.filterBySupport(merged, supported, osType)
+    // A pack this machine already failed to run with its current GPU driver (CUDA 13 on Turing
+    // before R616, a build Windows cannot load) is left out, so detection and the recommendation
+    // move on to the next build instead of offering it again. A driver update clears the record.
+    const badEntries = await readBadBackends(this.deps.layout)
+    const driver = gpuDriverKey(gpus)
+    const available = this.policy
+      .filterBySupport(merged, supported, osType)
+      .filter((b) => !isBackendMarkedBad(badEntries, this.provider, b.backend, driver))
 
     const installedKeys = new Set(installed.map((b) => `${b.version}|${b.backend}`))
     const installedAvailable = available.filter((b) => installedKeys.has(`${b.version}|${b.backend}`))

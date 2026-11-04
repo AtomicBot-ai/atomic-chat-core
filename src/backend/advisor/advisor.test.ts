@@ -15,6 +15,7 @@ import {
 } from '../catalog/index.js'
 import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
+import { rememberBadBackend } from '../install/runtime-backend.js'
 import { TURBOQUANT_RELEASE_INDEX_URL } from '../turboquant.js'
 import type { BackendVersion, GpuProbeInfo, OptimalBackendCacheRecord } from '../types.js'
 import {
@@ -301,6 +302,30 @@ describe('BackendAdvisor.catalog', () => {
     expect(h.fetches).toHaveLength(1)
     expect((await h.advisor.catalog({ force: true })).source).toBe('live')
     expect(h.fetches).toHaveLength(2)
+  })
+
+  it('leaves out a pack this machine failed to run with its current driver, until the driver changes', async () => {
+    await rememberBadBackend(data.layout, {
+      provider: 'llamacpp-upstream',
+      backend: 'win-cuda-13.3-x64',
+      driver: '581.42',
+      reason: 'GPU_BACKEND_INCOMPATIBLE',
+      version: UP,
+      at: '2026-11-04T00:00:00.000Z',
+    })
+    const h = await harness('llamacpp-upstream', host('windows', [rtx4090]))
+    const catalog = await h.advisor.catalog({ current_backend: 'b10405/win-cpu-x64' })
+    expect(catalog.available.map((b) => b.backend)).toEqual([
+      'win-cpu-x64',
+      'win-cuda-12.4-x64',
+      'win-vulkan-x64',
+    ])
+    expect(catalog.recommended).toBe(`${UP}/win-cuda-12.4-x64`)
+
+    // A newer driver is a different key: the CUDA 13 build is offered again.
+    const updated = await harness('llamacpp-upstream', host('windows', [{ ...rtx4090, driver_version: '616.07' }]))
+    const fresh = await updated.advisor.catalog({ current_backend: 'b10405/win-cpu-x64', force: true })
+    expect(fresh.recommended).toBe(`${UP}/win-cuda-13.3-x64`)
   })
 
   it('upstream offline: the bundled baseline, never cached, never thrown', async () => {
