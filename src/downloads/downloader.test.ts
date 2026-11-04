@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -249,6 +249,102 @@ describe('Downloader', () => {
     await expect(
       dl.download('t16', [{ url: server.url('/ok.bin'), save_path: 'p/a.bin', proxy: { url: 'ftp://p' } }])
     ).rejects.toThrow('Error: Unsupported proxy scheme: ftp')
+  })
+
+  it('closes write streams and settles sibling transfers before rejecting on failure or cancel', async () => {
+    const dataFolder = await mkdtemp(join(tmpdir(), 'atomic-dl-sibling-'))
+    let siblingStreaming!: () => void
+    const siblingStarted = new Promise<void>((resolve) => {
+      siblingStreaming = resolve
+    })
+    let releaseSibling!: () => void
+    const siblingGate = new Promise<void>((resolve) => {
+      releaseSibling = resolve
+    })
+    let siblingAborted = false
+
+    const dl = new Downloader({
+      dataFolder,
+      platform: 'linux',
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input)
+        if (url.endsWith('/main.zip')) {
+          await siblingStarted
+          return new Response('missing archive', { status: 404 })
+        }
+        if (url.endsWith('/cudart.zip')) {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              siblingAborted = true
+              releaseSibling()
+            },
+            { once: true }
+          )
+          let firstChunk = true
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              async pull(controller) {
+                if (firstChunk) {
+                  firstChunk = false
+                  controller.enqueue(new Uint8Array([1, 2, 3, 4]))
+                  siblingStreaming()
+                  return
+                }
+                await siblingGate
+                if (init?.signal?.aborted) {
+                  controller.error(new Error('aborted'))
+                  return
+                }
+                controller.enqueue(new Uint8Array([5, 6, 7, 8]))
+                controller.close()
+              },
+            }),
+            { status: 200, headers: { 'content-length': '8' } }
+          )
+        }
+        await rm(join(dataFolder, 'diffusion/backends/gone'), { recursive: true, force: true })
+        return new Response(new Uint8Array([1, 2, 3, 4]), {
+          status: 200,
+          headers: { 'content-length': '4' },
+        })
+      }) as unknown as typeof fetch,
+      availableSpace: async () => undefined,
+      sleep: async () => {},
+      emit: () => {},
+    })
+
+    const stagingDir = 'diffusion/backends/win-cuda12-x64.incoming-1.download'
+    try {
+      await expect(
+        dl.download('sd-cpp-backend', [
+          {
+            url: 'http://engine.test/main.zip',
+            save_path: `${stagingDir}/sd-bin-win-cu12-x64.zip`,
+            size: 8,
+          },
+          {
+            url: 'http://engine.test/cudart.zip',
+            save_path: `${stagingDir}/cudart-sd-bin-win-cu12-x64.zip`,
+            size: 8,
+          },
+        ])
+      ).rejects.toThrow('Failed to download: HTTP status 404, missing archive')
+      expect(siblingAborted).toBe(true)
+    } finally {
+      releaseSibling()
+    }
+
+    await rm(join(dataFolder, stagingDir), { recursive: true, force: true })
+    await expect(
+      dl.download('sd-cpp-gone', [
+        {
+          url: 'http://engine.test/gone.zip',
+          save_path: 'diffusion/backends/gone/cudart-sd-bin-win-cu12-x64.zip',
+          size: 4,
+        },
+      ])
+    ).rejects.toThrow(/^Error: \[disk_device_lost\] ENOENT:/)
   })
 })
 
