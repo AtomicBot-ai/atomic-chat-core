@@ -74,6 +74,7 @@ import {
   upstreamManifestForTag,
   ensureTurboquantCudart,
   ensureUpstreamCudart,
+  llamaBackendFallback,
   OptimalBackendStore,
   readRuntimeSettings,
   resolveBackendExe,
@@ -295,6 +296,13 @@ export async function createAtomicCore(
                 : ensureUpstreamCudart(repairVersion, repairBackend, backendDir, taskId, deps)
             }
           ),
+        // A GPU build this card or driver cannot run (CUDA 13 on Turing before R616, a pack Windows
+        // cannot load) is remembered and the load is retried once on the next installed build.
+        backendFallback: (failed, reason) =>
+          llamaBackendFallback(layout, provider, hardware, failed, reason, {
+            hostArch: process.arch,
+            log: (message) => log('warn', message),
+          }),
         cpuInfo: async () => {
           // Unknown flags stay `undefined`: the no-AVX preflight fires on a positive signal only.
           const facts = await hardware.facts()
