@@ -61,6 +61,7 @@ import {
   mlxTimeout,
 } from './errors.js'
 import { smallMemoryDefaultCtx } from '../llamacpp/fit-margin.js'
+import { resolveNPredict } from '../llamacpp/generation-limits.js'
 import {
   readMlxMaxCtxTrain,
   readMlxMemoryFacts,
@@ -71,6 +72,8 @@ import {
 export const MLX_SERVER_BINARY = 'mlx-server'
 /** The extension's `timeout` default, in seconds. */
 export const MLX_DEFAULT_TIMEOUT_SECS = 600
+/** The answer cap mlx-server applies to a request that sends no `max_tokens` (its default is 2048). */
+export const MLX_MAX_TOKENS_ENV = 'MLX_VLM_MAX_TOKENS'
 
 interface MlxSessionExtra {
   /** The context the server was started with (`--max-kv-size`). */
@@ -237,8 +240,19 @@ export class MlxRuntime implements LocalRuntime {
       this.emit('core:log', { level: 'warn', msg: message })
     )
     const { modelPath } = registry.resolvePaths(yml)
-    const exe = opts.exePath ?? (await this.options.resolveBinary?.()) ?? this.binaryPath()
-    if (!exe || !this.exists(exe)) throw mlxBinaryMissing(exe)
+    const resolved = opts.exePath == null ? await this.options.resolveBinary?.() : undefined
+    const exe = opts.exePath ?? resolved ?? this.binaryPath()
+    if (!exe || !this.exists(exe))
+      throw mlxBinaryMissing(
+        exe,
+        opts.exePath != null
+          ? 'mlx_explicit_binary_missing'
+          : resolved != null
+            ? 'mlx_resolved_binary_missing'
+            : exe
+              ? 'mlx_resources_binary_missing'
+              : 'mlx_binary_unresolved'
+      )
     if (!this.exists(modelPath)) throw mlxModelMissing(modelPath)
 
     const port = opts.port ?? (await randomFreePort(this.table.usedPorts()))
@@ -286,6 +300,10 @@ export class MlxRuntime implements LocalRuntime {
     for (const [key, value] of Object.entries(this.options.baseEnv ?? process.env))
       if (value !== undefined) env[key] = value
     env['MLX_VLM_SINGLE_MODEL'] = '1'
+    // mlx-server stops a request without `max_tokens` at 2048 tokens; llama.cpp loads get
+    // DEFAULT_N_PREDICT. Same default here, never above the window; a user's own value stays.
+    if (!env[MLX_MAX_TOKENS_ENV])
+      env[MLX_MAX_TOKENS_ENV] = String(resolveNPredict(0, config.ctx_size > 0 ? config.ctx_size : undefined))
 
     throwIfLoadCancelled(opts.signal)
     // GPU residency: every other engine is off the GPU, its exit confirmed, before this one starts.

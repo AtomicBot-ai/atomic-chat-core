@@ -9,9 +9,15 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import { isConcreteOfGpuFamily, mapOldBackendToNew, WIN_ROCM_FAMILY_ID } from '../catalog/index.js'
+import {
+  LINUX_ROCM_BACKEND,
+  isConcreteOfGpuFamily,
+  mapOldBackendToNew,
+  WIN_ROCM_FAMILY_ID,
+} from '../catalog/index.js'
 import type { BackendFeatures, BackendVersion, GpuProbeInfo, SupportedFeatures } from '../types.js'
 import { compareBackendVersionsForSort, compareVersions, parseRustU32, stripBom } from '../version.js'
+import type { RocmHostProbe } from '../turboquant.js'
 import { isRocmSupportedPciId } from './amd-rocm-pci-ids.js'
 
 // ---------------------------------------------------------------------------------------------
@@ -106,19 +112,27 @@ export function rocmSupportedWindows(hasAmdGpu: boolean, deviceIds: readonly num
   return hasAmdGpu && deviceIds.some((id) => isRocmSupportedPciId(id))
 }
 
+// ubuntu-24-rocm GPU_TARGETS in ggml-org/llama.cpp b11617 release.yml.
+// KFD encodes IP major * 10000 + minor * 100 + stepping (gfx90a = 9.0.10).
+const UPSTREAM_ROCM_GFX = new Set([
+  90008, 90010, 90402, 90500, 100100, 100101, 100102, 100300, 100301, 100302, 100303, 100304, 100305, 100306,
+  110000, 110001, 110002, 110003, 110500, 110501, 110502, 120000, 120001,
+])
+
 /**
  * Which CPU/GPU tiers this host can run. The driver is system-wide, so *any* NVIDIA GPU over a floor
  * enables that CUDA tier; architecture is per-card and must hold for *every* card (llama.cpp
  * offloads across all visible devices), so one sub-7.5 GPU vetoes CUDA 13 for the whole host, and on
  * Windows so does one pre-Ampere GPU on a driver before R616 (`gpuMeetsCuda13DriverForArch`).
- * Vulkan is on when any GPU carries `vulkan_info`; ROCm only on Windows via the PCI table; OpenCL
+ * Vulkan is on when any GPU carries `vulkan_info`; ROCm via the Windows PCI table or the Linux HIP and KFD probe; OpenCL
  * only on Windows with an Adreno GPU (the only OpenCL build ggml-org ships is for Adreno). On any OS
  * other than linux/windows only the CPU flags are set (no CUDA, no Vulkan — macOS has Metal).
  */
 export function getSupportedFeatures(
   osType: string,
   cpuExtensions: readonly string[],
-  gpus: readonly GpuProbeInfo[]
+  gpus: readonly GpuProbeInfo[],
+  rocm?: RocmHostProbe
 ): SupportedFeatures {
   const features: SupportedFeatures = {
     avx: cpuExtensions.includes('avx'),
@@ -158,6 +172,10 @@ export function getSupportedFeatures(
   }
   features.cuda13 = features.cuda13 && allNvidiaMeetCuda13Arch
   if (osType === 'windows') features.rocm = rocmSupportedWindows(hasAmdGpu, amdDeviceIds)
+  if (osType === 'linux' && hasAmdGpu && rocm?.hasRuntime)
+    features.rocm =
+      rocm.gfxTargetVersions.length > 0 &&
+      rocm.gfxTargetVersions.every((target) => UPSTREAM_ROCM_GFX.has(target))
   return features
 }
 
@@ -181,8 +199,7 @@ export function normalizeFeatures(features: Partial<BackendFeatures> | null | un
  * Backend ids installable on `<osType>-<arch>` given the detected features. Windows x64 always has
  * CPU, then CUDA 12.4, the *family* ids `win-cuda-13-x64` / `win-rocm-x64` (concrete minors come
  * from the manifest, ATO-105) and Vulkan. Windows arm64: CPU, OpenCL on an Adreno GPU and the
- * `win-cuda-13-arm64` family. Linux x64: CPU, plus Vulkan — the CUDA and ROCm flags are ignored
- * (2026-05-28 ADR). Linux arm64: CPU, Vulkan and the `linux-cuda-13-arm64` family (NVIDIA GB10 /
+ * `win-cuda-13-arm64` family. Linux x64: CPU, the supported ROCm build and Vulkan. Linux arm64: CPU, Vulkan and the `linux-cuda-13-arm64` family (NVIDIA GB10 /
  * Grace hosts); the Snapdragon build is not offered. macOS its single arch build. Anything else is
  * `INVALID_ARGUMENT`.
  */
@@ -210,6 +227,7 @@ export function determineSupportedBackends(
     case 'linux-x86_64':
     case 'linux-x86':
       supported.push('linux-cpu-x64')
+      if (features.rocm) supported.push(LINUX_ROCM_BACKEND)
       if (features.vulkan) supported.push('linux-vulkan-x64')
       break
     case 'linux-aarch64':
@@ -256,8 +274,7 @@ export function listSupportedBackends(
  * The hardware gate on the merged catalog. Windows keeps only backends whose (normalised) id is in
  * `supportedBackends`, matching concrete CUDA-13 and ROCm assets against their family ids so
  * `win-cuda-13.4-x64` is accepted when `win-cuda-13-x64` is supported and flows downstream unchanged.
- * Linux keeps everything but the CUDA builds, which need their family id (`linux-cuda-13-arm64`)
- * supported: CUDA ranks above every other category, so an unfiltered entry would be recommended to
+ * Linux gates ROCm on support for the published build and CUDA on its family id: CUDA ranks above every other category, so an unfiltered entry would be recommended to
  * a host without an NVIDIA GPU. Every other OS returns the list unfiltered (the manifest parser
  * already applied the arch filter).
  */
@@ -269,6 +286,9 @@ export function filterBackendsBySupport(
   const supportedSet = new Set(supportedBackends)
   if (osType === 'linux') {
     return merged.filter((b) => {
+      const raw = stripBom(b.backend)
+      if (/^(linux|ubuntu)-rocm-/.test(raw))
+        return mapOldBackendToNew(raw) === LINUX_ROCM_BACKEND && supportedSet.has(LINUX_ROCM_BACKEND)
       const m = /^linux-cuda-(\d+)\.\d+-(arm64)$/.exec(stripBom(b.backend))
       return !m || supportedSet.has(`linux-cuda-${m[1]}-${m[2]}`)
     })

@@ -11,6 +11,7 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
+import { LINUX_ROCM_BACKEND, linuxBackendForUpstreamInfix } from './archive.js'
 import type { BackendVersion, SettingUpdateResult } from '../types.js'
 
 /**
@@ -33,8 +34,8 @@ import type { BackendVersion, SettingUpdateResult } from '../types.js'
 export function mapOldBackendToNew(oldBackend: string): string {
   if (oldBackend.startsWith('ubuntu-')) {
     const archSuffix = oldBackend.includes('-arm64') ? 'arm64' : 'x64'
-    const cuda = /^ubuntu-cuda-(13\.\d+)-arm64$/.exec(oldBackend)
-    if (cuda) return `linux-cuda-${cuda[1]}-arm64`
+    const current = linuxBackendForUpstreamInfix(oldBackend)
+    if (current) return current
     if (oldBackend.includes('vulkan')) return `linux-vulkan-${archSuffix}`
     return `linux-cpu-${archSuffix}`
   }
@@ -92,6 +93,7 @@ export function mapOldBackendToNew(oldBackend: string): string {
   if (isLinux) {
     if (
       oldBackend === 'linux-cpu-x64' ||
+      oldBackend === LINUX_ROCM_BACKEND ||
       oldBackend === 'linux-vulkan-x64' ||
       oldBackend === 'linux-cpu-arm64' ||
       oldBackend === 'linux-vulkan-arm64' ||

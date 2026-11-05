@@ -33,7 +33,7 @@ export const PRISM_GPU_MIN_VRAM_MIB = 2 * 1024
 
 /**
  * Supported features: the shared CUDA/Vulkan/Windows-ROCm rules, plus Linux ROCm from the host
- * probe (PrismML publishes a Linux ROCm 7.2 build, ggml-org does not).
+ * probe and the target list for the PrismML ROCm 7.2 build.
  */
 export function getPrismSupportedFeatures(
   osType: string,

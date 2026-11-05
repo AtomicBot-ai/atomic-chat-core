@@ -138,4 +138,19 @@ describe('IMAGE_JOB_KIND', () => {
       sample_params: { guidance: { txt_cfg: 1, distilled_guidance: 2.5 } },
     })
   })
+
+  it('tiles a 1024² decode on a Vulkan build, and only there (Atomic-Chat#350)', () => {
+    const square = sampleRequest({ width: 1024, height: 1024 })
+    const body = (overrides: Parameters<typeof sampleSpec>[0]) =>
+      IMAGE_JOB_KIND.buildBody(square, sampleSpec(overrides), 1, { refs: [] })
+    expect(body({ backend: 'vulkan' })['vae_tiling_params']).toEqual({ enabled: true })
+    expect(body({ backend: 'metal' })).not.toHaveProperty('vae_tiling_params')
+    expect(body({ backend: 'cuda' })).not.toHaveProperty('vae_tiling_params')
+    // Restarted on the CPU backend, the Vulkan cap no longer applies.
+    expect(body({ backend: 'vulkan', cpuFallback: true })).not.toHaveProperty('vae_tiling_params')
+    // A small image keeps the one-graph decode on Vulkan too.
+    expect(
+      IMAGE_JOB_KIND.buildBody(sampleRequest(), sampleSpec({ backend: 'vulkan' }), 1, { refs: [] })
+    ).not.toHaveProperty('vae_tiling_params')
+  })
 })

@@ -172,9 +172,11 @@ describe("conf's mirror whitelist", () => {
       .filter((n) => MIRROR_WHITELIST.some((e) => new RegExp(`^llama-${tag}-bin-${e.pattern}$`).test(n)))
       .sort()
 
-  it('the copy picks exactly what conf mirrored of b11463', () => {
+  it('adds Linux ROCm to the archives conf historically mirrored of b11463', () => {
     const mirrored = baseline.releases.find((r) => r.tag === 'b11463')!.assets.map((a) => a.name)
-    expect(select('b11463', release('b11463').assets)).toEqual([...mirrored].sort())
+    expect(select('b11463', release('b11463').assets)).toEqual(
+      [...mirrored, 'llama-b11463-bin-ubuntu-rocm-10.0-x64.tar.gz'].sort()
+    )
   })
 
   it("reads the array out of conf's source, exported or not, without running it", () => {

@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cudaRuntimeZip, storedZip } from '../../../test/helpers/backend-install-e2e.js'
+import { cudaRuntimeZip, storedZip, storedZipFiles } from '../../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import {
@@ -16,7 +17,7 @@ import {
   verifyPrismBackendBinary,
 } from './service.js'
 import { AtomicCoreError, parseLoadDiag } from '../../contracts/index.js'
-import { DOWNLOAD_CANCELLED } from '../../downloads/index.js'
+import { DOWNLOAD_CANCELLED, Downloader, HASH_MISMATCH_MESSAGE } from '../../downloads/index.js'
 import { windowsLaunchVerdict } from './windows-launch-check.js'
 import type { PrismManifest } from '../catalog/index.js'
 import { OptimalBackendStore } from '../optimal/index.js'
@@ -88,6 +89,42 @@ describe('listInstalled', () => {
 })
 
 describe('install', () => {
+  it.skipIf(process.platform === 'win32')(
+    'checks the staged Linux HIP plugin before replacing an installed pack',
+    async () => {
+      const id = 'linux-rocm-10.0-x64'
+      const target = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b11617', id)
+      const source = join(data.root, 'upstream')
+      const root = 'llama-b11617'
+      const exe = join(source, root, 'llama-server')
+      await mkdir(join(source, root), { recursive: true })
+      const backend = new BackendService({
+        layout: data.layout,
+        provider: 'llamacpp-upstream',
+        platform: 'linux',
+        readManifest: async () => null,
+        downloader: {
+          download: async (_task: string, items: Array<{ save_path: string }>) => {
+            await tarCreate({ gzip: true, cwd: source, file: items[0]!.save_path }, [root])
+          },
+        } as never,
+      })
+      const working =
+        '#!/bin/sh\n[ "$1" = "--list-devices" ] || exit 1\necho "Available devices:"\necho "  ROCm0: Radeon (8192 MiB, 8192 MiB free)"\n'
+      await writeFile(exe, working, { mode: 0o755 })
+      await expect(backend.install('b11617', id, { taskId: 'install' })).resolves.toMatchObject({
+        installed: true,
+      })
+      await writeFile(exe, '#!/bin/sh\necho "Available devices:"\n')
+      await expect(backend.install('b11617', id, { taskId: 'replace', force: true })).rejects.toThrow(
+        /enumerate an AMD GPU/
+      )
+      expect(await readFile(join(target, 'build', 'bin', 'llama-server'), 'utf8')).toBe(working)
+    },
+    // Two new executable paths can each trigger a cold macOS security scan.
+    30_000
+  )
+
   it('rejects a macOS pack with the wrong build before replacing the installed version', async () => {
     const target = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6325', 'macos-arm64')
     await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')
@@ -999,6 +1036,148 @@ describe('install on the PrismML provider', () => {
       })
     ).rejects.toThrow(/launch check .*Keeping the current backend/)
     expect(await readFile(join(target, 'build', 'bin', 'llama-server'), 'utf8')).toBe('previous')
+  })
+})
+
+/**
+ * The pack of Atomic-Chat #383 and #371 (and #346 before them) through the real downloader rather
+ * than a stand-in: both archives stream at once into the staging directory with their `.tmp`/`.url`
+ * sidecars and are checked against the manifest's size and sha256. Cores up to v0.20.5 normalised
+ * the flat pack before unpacking the companion, which swept the downloaded companion into
+ * `build/bin` and failed with "ENOENT … open '<staging>/cudart-llama-bin-win-cuda-13.3-x64.zip'"
+ * after a complete download; 5d5aea9 (#61) unpacks companions first.
+ */
+describe('a PrismML Windows CUDA install through the real downloader (Atomic-Chat #383, #371)', () => {
+  const TAG = 'prism-b10787-73bfe6c'
+  const BACKEND = 'win-cuda-13.3-x64'
+  const MAIN = `llama-${TAG}-bin-${BACKEND}.zip`
+  const COMPANION = `cudart-llama-bin-${BACKEND}.zip`
+  const BASE = 'https://conf.example/releases/download'
+  // Flat, as PrismML ships both: the server and its DLLs, and the CUDA runtime, at the archive root.
+  const ARCHIVES: Record<string, Buffer> = {
+    [MAIN]: storedZipFiles([
+      ['llama-server.exe', Buffer.from('exe')],
+      ['ggml-cuda.dll', Buffer.from('dll')],
+    ]),
+    [COMPANION]: cudaRuntimeZip(13, ''),
+  }
+  const hex = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+  const manifest = (companionSha = hex(ARCHIVES[COMPANION]!)): PrismManifest => ({
+    schema_version: 1,
+    updated_at: '2026-10-24T00:00:00Z',
+    upstream_repo: 'PrismML-Eng/llama.cpp',
+    download_base: BASE,
+    releases: [
+      {
+        tag: TAG,
+        commit: `73bfe6c${'0'.repeat(33)}`,
+        published_at: '2026-10-20T00:00:00Z',
+        min_core_version: '0.10.0',
+        notes_url: `https://github.com/PrismML-Eng/llama.cpp/releases/tag/${TAG}`,
+        capabilities: ['pq2_0'],
+        assets: [
+          {
+            backend: BACKEND,
+            name: MAIN,
+            size: ARCHIVES[MAIN]!.length,
+            sha256: hex(ARCHIVES[MAIN]!),
+            validation: 'approved',
+            companion_backend: 'win-cudart-13.3-x64',
+          },
+          {
+            backend: 'win-cudart-13.3-x64',
+            name: COMPANION,
+            size: ARCHIVES[COMPANION]!.length,
+            sha256: companionSha,
+            validation: 'approved',
+            companion: true,
+          },
+        ],
+      },
+    ],
+  })
+  const staging = () => join(data.layout.provider('atomic-prism').backendsDir, TAG, `${BACKEND}.incoming-1`)
+  const install = (fetchImpl: typeof fetch, prismManifest = manifest()) =>
+    new BackendService({
+      layout: data.layout,
+      provider: 'atomic-prism',
+      downloader: new Downloader({
+        dataFolder: data.root,
+        platform: 'win32',
+        fetch: fetchImpl,
+        availableSpace: async () => undefined,
+        sleep: async () => {},
+        emit: () => {},
+      }),
+      readManifest: async () => null,
+      prismCatalog: { catalog: async () => ({ manifest: prismManifest, source: 'live' }) },
+      platform: 'win32',
+      now: () => 1,
+      verifyPrismBackend: async () => {},
+    }).install(TAG, BACKEND, { taskId: 'prism-task' })
+  const nameOf = (input: Parameters<typeof fetch>[0]) => String(input).split('/').pop() as string
+
+  it('downloads both archives into staging at once and unpacks them into one build/bin', async () => {
+    const asked: string[] = []
+    const seenInStaging: string[] = []
+    const result = await install(async (input) => {
+      asked.push(String(input))
+      seenInStaging.push(...(await readdir(staging())))
+      return new Response(new Uint8Array(ARCHIVES[nameOf(input)]!))
+    })
+    expect(asked.sort()).toEqual([`${BASE}/${TAG}/${COMPANION}`, `${BASE}/${TAG}/${MAIN}`])
+    // Each transfer writes its sidecars beside the archive, in the staging directory itself.
+    expect(seenInStaging).toEqual(expect.arrayContaining([`${MAIN}.url`, `${COMPANION}.url`]))
+    expect((await readdir(join(result.path, 'build', 'bin'))).sort()).toEqual([
+      'cublas64_13.dll',
+      'cublasLt64_13.dll',
+      'cudart64_13.dll',
+      'ggml-cuda.dll',
+      'llama-server.exe',
+    ])
+    expect(await readdir(result.path)).toEqual(['build'])
+    expect(await readdir(join(result.path, '..'))).toEqual([BACKEND])
+  })
+
+  it('fails with the download error, never a later ENOENT, once both transfers have stopped', async () => {
+    let partialAtAbort: Promise<boolean> | undefined
+    const partial = join(staging(), `${MAIN}.tmp`)
+    const rejected = install(async (input, init) => {
+      if (nameOf(input) === COMPANION) {
+        // Answered once the main archive's first bytes are on disk, so its transfer is under way.
+        await vi.waitFor(async () => expect((await stat(partial)).size).toBeGreaterThan(0))
+        return new Response('Not Found', { status: 404 })
+      }
+      // The main archive is still streaming when the companion fails, and never ends by itself:
+      // only the abort the companion's failure raises stops it, as it stops a real response body.
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new Uint8Array(ARCHIVES[MAIN]!.subarray(0, 8)))
+            init?.signal?.addEventListener('abort', () => {
+              partialAtAbort = stat(partial).then(
+                () => true,
+                () => false
+              )
+              controller.error(new Error('aborted'))
+            })
+          },
+        })
+      )
+    })
+    await expect(rejected).rejects.toThrow(/HTTP status 404/)
+    await rejected.catch((error: Error) => expect(error.message).not.toMatch(/ENOENT/))
+    expect(await partialAtAbort, 'the staging directory outlives the transfer still running').toBe(true)
+    expect(await readdir(join(data.layout.provider('atomic-prism').backendsDir, TAG))).toEqual([])
+  })
+
+  it('fails with the hash mismatch when the companion is not the archive the manifest names', async () => {
+    const rejected = install(
+      async (input) => new Response(new Uint8Array(ARCHIVES[nameOf(input)]!)),
+      manifest('0'.repeat(64))
+    )
+    await expect(rejected).rejects.toThrow(HASH_MISMATCH_MESSAGE)
+    expect(await readdir(join(data.layout.provider('atomic-prism').backendsDir, TAG))).toEqual([])
   })
 })
 

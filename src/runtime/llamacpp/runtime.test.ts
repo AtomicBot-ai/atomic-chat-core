@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { ChildProcess } from 'node:child_process'
 import type { Server } from 'node:net'
 import { join } from 'node:path'
 import {
@@ -22,6 +23,7 @@ import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
 import { formatExitCode } from './errors.js'
+import { classifyFailure, diagnosticTags } from '../../telemetry/index.js'
 
 /**
  * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
@@ -437,6 +439,50 @@ describe('failure paths', () => {
       })
     expect(spawned).toBe(1)
     expect(runtime.getLoadedModels()).toEqual(['demo'])
+  })
+
+  // Atomic-Chat #383: a dspark drafter loaded as a chat model listened, then aborted on the first
+  // request with GGML_ASSERT(tokenizer ...), and the user saw only "connection refused".
+  it('refuses a speculative-decoding draft before it unloads the chat model or spawns anything', async () => {
+    await data.writeModel('demo')
+    await data.writeModel('drafter', { model_path: 'llamacpp/models/drafter/dspark.gguf' })
+    await data.writeModel('vocabless', { model_path: 'llamacpp/models/vocabless/draft.gguf' })
+    let spawned = 0
+    const spawn = fakeLlamaSpawn()
+    const runtime = await makeRuntime({
+      readGgufMetadata: async (path) =>
+        path.endsWith('dspark.gguf')
+          ? { 'general.architecture': 'dspark', 'tokenizer.ggml.model': 'none' }
+          : path.endsWith('draft.gguf')
+            ? { 'general.architecture': 'qwen35', 'tokenizer.ggml.model': 'none' }
+            : { 'general.architecture': 'llama', 'tokenizer.ggml.model': 'gpt2' },
+      spawn: (spec, opts) => {
+        spawned++
+        return spawn(spec, opts)
+      },
+    })
+    await runtime.load('demo')
+
+    const drafter = runtime.load('drafter', { overrides: { auto_unload: true } })
+    await expect(drafter).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: expect.stringMatching(
+        /"drafter" is a speculative-decoding draft \(dspark\), not a chat model/
+      ),
+      details: join(data.root, 'llamacpp', 'models', 'drafter', 'dspark.gguf'),
+    })
+    await expect(
+      runtime.load('vocabless', { overrides: { auto_unload: true }, isEmbedding: true })
+    ).rejects.toMatchObject({
+      code: 'MODEL_INCOMPATIBLE',
+      message: expect.stringMatching(/"vocabless" has no tokenizer \(tokenizer\.ggml\.model = none\)/),
+    })
+    expect(spawned).toBe(1)
+    expect(runtime.getLoadedModels()).toEqual(['demo'])
+    // Not an engine failure: telemetry leaves it out, as it does any model the engine cannot run.
+    expect(
+      classifyFailure(await drafter.catch((e: unknown) => e), { component: 'runtime', operation: 'load' })
+    ).toMatchObject({ category: 'expected' })
   })
 
   it('asks the compatibility gate with the resolved path and sha256 before it unloads or spawns', async () => {
@@ -1049,6 +1095,53 @@ describe('shutdown', () => {
 })
 
 describe('getDevices', () => {
+  it.each([0, 5])('records missing-header versus process-exit evidence for exit %s', async (code) => {
+    const probe: ManagedProcess = {
+      child: new ChildProcess(),
+      pid: -1,
+      exited: Promise.resolve({ code, signal: null }),
+      terminate: async () => ({ code, signal: null }),
+      output: () => ({ stdout: '', stderr: '/private/model engine failed' }),
+      spawnFailure: () => undefined,
+    }
+    const runtime = await makeRuntime({ probeDevicesWith: () => probe })
+    const error = await runtime.getDevices('/private/backend/llama-server').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    const tags = diagnosticTags(error, classifyFailure(error, { component: 'http', operation: 'request' }))
+    expect(tags).toMatchObject({
+      operation_detail: code === 0 ? 'device_probe_missing_header' : 'device_probe_nonzero_exit',
+      exit_code: code,
+      failure_stage: 'execute',
+    })
+    expect(JSON.stringify(tags)).not.toContain('/private')
+  })
+
+  it('records a timed-out probe without calling its deliberate termination a native crash', async () => {
+    const terminate = vi.fn(async () => ({ code: null, signal: 'SIGTERM' as const }))
+    const probe: ManagedProcess = {
+      child: new ChildProcess(),
+      pid: -1,
+      exited: new Promise(() => {}),
+      terminate,
+      output: () => ({ stdout: '', stderr: '' }),
+      spawnFailure: () => undefined,
+    }
+    const runtime = await makeRuntime({ probeDevicesWith: () => probe })
+    vi.useFakeTimers()
+    try {
+      const result = runtime.getDevices('/private/backend/llama-server').catch((e: unknown) => e)
+      await vi.advanceTimersByTimeAsync(10_000)
+      const error = await result
+      const tags = diagnosticTags(error, classifyFailure(error, { component: 'http', operation: 'request' }))
+      expect(tags).toMatchObject({ operation_detail: 'device_probe_timeout', failure_reason: 'timeout' })
+      expect(tags.native_failure).toBeUndefined()
+      expect(tags.signal).toBeUndefined()
+      expect(terminate).toHaveBeenCalledWith(500)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('parses the device list of an installed backend', async () => {
     const runtime = await makeRuntime()
     const devices = await runtime.getDevices(FAKE_LLAMA_SCRIPT)

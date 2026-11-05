@@ -13,6 +13,7 @@ import { hostPid } from '../shared/index.js'
 import type { GpuClaim } from '../shared/index.js'
 import { MlxRuntime } from './runtime.js'
 import type { MlxRuntimeOptions } from './runtime.js'
+import { classifyFailure, diagnosticTags } from '../../telemetry/index.js'
 
 let data: TmpDataFolder
 let journal: ProcessJournal
@@ -101,6 +102,32 @@ describe('MlxRuntime', () => {
     })
     expect(res.status).toBe(200)
     expect(journal.list().map((record) => record.provider)).toEqual(['mlx'])
+  })
+
+  it('gives mlx-server the llama.cpp answer cap inside the window, and keeps a cap the user set', async () => {
+    await writeMlxModel('long')
+    await writeMlxModel('short', { max_position_embeddings: 8192 })
+    await writeMlxModel('own')
+    const envs: Array<Record<string, string> | undefined> = []
+    const spawn = fakeSidecarSpawn({ kind: 'mlx' })
+    const load = (id: string, baseEnv: Record<string, string> = {}) =>
+      runtime(
+        {},
+        {},
+        {
+          baseEnv,
+          spawn: (spec, opts) => {
+            envs.push(spec.env)
+            return spawn(spec, opts)
+          },
+        }
+      ).load(id)
+    await load('long')
+    await load('short')
+    await load('own', { MLX_VLM_MAX_TOKENS: '4096' })
+    // Without it mlx-server ends an answer that sends no max_tokens at 2048 tokens (Atomic-Chat#384).
+    expect(envs.map((env) => env?.['MLX_VLM_MAX_TOKENS'])).toEqual(['16384', '8192', '4096'])
+    expect(envs.map((env) => env?.['MLX_VLM_SINGLE_MODEL'])).toEqual(['1', '1', '1'])
   })
 
   it('narrows the 32K default by the KV cache on a Mac below 16 GiB, never below the previous 16K', async () => {
@@ -304,6 +331,44 @@ describe('MlxRuntime', () => {
       message: expect.stringContaining('Model file not found at: '),
     })
     await expect(runtime().load('nope')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+  })
+
+  it.each([
+    { source: 'unresolved', resourcesDir: undefined, resolved: undefined, explicit: undefined },
+    { source: 'resources', resourcesDir: '/private/resources', resolved: undefined, explicit: undefined },
+    {
+      source: 'resolved',
+      resourcesDir: undefined,
+      resolved: '/private/installed/mlx-server',
+      explicit: undefined,
+    },
+    {
+      source: 'explicit',
+      resourcesDir: undefined,
+      resolved: undefined,
+      explicit: '/private/override/mlx-server',
+    },
+  ])('records the $source binary lookup without exposing a path', async (lookup) => {
+    await writeMlxModel('m')
+    const error = await runtime(
+      {},
+      {},
+      {
+        resourcesDir: lookup.resourcesDir,
+        resolveBinary: async () => lookup.resolved,
+        exists: () => false,
+      }
+    )
+      .load('m', lookup.explicit ? { exePath: lookup.explicit } : {})
+      .catch((e: unknown) => e)
+    const tags = diagnosticTags(error, classifyFailure(error, { component: 'runtime', operation: 'load' }))
+    expect(tags).toMatchObject({
+      operation_detail:
+        lookup.source === 'unresolved' ? 'mlx_binary_unresolved' : `mlx_${lookup.source}_binary_missing`,
+      failure_stage: 'validate',
+      failure_category: 'operational',
+    })
+    expect(JSON.stringify(tags)).not.toContain('/private')
   })
 
   it('starts the build the resolver names, asking again on every load', async () => {

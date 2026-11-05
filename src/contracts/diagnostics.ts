@@ -31,6 +31,16 @@ export const FAILURE_OPERATIONS = [
   'tunnel',
 ] as const
 export const FAILURE_STAGES = ['validate', 'prepare', 'spawn', 'ready', 'execute', 'stop', 'persist'] as const
+export const FAILURE_OPERATION_DETAILS = [
+  'device_probe_timeout',
+  'device_probe_spawn_failed',
+  'device_probe_nonzero_exit',
+  'device_probe_missing_header',
+  'mlx_binary_unresolved',
+  'mlx_explicit_binary_missing',
+  'mlx_resolved_binary_missing',
+  'mlx_resources_binary_missing',
+] as const
 export const FAILURE_REASONS = [
   'cancelled',
   'invalid_request',
@@ -74,6 +84,7 @@ export interface FailureDiagnostic {
   component: (typeof FAILURE_COMPONENTS)[number]
   operation: (typeof FAILURE_OPERATIONS)[number]
   stage?: (typeof FAILURE_STAGES)[number]
+  operationDetail?: (typeof FAILURE_OPERATION_DETAILS)[number]
   reason?: (typeof FAILURE_REASONS)[number]
   nativeFailure?: (typeof NATIVE_FAILURES)[number]
   engineVersion?: string

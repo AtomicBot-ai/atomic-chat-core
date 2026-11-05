@@ -7,6 +7,8 @@
  * and the catalog are parameters; `--list-devices` is an injected function.
  */
 
+import { LINUX_ROCM_BACKEND } from '../catalog/index.js'
+import type { RocmHostProbe } from '../turboquant.js'
 import type { DeviceInfo } from '../../contracts/index.js'
 import type {
   ArchSuffix,
@@ -98,6 +100,10 @@ export async function tierEnumeratesDevices(
   } catch (err) {
     probeError = err instanceof Error ? err.message : String(err)
   }
+  // An installed Linux HIP build can silently enumerate no GPU with an incompatible userspace.
+  if (backendType === LINUX_ROCM_BACKEND) {
+    return devices?.some((device) => /^ROCm\d+$/i.test(device.id)) ? 'works' : 'broken'
+  }
   const corroborated = hasCorroboratingGpu(backendType, gpus)
   const verdict = classifyTierProbe({ installed: true, devices, corroborated })
   const reason = probeError ? `--list-devices threw (${probeError})` : '--list-devices returned no devices'
@@ -181,6 +187,7 @@ export function linuxArm64GpuTiers(
 }
 
 export interface DetectIdealBackendInput {
+  rocm?: RocmHostProbe
   osType: string
   arch: string
   cpuExtensions: readonly string[]
@@ -196,7 +203,7 @@ export interface DetectIdealBackendInput {
  * Which backend this host should ideally run. Windows: the first GPU tier that survives the probe;
  * a GPU-capable host with no GPU backend in the catalog is `detection-failed` (the manifest was
  * unreachable — ggml-org always publishes CUDA + Vulkan Windows assets), otherwise `cpu-optimal`.
- * Linux x64: Vulkan when the loader enumerates a device with ≥ 2 GiB; a GPU the loader cannot see
+ * Linux x64: an available, supported ROCm build first, then Vulkan when the loader enumerates a device with ≥ 2 GiB; a GPU the loader cannot see
  * is `detection-failed` (ask again next launch, ATO-464); no accelerator is `cpu-optimal`. Linux
  * arm64: the first of CUDA 13 / Vulkan that survives the probe; a CUDA-capable host with no CUDA
  * build in the catalog, or a GPU neither CUDA nor Vulkan sees, is `detection-failed`. macOS and
@@ -209,7 +216,7 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
   const warn = input.onWarn ?? (() => {})
   try {
     const { osType, gpus } = input
-    const features = normalizeFeatures(getSupportedFeatures(osType, input.cpuExtensions, gpus))
+    const features = normalizeFeatures(getSupportedFeatures(osType, input.cpuExtensions, gpus, input.rocm))
     const enoughVram = hasEnoughGpuMemory(gpus)
     const integratedOnly = integratedGpuOnly(gpus)
     const archSuffix: ArchSuffix =
@@ -253,6 +260,14 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
     }
 
     if (osType === 'linux') {
+      if (features.rocm && enoughVram) {
+        const available = await input.listAvailableBackends()
+        if (
+          available.some((b) => b.backend === LINUX_ROCM_BACKEND) &&
+          (await input.probeTier(LINUX_ROCM_BACKEND)) !== 'broken'
+        )
+          return { kind: 'gpu', backend: LINUX_ROCM_BACKEND }
+      }
       const anyVulkanDevice = enoughVram
       if (features.vulkan && archSuffix === 'x64' && anyVulkanDevice) {
         return { kind: 'gpu', backend: 'linux-vulkan-x64' }

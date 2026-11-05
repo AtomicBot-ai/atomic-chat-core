@@ -4,6 +4,7 @@ import {
   FAILURE_COMPONENTS,
   FAILURE_OPERATIONS,
   FAILURE_STAGES,
+  FAILURE_OPERATION_DETAILS,
   FAILURE_REASONS,
   NATIVE_FAILURES,
 } from '../contracts/index.js'
@@ -131,6 +132,8 @@ export function classifyFailure(error: unknown, context: FailureDiagnostic): Fai
     operation: FAILURE_OPERATIONS.includes(input.operation) ? input.operation : 'request',
   }
   if (input.stage && FAILURE_STAGES.includes(input.stage)) diagnostic.stage = input.stage
+  if (input.operationDetail && FAILURE_OPERATION_DETAILS.includes(input.operationDetail))
+    diagnostic.operationDetail = input.operationDetail
   if (input.nativeFailure && NATIVE_FAILURES.includes(input.nativeFailure))
     diagnostic.nativeFailure = input.nativeFailure
   if (input.exitCode === null || (typeof input.exitCode === 'number' && Number.isSafeInteger(input.exitCode)))
@@ -206,6 +209,7 @@ export function diagnosticTags(
     failure_category: diagnostic.category,
     failure_reason: diagnostic.reason,
     failure_stage: diagnostic.stage,
+    ...(diagnostic.operationDetail ? { operation_detail: diagnostic.operationDetail } : {}),
     cause_code: causeCode,
     native_failure: diagnostic.nativeFailure,
     exit_code: diagnostic.exitCode,
