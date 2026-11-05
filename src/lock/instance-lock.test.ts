@@ -207,6 +207,26 @@ describe('InstanceLock.acquire', () => {
     }
   })
 
+  it('leaves the takeover mutex untouched while a live recovery claimant is paused', async () => {
+    const crashedPid = await deadPid()
+    await write({ pid: crashedPid })
+    const mutex = `${data.layout.core.instanceLock}.takeover`
+    await writeFile(mutex, `${crashedPid}\n`)
+    const peer = join(
+      data.layout.core.dir,
+      'instance.lock.recover-99999999-unknown-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+    )
+    await writeFile(peer, '')
+    const deps = {
+      platform: 'aix' as const,
+      sleep: async () => {},
+      alive: (pid: number) => pid === 99999999 || pid === process.pid,
+    }
+    await expect(InstanceLock.acquire(data.layout, deps)).rejects.toMatchObject({ code: 'CORE_START_FAILED' })
+    expect(await readFile(mutex, 'utf8')).toBe(`${crashedPid}\n`)
+    expect(await readFile(peer, 'utf8')).toBe('')
+  })
+
   it('recovers a lock that is not valid JSON at all', async () => {
     await writeFile(data.layout.core.instanceLock, '{ this is not json')
     expect(await inspectLock(data.layout, { sleep: async () => {}, now: fakeClock() })).toEqual({
