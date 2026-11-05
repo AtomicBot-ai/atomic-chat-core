@@ -15,6 +15,21 @@ const failure = (code: string) =>
   new AtomicCoreError(code as ErrorCode, 'User text must not be a grouping key')
 
 describe('classifyFailure', () => {
+  it('keeps only finite operation details, outside the public error body', () => {
+    const error = new AtomicCoreError('DEVICE_LIST_PARSE_FAILED', 'probe failed', undefined, {
+      diagnostic: { ...context, operationDetail: 'device_probe_timeout' } as never,
+    })
+    const diagnostic = classifyFailure(error, context)
+    expect(diagnosticTags(error, diagnostic)).toMatchObject({ operation_detail: 'device_probe_timeout' })
+    expect(error.toJSON()).toEqual({ code: 'DEVICE_LIST_PARSE_FAILED', message: 'probe failed' })
+    const privateValue = new AtomicCoreError('DEVICE_LIST_PARSE_FAILED', 'probe failed', undefined, {
+      diagnostic: { ...context, operationDetail: '/private/customer/model' } as never,
+    })
+    expect(
+      JSON.stringify(diagnosticTags(privateValue, classifyFailure(privateValue, context)))
+    ).not.toContain('/private')
+  })
+
   it.each([
     ['INVALID_ARGUMENT', 'expected', 'invalid_request'],
     ['CANCELLED', 'expected', 'cancelled'],

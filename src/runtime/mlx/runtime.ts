@@ -237,8 +237,19 @@ export class MlxRuntime implements LocalRuntime {
       this.emit('core:log', { level: 'warn', msg: message })
     )
     const { modelPath } = registry.resolvePaths(yml)
-    const exe = opts.exePath ?? (await this.options.resolveBinary?.()) ?? this.binaryPath()
-    if (!exe || !this.exists(exe)) throw mlxBinaryMissing(exe)
+    const resolved = opts.exePath == null ? await this.options.resolveBinary?.() : undefined
+    const exe = opts.exePath ?? resolved ?? this.binaryPath()
+    if (!exe || !this.exists(exe))
+      throw mlxBinaryMissing(
+        exe,
+        opts.exePath != null
+          ? 'mlx_explicit_binary_missing'
+          : resolved != null
+            ? 'mlx_resolved_binary_missing'
+            : exe
+              ? 'mlx_resources_binary_missing'
+              : 'mlx_binary_unresolved'
+      )
     if (!this.exists(modelPath)) throw mlxModelMissing(modelPath)
 
     const port = opts.port ?? (await randomFreePort(this.table.usedPorts()))
