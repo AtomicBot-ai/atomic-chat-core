@@ -25,6 +25,8 @@ export async function startBackendInstallFixture(
     badChecksum?: boolean
     holdArchive?: boolean
     cuda?: boolean
+    /** Publish a Linux HIP pack whose scripted server enumerates a ROCm device. */
+    rocm?: boolean
     /** Answer the first N requests for the archive with 503, to walk the retry ladder. */
     archiveFailures?: number
     /**
@@ -44,15 +46,18 @@ export async function startBackendInstallFixture(
       ? options.cuda
         ? 'win-cuda-13.3-x64'
         : 'win-cpu-x64'
-      : process.platform === 'linux'
-        ? 'linux-cpu-x64'
-        : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
-  const archiveName = `llama-${tag}-bin-${backend === 'linux-cpu-x64' ? 'ubuntu-x64' : backend}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`
+      : options.rocm
+        ? 'linux-rocm-10.0-x64'
+        : process.platform === 'linux'
+          ? 'linux-cpu-x64'
+          : `macos-${process.arch === 'arm64' ? 'arm64' : 'x64'}`
+  const infix = options.rocm ? 'ubuntu-rocm-10.0-x64' : backend === 'linux-cpu-x64' ? 'ubuntu-x64' : backend
+  const archiveName = `llama-${tag}-bin-${infix}.${process.platform === 'win32' ? 'zip' : 'tar.gz'}`
   const exe = process.platform === 'win32' ? 'llama-server.exe' : 'llama-server'
   const archive =
     process.platform === 'win32'
       ? storedZip(`build/bin/${exe}`, await windowsFixtureExe())
-      : await createTar(folder, exe)
+      : await createTar(folder, exe, options.rocm)
   const companionName = 'cudart-llama-bin-win-cuda-13.3-x64.zip'
   // The whole Windows CUDA runtime: a pack is only installed with cudart and both cuBLAS DLLs.
   const companion = cudaRuntimeZip(13, 'build/bin/')
@@ -181,13 +186,15 @@ async function windowsFixtureExe(): Promise<Buffer> {
   return readFile(existsSync(curl) ? curl : process.execPath)
 }
 
-async function createTar(folder: string, exe: string): Promise<Buffer> {
+async function createTar(folder: string, exe: string, rocm = false): Promise<Buffer> {
   const dir = join(folder, 'archive-source')
   await mkdir(join(dir, 'build', 'bin'), { recursive: true })
   const binary = join(dir, 'build', 'bin', exe)
   await writeFile(
     binary,
-    process.platform === 'win32' ? 'fixture backend' : '#!/bin/sh\necho "version: 99999 (fixture)"\n'
+    rocm
+      ? '#!/bin/sh\nif [ "$1" = "--list-devices" ]; then echo "Available devices:"; echo "ROCm0: Radeon (8192 MiB, 8192 MiB free)"; fi\necho "version: 99999 (fixture)"\n'
+      : '#!/bin/sh\necho "version: 99999 (fixture)"\n'
   )
   if (process.platform !== 'win32') await chmod(binary, 0o755)
   const archive = join(folder, 'fixture-backend.tar.gz')

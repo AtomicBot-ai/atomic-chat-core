@@ -170,6 +170,24 @@ describe('getSupportedFeatures (Rust test_get_supported_features_* and driver-fl
     const r = getSupportedFeatures('windows', [], [nvidia('581.42', '8.9'), nvidia('581.42', '7.0')])
     expect(r).toMatchObject({ cuda12: true, cuda13: false })
   })
+  it.each([
+    [90010, true, true], // gfx90a
+    [110001, true, true], // gfx1101
+    [110100, true, false],
+    [90000, true, false],
+    [120001, false, false],
+  ])('Linux KFD target %i and HIP %s enable ROCm: %s', (target, hasRuntime, expected) => {
+    const probe = { gfxTargetVersions: [target], hasRuntime }
+    expect(getSupportedFeatures('linux', [], [amd()], probe).rocm).toBe(expected)
+    expect(getSupportedFeatures('linux', [], [], probe).rocm).toBe(false)
+  })
+
+  it('keeps an unsupported second AMD target off the upstream HIP build', () => {
+    expect(
+      getSupportedFeatures('linux', [], [amd()], { hasRuntime: true, gfxTargetVersions: [110000, 90000] })
+        .rocm
+    ).toBe(false)
+  })
   it('enables ROCm on Windows only, from the PCI table', () => {
     expect(getSupportedFeatures('windows', [], [amd()])).toMatchObject({ rocm: true, vulkan: true })
     expect(getSupportedFeatures('linux', [], [amd()])).toMatchObject({ rocm: false, vulkan: true })
@@ -217,7 +235,7 @@ describe('determineSupportedBackends (Rust test_determine_supported_backends_*)'
     [features({ vulkan: true }), ['linux-cpu-x64', 'linux-vulkan-x64']],
     [features({ cuda11: true, cuda12: true, cuda13: true }), ['linux-cpu-x64']],
     [features({ cuda11: true, cuda12: true, vulkan: true }), ['linux-cpu-x64', 'linux-vulkan-x64']],
-    [features({ vulkan: true, rocm: true }), ['linux-cpu-x64', 'linux-vulkan-x64']],
+    [features({ vulkan: true, rocm: true }), ['linux-cpu-x64', 'linux-rocm-10.0-x64', 'linux-vulkan-x64']],
   ])('linux x86_64 with %o → %o', (f, expected) => {
     expect(determineSupportedBackends('linux', 'x86_64', f)).toEqual(expected)
   })

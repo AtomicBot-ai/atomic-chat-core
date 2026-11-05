@@ -91,12 +91,33 @@ const nvidiaGpu = {
 const NO_BUILD_FOR_HOST = process.arch === 'arm64' && process.platform !== 'darwin'
 
 describe.skipIf(!existsSync(BIN) || NO_BUILD_FOR_HOST)('the backend advisor on the compiled core', () => {
+  it.skipIf(!isLinux)('installs the published Ubuntu ROCm archive through the upstream route', async () => {
+    const fixture = await startBackendInstallFixture(dataFolder, { rocm: true })
+    fixtures.push(fixture)
+    const { ready } = await core.startDaemon(dataFolder, daemons, [])
+    const installed = await control(
+      ready,
+      '/backends/llamacpp-upstream/install',
+      json({
+        version: 'b99999',
+        backend: 'linux-rocm-10.0-x64',
+        task_id: 'hip-install',
+        proxy: fixture.proxy,
+      })
+    )
+    expect(installed.status, await installed.clone().text()).toBe(200)
+    expect(await installed.json()).toMatchObject({ installed: true, backend: 'linux-rocm-10.0-x64' })
+    expect(fixture.seen).toContain(
+      'GET mirror.atomic.invalid/releases/b99999/llama-b99999-bin-ubuntu-rocm-10.0-x64.tar.gz'
+    )
+  })
+
   it('lists, recommends, installs what it recommended, and checks for updates', async () => {
     const fixture = await startBackendInstallFixture(dataFolder, {
       extraAssets: isWindows
         ? ['llama-b99999-bin-win-cuda-13.3-x64.zip', 'llama-b99999-bin-win-vulkan-x64.zip']
         : isLinux
-          ? ['llama-b99999-bin-ubuntu-vulkan-x64.tar.gz']
+          ? ['llama-b99999-bin-ubuntu-vulkan-x64.tar.gz', 'llama-b99999-bin-ubuntu-rocm-10.0-x64.tar.gz']
           : [],
       turboquantIndex: forkIndex,
     })
@@ -125,6 +146,13 @@ describe.skipIf(!existsSync(BIN) || NO_BUILD_FOR_HOST)('the backend advisor on t
     expect(listed.source).toBe('live')
     expect(listed.hardware_source).toBe('override')
     expect(listed.available).toContainEqual({ version: 'b99999', backend: fixture.backend, order: 0 })
+    if (isLinux) {
+      expect(listed).toHaveProperty(
+        'remote',
+        expect.arrayContaining([expect.objectContaining({ backend: 'linux-rocm-10.0-x64' })])
+      )
+      expect(listed.available.map((b) => b.backend)).not.toContain('linux-rocm-10.0-x64')
+    }
     expect(listed.recommended).toBe(`b99999/${fixture.backend}`)
     expect(listed.latest_by_type[fixture.backend]).toBe(`b99999/${fixture.backend}`)
     expect(fixture.seen).toContain('CONNECT raw.githubusercontent.com:443')

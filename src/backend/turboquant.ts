@@ -10,8 +10,7 @@
  * (`determineBestBackend`, `ensureCudartReady`).
  *
  * Why it cannot share the upstream functions: the fork names its builds differently
- * (`windows-x64-cuda-13.3`, not `win-cuda-13.3-x64`), publishes Linux CUDA and ROCm builds upstream
- * does not, and versions them as `b<build>-<fork semver>`. Every upstream rule applied to these ids
+ * (`windows-x64-cuda-13.3`, not `win-cuda-13.3-x64`), publishes different Linux CUDA and ROCm packs, and versions them as `b<build>-<fork semver>`. Every upstream rule applied to these ids
  * silently misses: a CPU pack has no category, a fork build sorts below a plain `b8149`, and every
  * Windows TurboQuant pack is filtered out as unsupported.
  */
@@ -206,7 +205,10 @@ const nodeProbeFs: RocmProbeFs = {
  * `/sys/class/kfd/kfd/topology/nodes/<n>/properties` (zeros are CPU nodes), and `libamdhip64.so`
  * in a ROCm prefix or on the default library path. Linux paths, so joined as POSIX whatever the host.
  */
-export async function probeLinuxRocmHost(fs: RocmProbeFs = nodeProbeFs): Promise<RocmHostProbe> {
+export async function probeLinuxRocmHost(
+  fs: RocmProbeFs = nodeProbeFs,
+  libraryPath: string = process.env['LD_LIBRARY_PATH'] ?? ''
+): Promise<RocmHostProbe> {
   const nodesDir = '/sys/class/kfd/kfd/topology/nodes'
   const gfxTargetVersions: number[] = []
   for (const node of await fs.readdir(nodesDir).catch(() => [] as string[])) {
@@ -218,25 +220,28 @@ export async function probeLinuxRocmHost(fs: RocmProbeFs = nodeProbeFs): Promise
     }
   }
   const libraryDirs = [
+    ...libraryPath.split(':').filter((dir) => posix.isAbsolute(dir)),
     '/opt/rocm/lib',
     '/opt/rocm/lib64',
     '/usr/lib/x86_64-linux-gnu',
     '/usr/lib64',
     '/usr/lib',
   ]
-  let hasRuntime = false
-  for (const dir of libraryDirs) if (await fs.exists(posix.join(dir, 'libamdhip64.so'))) hasRuntime = true
-  if (!hasRuntime) {
-    for (const entry of await fs.readdir('/opt').catch(() => [] as string[])) {
-      if (!entry.startsWith('rocm-')) continue
-      if (
-        (await fs.exists(posix.join('/opt', entry, 'lib', 'libamdhip64.so'))) ||
-        (await fs.exists(posix.join('/opt', entry, 'lib64', 'libamdhip64.so')))
-      )
-        hasRuntime = true
+  for (const entry of await fs.readdir('/opt').catch(() => [] as string[])) {
+    if (entry.startsWith('rocm-'))
+      libraryDirs.push(posix.join('/opt', entry, 'lib'), posix.join('/opt', entry, 'lib64'))
+  }
+  for (const dir of new Set(libraryDirs)) {
+    if (await fs.exists(posix.join(dir, 'libamdhip64.so'))) return { gfxTargetVersions, hasRuntime: true }
+    // Runtime-only packages can omit the unversioned linker symlink.
+    const entries = await fs.readdir(dir).catch(() => [] as string[])
+    for (const name of entries) {
+      if (/^libamdhip64\.so(?:\.\d+)+$/.test(name) && (await fs.exists(posix.join(dir, name)))) {
+        return { gfxTargetVersions, hasRuntime: true }
+      }
     }
   }
-  return { gfxTargetVersions, hasRuntime }
+  return { gfxTargetVersions, hasRuntime: false }
 }
 
 /** `get_supported_features` of the fork: its own Windows CUDA 12 floor, and ROCm on Linux only. */

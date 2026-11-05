@@ -244,6 +244,13 @@ describe('features', () => {
     })
     expect((await probeLinuxRocmHost(fs(['/usr/lib/libamdhip64.so']))).hasRuntime).toBe(true)
     expect((await probeLinuxRocmHost(fs([]))).hasRuntime).toBe(false)
+    dirs['/custom/hip/lib'] = ['libamdhip64.so.7', 'libamdhip64.so.debug']
+    expect(
+      (await probeLinuxRocmHost(fs(['/custom/hip/lib/libamdhip64.so.7']), '/custom/hip/lib')).hasRuntime
+    ).toBe(true)
+    expect(
+      (await probeLinuxRocmHost(fs(['/custom/hip/lib/libamdhip64.so.debug']), '/custom/hip/lib')).hasRuntime
+    ).toBe(false)
     expect(await probeLinuxRocmHost()).toMatchObject({ gfxTargetVersions: expect.any(Array) })
   })
 })

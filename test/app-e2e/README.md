@@ -26,3 +26,13 @@ Use a release-like resource set. The app harness considers a manually installed 
 in the debug resources or source-tree fallback an unexpected installation. An isolated copy
 of the app's test harness can be selected with `ATOMIC_APP_E2E_HARNESS`. Keep its process
 isolation and teardown assertions enabled.
+
+## Upstream ROCm on a Linux x64 desktop
+
+Use an isolated app profile on a supported Radeon with the ROCm userspace installed and an
+approved ROCm 10.0 archive in the test release catalog. In the llama.cpp upstream provider's
+backend settings, recheck the recommendation, install the recommended Linux ROCm pack, then
+load a small GGUF and send a chat message. Check that the reply completes and the engine log
+reports model layers offloaded to `ROCm0`. Repeat the recommendation with a catalog containing
+only CPU and Vulkan for this host and check that Vulkan is offered. The desktop WebDriver
+harness currently lacks Linux operator-profile isolation, so this scenario needs a Linux machine.

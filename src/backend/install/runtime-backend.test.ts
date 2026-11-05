@@ -69,6 +69,28 @@ describe.skipIf(!CAN_INSTALL_FAKE_BACKEND)('runtime backend selection', () => {
     }
   })
 
+  it('selects the installed Linux ROCm pack only for a supported AMD host with HIP', async () => {
+    const data = await makeTmpDataFolder('atomic-linux-rocm-')
+    try {
+      for (const backend of ['linux-rocm-10.0-x64', 'linux-vulkan-x64']) {
+        await installFakeBackend(data.layout, { version: 'b11617', backend })
+      }
+      const hardware = facts({ osType: 'linux', gpus: [{ vendor: 'AMD', total_memory: 8192 }] })
+      for (const hasRuntime of [true, false]) {
+        const selected = await selectInstalledBackend(
+          data.layout,
+          'llamacpp-upstream',
+          hardware,
+          'x64',
+          async () => ({ hasRuntime, gfxTargetVersions: [110001] })
+        )
+        expect(selected?.backend).toBe(hasRuntime ? 'linux-rocm-10.0-x64' : 'linux-vulkan-x64')
+      }
+    } finally {
+      await data.cleanup()
+    }
+  })
+
   it('does not execute an installed backend that the injected hardware cannot support', async () => {
     const data = await makeTmpDataFolder('atomic-runtime-backend-')
     try {

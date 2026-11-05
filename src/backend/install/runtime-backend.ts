@@ -18,6 +18,7 @@ import {
   determineBestBackend,
   determineBestPrismBackend,
   determinePrismSupportedBackends,
+  isAmdGpu,
   determineSupportedBackends,
   filterBackendsBySupport,
   filterPrismBackendsBySupport,
@@ -147,22 +148,22 @@ async function compatibleBackends(
   const gpus = facts.gpus
   // Unknown flags read as none here: the feature gates only add tiers for flags that are present.
   const cpuExtensions = facts.cpuExtensions ?? []
+  const rocm =
+    osType === 'linux' && gpus.some(isAmdGpu) ? await probeRocm().catch(() => undefined) : undefined
   if (provider === 'llamacpp') {
     // The fork's own matrix, ids and priorities: the upstream ones filter every TurboQuant pack out.
-    const rocm = osType === 'linux' ? await probeRocm() : undefined
     const features = getTurboquantSupportedFeatures(osType, cpuExtensions, gpus, rocm)
     const supported = determineTurboquantSupportedBackends(osType, arch, features)
     return { compatible: filterTurboquantBackendsBySupport(installed, supported), gpus }
   }
   if (provider === 'atomic-prism') {
-    const rocm = osType === 'linux' ? await probeRocm() : undefined
     const features = getPrismSupportedFeatures(osType, cpuExtensions, gpus, rocm)
     // A pack under another release train's tag was not installed from the Prism manifest.
     const prismPacks = installed.filter((pack) => prismTagBuild(pack.version) !== null)
     const supported = determinePrismSupportedBackends(osType, arch, features)
     return { compatible: filterPrismBackendsBySupport(prismPacks, supported), gpus }
   }
-  const features = getSupportedFeatures(osType, cpuExtensions, gpus)
+  const features = getSupportedFeatures(osType, cpuExtensions, gpus, rocm)
   const supported = determineSupportedBackends(osType, arch, features)
   return { compatible: filterBackendsBySupport(installed, supported, osType), gpus }
 }

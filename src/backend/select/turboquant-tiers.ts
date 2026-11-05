@@ -4,8 +4,8 @@
  * of `find_latest_version_for_backend` / `check_backend_for_updates` in
  * `src-tauri/plugins/tauri-plugin-llamacpp/src/backend.rs`.
  *
- * Why it cannot share `tiers.ts`: the fork names its builds differently, publishes Linux CUDA and
- * ROCm builds upstream does not, keeps a 6 GiB VRAM floor where upstream went to 2 GiB, and runs no
+ * Why it cannot share `tiers.ts`: the fork names its builds differently, uses its own Linux CUDA and
+ * ROCm target matrix, keeps a 6 GiB VRAM floor where upstream went to 2 GiB, and runs no
  * `--list-devices` tier probe. Nothing here reads hardware, disk or network: the facts and the
  * catalog are parameters.
  */

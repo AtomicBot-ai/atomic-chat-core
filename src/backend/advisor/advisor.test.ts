@@ -43,6 +43,7 @@ const UPSTREAM_MANIFEST = {
     'win-vulkan-x64.zip',
     'ubuntu-x64.tar.gz',
     'ubuntu-vulkan-x64.tar.gz',
+    'ubuntu-rocm-10.0-x64.tar.gz',
     'macos-arm64.tar.gz',
   ].map((suffix) => ({ name: `llama-${UP}-bin-${suffix}` })),
 }
@@ -856,7 +857,7 @@ describe('BackendAdvisor.recommend', () => {
     })
   })
 
-  it('uses the ROCm probe for the fork on Linux only', async () => {
+  it('selects each Linux provider’s published ROCm pack and degrades on probe failure', async () => {
     const rocmProbe = vi.fn(async () => ({ gfxTargetVersions: [110000], hasRuntime: true }))
     const fork = await harness('llamacpp', host('linux', [rx7900xtx]), {
       current: `${TQ_OLD}/linux-x64-cpu`,
@@ -872,11 +873,19 @@ describe('BackendAdvisor.recommend', () => {
       deps: { rocmProbe },
     })
     rocmProbe.mockClear()
-    expect((await upstream.advisor.recommend({ mode: 'recheck' })).detection).toEqual({
+    expect(await upstream.advisor.recommend({ mode: 'recheck' })).toMatchObject({
+      detection: { kind: 'gpu', backend: 'linux-rocm-10.0-x64' },
+      recommendation: { recommendedBackend: `${UP}/linux-rocm-10.0-x64` },
+    })
+    expect(rocmProbe).toHaveBeenCalledTimes(1)
+    const installed = await harness('llamacpp-upstream', host('linux', [rx7900xtx]), {
+      installed: [{ version: UP, backend: 'linux-rocm-10.0-x64' }],
+      deps: { rocmProbe, listDevices: async () => [] },
+    })
+    expect((await installed.advisor.recommend({ mode: 'recheck' })).detection).toEqual({
       kind: 'gpu',
       backend: 'linux-vulkan-x64',
     })
-    expect(rocmProbe).not.toHaveBeenCalled()
 
     const failing = await harness('llamacpp', host('linux', [rx7900xtx]), {
       current: `${TQ_OLD}/linux-x64-cpu`,

@@ -65,6 +65,7 @@ const ALL = [
   'ubuntu-x64.tar.gz',
   'ubuntu-arm64.tar.gz',
   'ubuntu-vulkan-x64.tar.gz',
+  'ubuntu-rocm-10.0-x64.tar.gz',
   'ubuntu-cuda-13.4-arm64.tar.gz',
   'win-cpu-x64.zip',
   'win-cpu-arm64.zip',

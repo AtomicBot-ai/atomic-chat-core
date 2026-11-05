@@ -89,6 +89,18 @@ describe('tier probing', () => {
   ])('classifyTierProbe(%o) = %s', (input, expected) => {
     expect(classifyTierProbe(input)).toBe(expected)
   })
+  it.each([
+    ['ROCm0', 'works'],
+    ['Vulkan0', 'broken'],
+  ])('requires a HIP device on installed Linux ROCm packs: %s', async (id, expected) => {
+    const backend = 'linux-rocm-10.0-x64'
+    expect(
+      await tierEnumeratesDevices(backend, [amd()], {
+        listInstalled: async () => [b('b11617', backend)],
+        listDevices: async () => [{ ...device, id }],
+      })
+    ).toBe(expected)
+  })
   it('tierEnumeratesDevices walks the decision with injected probes', async () => {
     const installed = [b('b10809', 'win-cuda-13.3-x64', 7)]
     const log: string[] = []
@@ -245,6 +257,19 @@ describe('detectIdealBackendType', () => {
     })
     expect(r).toEqual({ kind: 'detection-failed' })
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('offline'))
+  })
+  it('keeps Vulkan on a compatible Radeon when the release has no ROCm archive', async () => {
+    expect(
+      await detectIdealBackendType({
+        osType: 'linux',
+        arch: 'x86_64',
+        cpuExtensions: [],
+        gpus: [{ ...amd(), total_memory: 8192 }],
+        rocm: { hasRuntime: true, gfxTargetVersions: [110001] },
+        listAvailableBackends: async () => [b('b1', 'linux-vulkan-x64')],
+        probeTier: async () => 'works',
+      })
+    ).toEqual({ kind: 'gpu', backend: 'linux-vulkan-x64' })
   })
   it('linux: vulkan with a visible ≥2 GiB device, detection-failed when the loader cannot see the GPU, else cpu', async () => {
     const linux = (gpus: GpuProbeInfo[], arch = 'x86_64') =>

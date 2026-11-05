@@ -4,6 +4,8 @@ import { handleSettingUpdate, mapOldBackendToNew, shouldMigrateBackend } from '.
 
 describe('mapOldBackendToNew (Rust test_map_old_backend_to_new_*)', () => {
   it.each([
+    ['ubuntu-rocm-10.0-x64', 'linux-rocm-10.0-x64'],
+    ['linux-rocm-10.0-x64', 'linux-rocm-10.0-x64'],
     // cuda
     ['linux-avx2-cuda-cu12.0-x64', 'linux-cpu-x64'],
     ['linux-cuda-12-common_cpus-x64', 'linux-cpu-x64'],
