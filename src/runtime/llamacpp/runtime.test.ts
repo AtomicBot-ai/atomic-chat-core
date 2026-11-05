@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { ChildProcess } from 'node:child_process'
 import type { Server } from 'node:net'
 import { join } from 'node:path'
 import {
@@ -22,6 +23,7 @@ import type { GpuClaim, ManagedProcess } from '../shared/index.js'
 import { LlamacppRuntime } from './runtime.js'
 import type { LlamacppRuntimeOptions, RuntimeSettings } from './runtime.js'
 import { formatExitCode } from './errors.js'
+import { classifyFailure, diagnosticTags } from '../../telemetry/index.js'
 
 /**
  * The tests here build a llama.cpp runtime, several of them with real (fake-engine) child processes. Under the
@@ -1049,6 +1051,53 @@ describe('shutdown', () => {
 })
 
 describe('getDevices', () => {
+  it.each([0, 5])('records missing-header versus process-exit evidence for exit %s', async (code) => {
+    const probe: ManagedProcess = {
+      child: new ChildProcess(),
+      pid: -1,
+      exited: Promise.resolve({ code, signal: null }),
+      terminate: async () => ({ code, signal: null }),
+      output: () => ({ stdout: '', stderr: '/private/model engine failed' }),
+      spawnFailure: () => undefined,
+    }
+    const runtime = await makeRuntime({ probeDevicesWith: () => probe })
+    const error = await runtime.getDevices('/private/backend/llama-server').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    const tags = diagnosticTags(error, classifyFailure(error, { component: 'http', operation: 'request' }))
+    expect(tags).toMatchObject({
+      operation_detail: code === 0 ? 'device_probe_missing_header' : 'device_probe_nonzero_exit',
+      exit_code: code,
+      failure_stage: 'execute',
+    })
+    expect(JSON.stringify(tags)).not.toContain('/private')
+  })
+
+  it('records a timed-out probe without calling its deliberate termination a native crash', async () => {
+    const terminate = vi.fn(async () => ({ code: null, signal: 'SIGTERM' as const }))
+    const probe: ManagedProcess = {
+      child: new ChildProcess(),
+      pid: -1,
+      exited: new Promise(() => {}),
+      terminate,
+      output: () => ({ stdout: '', stderr: '' }),
+      spawnFailure: () => undefined,
+    }
+    const runtime = await makeRuntime({ probeDevicesWith: () => probe })
+    vi.useFakeTimers()
+    try {
+      const result = runtime.getDevices('/private/backend/llama-server').catch((e: unknown) => e)
+      await vi.advanceTimersByTimeAsync(10_000)
+      const error = await result
+      const tags = diagnosticTags(error, classifyFailure(error, { component: 'http', operation: 'request' }))
+      expect(tags).toMatchObject({ operation_detail: 'device_probe_timeout', failure_reason: 'timeout' })
+      expect(tags.native_failure).toBeUndefined()
+      expect(tags.signal).toBeUndefined()
+      expect(terminate).toHaveBeenCalledWith(500)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('parses the device list of an installed backend', async () => {
     const runtime = await makeRuntime()
     const devices = await runtime.getDevices(FAKE_LLAMA_SCRIPT)

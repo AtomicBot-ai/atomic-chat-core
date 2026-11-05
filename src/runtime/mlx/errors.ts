@@ -6,6 +6,7 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
+import type { FailureDiagnostic } from '../../contracts/index.js'
 import type { ExitInfo } from '../llamacpp/errors.js'
 
 const OOM_PATTERNS = [
@@ -85,11 +86,24 @@ export function mlxTimeout(timeoutSecs: number, stderr: string): AtomicCoreError
  * the engine (`POST /engine-builds/mlx/install`), so that is what the message says; where the core
  * looked goes in `details` (spec `engine-builds`, "Две точки происхождения mlx-server").
  */
-export function mlxBinaryMissing(lookedAt?: string): AtomicCoreError {
+export function mlxBinaryMissing(
+  lookedAt?: string,
+  detail?: Extract<FailureDiagnostic['operationDetail'], `mlx_${string}`>
+): AtomicCoreError {
   return new AtomicCoreError(
     'BINARY_NOT_FOUND',
     'MLX is not installed. Install the MLX engine, then load the model again.',
-    lookedAt ? `mlx-server not found; looked at ${lookedAt}` : undefined
+    lookedAt ? `mlx-server not found; looked at ${lookedAt}` : undefined,
+    {
+      diagnostic: {
+        component: 'runtime',
+        operation: 'load',
+        stage: 'validate',
+        category: 'operational',
+        reason: lookedAt ? 'not_found' : 'not_configured',
+        ...(detail ? { operationDetail: detail } : {}),
+      },
+    }
   )
 }
 

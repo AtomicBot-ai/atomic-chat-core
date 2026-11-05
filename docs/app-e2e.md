@@ -85,6 +85,17 @@ The core-side regression is automated in `src/diffusion/{jobs,service}.test.ts`;
 shutdown is also driven through the compiled binary in `test/e2e/diffusion.test.ts`. This desktop
 acceptance scenario is not claimed as executed by those tests.
 
+## GPU/MLX diagnostic acceptance (2026-11-05)
+
+On an isolated desktop profile with a loopback Sentry sink and consent enabled, use the fixture
+device probe to time out, exit nonzero, and exit successfully without a device-list header. Confirm
+the existing API error remains visible and `operation_detail` distinguishes these outcomes; the
+timeout must not acquire the signal used to stop the probe. With an MLX model registered, repeat
+missing explicit, resolver-selected, and resources-directory executable lookups, then a lookup with no configured
+binary. Confirm the existing install-engine message remains visible and the finite lookup-source
+tag survives telemetry. Sentinel private paths/output must not appear in those tags. The runtime
+unit/contract checks do not claim that this real-desktop acceptance has been executed.
+
 ## Stage 3 evidence (2026-09-16)
 
 - `npm run verify` builds and drives the core binary on an isolated data folder. `test/e2e/owner.test.ts`

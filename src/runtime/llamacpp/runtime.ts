@@ -969,21 +969,57 @@ export class LlamacppRuntime implements LocalRuntime {
     const timeout = new Promise<'timeout'>((r) =>
       setTimeout(() => r('timeout'), DEVICE_PROBE_TIMEOUT_MS).unref()
     )
-    const outcome = await Promise.race([proc.exited.then(() => 'exited' as const), timeout])
+    const outcome = await Promise.race([proc.exited, timeout])
     if (outcome === 'timeout') {
       await proc.terminate(500)
       throw new AtomicCoreError(
         'DEVICE_LIST_PARSE_FAILED',
         'Timed out while listing llama.cpp devices.',
-        `${exePath} --list-devices`
+        `${exePath} --list-devices`,
+        {
+          diagnostic: {
+            component: 'runtime',
+            operation: 'request',
+            stage: 'execute',
+            category: 'operational',
+            reason: 'timeout',
+            operationDetail: 'device_probe_timeout',
+          },
+        }
       )
     }
     const failure = proc.spawnFailure()
     if (failure)
-      throw new AtomicCoreError('BINARY_NOT_FOUND', 'Cannot run the llama.cpp backend.', failure.message)
+      throw new AtomicCoreError('BINARY_NOT_FOUND', 'Cannot run the llama.cpp backend.', failure.message, {
+        cause: failure,
+        diagnostic: {
+          component: 'runtime',
+          operation: 'request',
+          stage: 'spawn',
+          operationDetail: 'device_probe_spawn_failed',
+        },
+      })
     await new Promise((r) => setTimeout(r, 10)) // let the line readers drain
     const { stdout, stderr } = proc.output()
-    return parseDeviceOutput(`${stdout}\n${stderr}`)
+    try {
+      return parseDeviceOutput(`${stdout}\n${stderr}`)
+    } catch (error) {
+      if (!(error instanceof AtomicCoreError) || error.code !== 'DEVICE_LIST_PARSE_FAILED') throw error
+      const failed = outcome.code !== 0 || outcome.signal !== null
+      throw new AtomicCoreError(error.code, error.message, error.details, {
+        cause: error,
+        diagnostic: {
+          component: 'runtime',
+          operation: 'request',
+          stage: 'execute',
+          category: failed ? 'operational' : 'unknown',
+          reason: failed ? 'process_exit' : 'unknown',
+          operationDetail: failed ? 'device_probe_nonzero_exit' : 'device_probe_missing_header',
+          exitCode: outcome.code,
+          signal: outcome.signal,
+        },
+      })
+    }
   }
 
   async shutdown(): Promise<void> {

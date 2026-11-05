@@ -13,6 +13,7 @@ import { hostPid } from '../shared/index.js'
 import type { GpuClaim } from '../shared/index.js'
 import { MlxRuntime } from './runtime.js'
 import type { MlxRuntimeOptions } from './runtime.js'
+import { classifyFailure, diagnosticTags } from '../../telemetry/index.js'
 
 let data: TmpDataFolder
 let journal: ProcessJournal
@@ -304,6 +305,44 @@ describe('MlxRuntime', () => {
       message: expect.stringContaining('Model file not found at: '),
     })
     await expect(runtime().load('nope')).rejects.toMatchObject({ code: 'MODEL_NOT_FOUND' })
+  })
+
+  it.each([
+    { source: 'unresolved', resourcesDir: undefined, resolved: undefined, explicit: undefined },
+    { source: 'resources', resourcesDir: '/private/resources', resolved: undefined, explicit: undefined },
+    {
+      source: 'resolved',
+      resourcesDir: undefined,
+      resolved: '/private/installed/mlx-server',
+      explicit: undefined,
+    },
+    {
+      source: 'explicit',
+      resourcesDir: undefined,
+      resolved: undefined,
+      explicit: '/private/override/mlx-server',
+    },
+  ])('records the $source binary lookup without exposing a path', async (lookup) => {
+    await writeMlxModel('m')
+    const error = await runtime(
+      {},
+      {},
+      {
+        resourcesDir: lookup.resourcesDir,
+        resolveBinary: async () => lookup.resolved,
+        exists: () => false,
+      }
+    )
+      .load('m', lookup.explicit ? { exePath: lookup.explicit } : {})
+      .catch((e: unknown) => e)
+    const tags = diagnosticTags(error, classifyFailure(error, { component: 'runtime', operation: 'load' }))
+    expect(tags).toMatchObject({
+      operation_detail:
+        lookup.source === 'unresolved' ? 'mlx_binary_unresolved' : `mlx_${lookup.source}_binary_missing`,
+      failure_stage: 'validate',
+      failure_category: 'operational',
+    })
+    expect(JSON.stringify(tags)).not.toContain('/private')
   })
 
   it('starts the build the resolver names, asking again on every load', async () => {
