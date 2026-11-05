@@ -2,10 +2,8 @@ name: FastFlowLM candidate
 on:
   workflow_dispatch:
   push:
+    # Provenance binds the archives to the core commit, including merges from main.
     branches: [change/add-fastflowlm-runtime]
-    paths:
-      - 'scripts/fastflowlm/**'
-      - '.github/workflows/fastflowlm-candidate.yml'
 
 permissions:
   contents: read
