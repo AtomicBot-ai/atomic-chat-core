@@ -104,6 +104,7 @@ const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 const LINUX_BACKEND_BY_INFIX = {
   'ubuntu-x64': 'linux-cpu-x64',
   'ubuntu-vulkan-x64': 'linux-vulkan-x64',
+  'ubuntu-rocm-10.0-x64': 'linux-rocm-10.0-x64',
   'ubuntu-arm64': 'linux-cpu-arm64',
   'ubuntu-vulkan-arm64': 'linux-vulkan-arm64',
 }

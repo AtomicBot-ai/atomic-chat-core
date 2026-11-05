@@ -88,6 +88,42 @@ describe('listInstalled', () => {
 })
 
 describe('install', () => {
+  it.skipIf(process.platform === 'win32')(
+    'checks the staged Linux HIP plugin before replacing an installed pack',
+    async () => {
+      const id = 'linux-rocm-10.0-x64'
+      const target = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b11617', id)
+      const source = join(data.root, 'upstream')
+      const root = 'llama-b11617'
+      const exe = join(source, root, 'llama-server')
+      await mkdir(join(source, root), { recursive: true })
+      const backend = new BackendService({
+        layout: data.layout,
+        provider: 'llamacpp-upstream',
+        platform: 'linux',
+        readManifest: async () => null,
+        downloader: {
+          download: async (_task: string, items: Array<{ save_path: string }>) => {
+            await tarCreate({ gzip: true, cwd: source, file: items[0]!.save_path }, [root])
+          },
+        } as never,
+      })
+      const working =
+        '#!/bin/sh\n[ "$1" = "--list-devices" ] || exit 1\necho "Available devices:"\necho "  ROCm0: Radeon (8192 MiB, 8192 MiB free)"\n'
+      await writeFile(exe, working, { mode: 0o755 })
+      await expect(backend.install('b11617', id, { taskId: 'install' })).resolves.toMatchObject({
+        installed: true,
+      })
+      await writeFile(exe, '#!/bin/sh\necho "Available devices:"\n')
+      await expect(backend.install('b11617', id, { taskId: 'replace', force: true })).rejects.toThrow(
+        /enumerate an AMD GPU/
+      )
+      expect(await readFile(join(target, 'build', 'bin', 'llama-server'), 'utf8')).toBe(working)
+    },
+    // Two new executable paths can each trigger a cold macOS security scan.
+    30_000
+  )
+
   it('rejects a macOS pack with the wrong build before replacing the installed version', async () => {
     const target = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6325', 'macos-arm64')
     await data.writeBackend('llamacpp-upstream', 'b6325', 'macos-arm64')

@@ -28,10 +28,12 @@ import {
   DEFAULT_JOB_TIMINGS,
   runImageJob,
   runVideoJob,
+  startJob,
   startImageJob,
   startVideoJob,
 } from './jobs.js'
 import type { JobDeps, JobResult } from './jobs.js'
+import { IMAGE_JOB_KIND } from './image-job.js'
 import { AsyncMutex } from './mutex.js'
 import { DiffusionState } from './state.js'
 import type { ServerSpec } from './types.js'
@@ -201,6 +203,59 @@ beforeEach(async () => {
 })
 
 // ── the tests ─────────────────────────────────────────────────────────────────
+
+describe('owner lifecycle during job startup', () => {
+  it.each(['unload', 'replace', 'shutdown'] as const)(
+    'refuses preparation overtaken by %s before registering a job',
+    async (change) => {
+      const h = harness(0)
+      let finishValidation!: () => void
+      const starting = startJob(
+        h.deps,
+        { ...IMAGE_JOB_KIND, validate: () => new Promise<void>((resolve) => (finishValidation = resolve)) },
+        sampleRequest()
+      ).catch((error: unknown) => error)
+      if (change === 'shutdown') h.state.closing = true
+      else {
+        h.state.session = undefined
+        h.state.spec = change === 'replace' ? sampleSpec({ modelId: 'another-model' }) : undefined
+      }
+      finishValidation()
+      const result = await starting
+      // A broken implementation may already own a failed job; let its cleanup settle.
+      if (result && typeof result === 'object' && 'done' in result) await result.done
+      expect(result).toMatchObject({ code: 'CANCELLED' })
+      expect(h.state.activeJobId).toBeUndefined()
+      expect(h.jobStates()).toEqual([])
+      expect(h.spawned).toEqual([])
+    }
+  )
+
+  it.each(['unload', 'replace', 'shutdown'] as const)(
+    'cancels input resolution overtaken by %s without reporting a crash',
+    async (change) => {
+      const h = harness(0)
+      let finishRead!: (bytes: Buffer) => void
+      h.deps.isFile = async () => true
+      h.deps.readSource = () => new Promise<Buffer>((resolve) => (finishRead = resolve))
+      const started = await startImageJob(
+        h.deps,
+        sampleRequest({ workflow: 'transform', initImage: { path: '/reference.png' } })
+      )
+      expect(finishRead).toBeTypeOf('function')
+      if (change === 'shutdown') h.state.closing = true
+      else {
+        h.state.session = undefined
+        h.state.spec = change === 'replace' ? sampleSpec({ modelId: 'another-model' }) : undefined
+      }
+      finishRead(Buffer.from(pngB64, 'base64'))
+      expect(await started.done).toMatchObject({ ok: false, error: { code: 'CANCELLED' } })
+      expect(h.errors()).toEqual([])
+      expect(h.state.activeJobId).toBeUndefined()
+      expect(h.spawned).toEqual([])
+    }
+  )
+})
 
 describe('a completed job', () => {
   it('saves its outputs and reports every transition', async () => {

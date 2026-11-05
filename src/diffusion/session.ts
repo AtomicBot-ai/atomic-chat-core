@@ -315,6 +315,14 @@ export async function loadFromSpec(
   state.session = { server, info, spec: running, baseUrl: `http://127.0.0.1:${server.port}` }
   state.spec = running
   state.modelFileBytes = fileBytes
+  // Readiness can win the spawn promise just before its owner cancels the load.
+  if (state.closing || signal?.aborted) {
+    await takeDownSession(deps, SHUTDOWN_GRACE_MS)
+    state.clearIdle()
+    state.setModelState('unloaded')
+    await emitState(deps, 'load-cancelled')
+    throw diffusionError('CANCELLED', 'The image model load was stopped.')
+  }
   state.setModelState('loaded')
   state.touchIdle()
   await emitState(deps, 'loaded')
