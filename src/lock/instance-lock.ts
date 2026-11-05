@@ -11,8 +11,9 @@
  * owner is alive — or whose liveness cannot be disproven — is never taken over.
  */
 
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { mkdir, open, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { realpath } from 'node:fs/promises'
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
@@ -20,6 +21,7 @@ import type { DataLayout } from '../config/index.js'
 import { CORE_VERSION } from '../version.js'
 import {
   identityPermitsTakeover,
+  isProcessAlive,
   processStartEpoch,
   processStartId,
   verifyProcessIdentity,
@@ -214,7 +216,7 @@ export class InstanceLock {
       if (state.kind === 'owned') throw alreadyRunning(state.record, state.verdict)
       if (state.kind === 'free') continue // the holder released between our attempts
       // stale or corrupt: recover, but only one starter at a time
-      const recovered = await tryRecoverStale(layout, deps)
+      const recovered = await tryRecoverStale(layout, ownerStartedAt, deps)
       if (!recovered) await sleep(TAKEOVER_RETRY_MS)
     }
     throw new AtomicCoreError(
@@ -257,19 +259,72 @@ export function alreadyRunning(record: LockRecord, verdict: 'match' | 'unknown')
 }
 
 /** Returns true when this caller performed the recovery; false when someone else is doing it. */
-async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<boolean> {
-  const now = deps.now ?? Date.now
+async function tryRecoverStale(
+  layout: DataLayout,
+  ownerStartedAt: string | undefined,
+  deps: LockDeps
+): Promise<boolean> {
+  // Publish the PID and start time in the name: even a crash during creation leaves an identifiable
+  // claimant. Each attempt has a fresh name, so cleaning up a dead claimant cannot unlink its successor.
+  const prefix = 'instance.lock.recover-'
+  const ownIdentity = `${process.pid}-${ownerStartedAt?.slice('epoch:'.length) ?? 'unknown'}-`
+  const claim = `${prefix}${ownIdentity}${randomUUID()}`
+  const claimPath = join(layout.core.dir, claim)
+  await writeFile(claimPath, '', { flag: 'wx' }).catch((cause: unknown) => {
+    throw new AtomicCoreError('IO_ERROR', `Cannot create ${claimPath}`, (cause as Error).message, { cause })
+  })
+  try {
+    // Give simultaneous contenders one turn to withdraw before returning to the outer retry budget.
+    for (let scan = 0; scan < 2; scan++) {
+      const peers = (await readdir(layout.core.dir)).filter(
+        (name) => name !== claim && name.startsWith(prefix)
+      )
+      let waiting = false
+      for (const peer of peers) {
+        const match = /^(\d+)-(\d+|unknown)-[0-9a-f-]{36}$/.exec(peer.slice(prefix.length))
+        if (!match) continue
+        const verdict = peer.startsWith(prefix + ownIdentity)
+          ? 'match'
+          : await verifyStartEpoch(Number(match[1]), `epoch:${match[2]}`, deps)
+        if (identityPermitsTakeover(verdict)) {
+          await rm(join(layout.core.dir, peer), { force: true })
+        } else if (peer < claim) {
+          return false
+        } else {
+          waiting = true
+        }
+      }
+      // A newcomer sees our claim until the entire check/unlink sequence finishes. Among simultaneous
+      // arrivals only the lowest name waits; it enters after every other live claimant has left.
+      if (!waiting) return await recoverUnderClaim(layout, deps)
+      if (scan === 0) await (deps.sleep ?? defaultSleep)(TAKEOVER_RETRY_MS)
+    }
+    return false
+  } catch (cause) {
+    if (cause instanceof AtomicCoreError) throw cause
+    throw new AtomicCoreError(
+      'IO_ERROR',
+      `Cannot recover ${layout.core.instanceLock}`,
+      (cause as Error).message,
+      { cause }
+    )
+  } finally {
+    await rm(claimPath, { force: true }).catch((cause: unknown) => {
+      throw new AtomicCoreError('IO_ERROR', `Cannot release ${claimPath}`, (cause as Error).message, {
+        cause,
+      })
+    })
+  }
+}
+
+async function recoverUnderClaim(layout: DataLayout, deps: LockDeps): Promise<boolean> {
   const mutexPath = `${layout.core.instanceLock}.takeover`
   const mutex = await open(mutexPath, 'wx').catch(async (e: unknown) => {
     if (!isEexist(e))
       throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message, {
         cause: e,
       })
-    const age = await stat(mutexPath).then(
-      (s) => now() - s.mtimeMs,
-      () => 0
-    )
-    if (age > TAKEOVER_MUTEX_TTL_MS) await rm(mutexPath, { force: true }).catch(() => {})
+    if (await mutexIsStale(mutexPath, deps)) await rm(mutexPath, { force: true }).catch(() => {})
     return undefined
   })
   if (!mutex) return false
@@ -286,6 +341,19 @@ async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<bool
     await mutex.close().catch(() => {})
     await rm(mutexPath, { force: true }).catch(() => {})
   }
+}
+
+async function mutexIsStale(mutexPath: string, deps: LockDeps): Promise<boolean> {
+  const now = deps.now ?? Date.now
+  const alive = deps.alive ?? isProcessAlive
+  const [text, info] = await Promise.all([
+    readFile(mutexPath, 'utf8').catch(() => ''),
+    stat(mutexPath).catch(() => undefined),
+  ])
+  if (!info) return false
+  const match = /^(\d+)\r?\n$/.exec(text)
+  if (match && !alive(Number(match[1]))) return true
+  return now() - info.mtimeMs > TAKEOVER_MUTEX_TTL_MS
 }
 
 export interface WaitForOwnerOptions extends LockDeps {

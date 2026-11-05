@@ -184,3 +184,4 @@ add a new one that says which record it supersedes.
 - [Tile the image VAE from above 768² on Vulkan](2026-11-05-tile-the-image-vae-earlier-on-vulkan.md)
 - [List llama.cpp devices from the pack a load runs on](2026-11-05-list-devices-from-the-pack-a-load-runs-on.md)
 - [Give mlx-server the llama.cpp answer cap](2026-11-05-give-mlx-the-llama-answer-cap.md)
+- [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)

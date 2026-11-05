@@ -10,7 +10,7 @@
 import { spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -64,6 +64,29 @@ describe.skipIf(!existsSync(BIN))('the compiled core as an owner', () => {
     })
     expect(second.status).toBe(1)
     expect(second.stderr).toContain('CORE_ALREADY_RUNNING')
+  })
+
+  it('elects one daemon when two start with an abandoned takeover mutex', async () => {
+    const crashed = await startDaemon()
+    crashed.child.kill('SIGKILL')
+    await waitFor(() => !isAlive(crashed.ready.pid))
+    const lock = join(dataFolder, 'atomic-core', 'instance.lock')
+    await writeFile(`${lock}.takeover`, `${crashed.ready.pid}\n`)
+
+    const results = await Promise.allSettled([startDaemon(), startDaemon()])
+    const ready = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value.ready] : []))
+    expect(ready).toHaveLength(1)
+    const winner = ready[0]!
+    const loser = results.find((r) => r.status === 'rejected')
+    expect(String(loser?.reason)).toContain('CORE_ALREADY_RUNNING')
+    expect(JSON.parse(await readFile(lock, 'utf8'))).toMatchObject({
+      pid: winner.pid,
+      instance_id: winner.instance_id,
+    })
+    expect(await (await control(winner, '/health')).json()).toMatchObject({
+      ok: true,
+      instance_id: winner.instance_id,
+    })
   })
 
   it.skipIf(process.platform === 'win32')(

@@ -111,7 +111,7 @@ has not landed yet is validated for shape only, and `docs/testing-critical-flows
 
 New data paths: `<data>/atomic-core/` (settings.json, credentials.json, optimal-backend.json,
 bad-backends.json (llama.cpp packs this machine could not run, keyed by provider, backend and GPU driver; binary failures also match the release tag),
-instance.lock, control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml,
+instance.lock (during stale recovery: instance.lock.takeover and one instance.lock.recover-<pid>-<start-seconds-or-unknown>-<uuid> per contender), control-token, processes.json, logs/, remote-access-tunnel.json, cloudflared-empty.yml,
 media-catalog.cache.json), `<data>/diffusion/remote-jobs.json` (remote clips still running at a provider),
 `<data>/llamacpp-upstream/releases.cache.json` (the last upstream release list read)
 and, for the managed text runtimes' container environment, the one root outside any data folder:
