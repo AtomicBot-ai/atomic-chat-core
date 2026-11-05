@@ -104,6 +104,32 @@ describe('MlxRuntime', () => {
     expect(journal.list().map((record) => record.provider)).toEqual(['mlx'])
   })
 
+  it('gives mlx-server the llama.cpp answer cap inside the window, and keeps a cap the user set', async () => {
+    await writeMlxModel('long')
+    await writeMlxModel('short', { max_position_embeddings: 8192 })
+    await writeMlxModel('own')
+    const envs: Array<Record<string, string> | undefined> = []
+    const spawn = fakeSidecarSpawn({ kind: 'mlx' })
+    const load = (id: string, baseEnv: Record<string, string> = {}) =>
+      runtime(
+        {},
+        {},
+        {
+          baseEnv,
+          spawn: (spec, opts) => {
+            envs.push(spec.env)
+            return spawn(spec, opts)
+          },
+        }
+      ).load(id)
+    await load('long')
+    await load('short')
+    await load('own', { MLX_VLM_MAX_TOKENS: '4096' })
+    // Without it mlx-server ends an answer that sends no max_tokens at 2048 tokens (Atomic-Chat#384).
+    expect(envs.map((env) => env?.['MLX_VLM_MAX_TOKENS'])).toEqual(['16384', '8192', '4096'])
+    expect(envs.map((env) => env?.['MLX_VLM_SINGLE_MODEL'])).toEqual(['1', '1', '1'])
+  })
+
   it('narrows the 32K default by the KV cache on a Mac below 16 GiB, never below the previous 16K', async () => {
     const GiB = 2 ** 30
     // 28 layers × 8 KV heads × 128 at 16 bits: 112 KiB a token.
