@@ -191,9 +191,31 @@ export function buildServerArgs(
  * Output area above which a request turns VAE tiling on. The VAE's compute buffer grows with the
  * pixel count (FLUX.2: 6.7 GB to decode at 1024², 26.6 GB at 2048², where a 2x Upscale lands and
  * where it failed on a 24 GB card). Tiled, the peak stays at the one-tile figure. Up to 1024²
- * nothing changes.
+ * nothing changes, except on Vulkan ({@link VULKAN_VAE_TILING_AREA}).
  */
 export const VAE_TILING_AREA = 1024 * 1024
+
+/**
+ * The tiling threshold on the Vulkan backend, lower than {@link VAE_TILING_AREA} because Vulkan caps
+ * single tensors, not just memory (Atomic-Chat#350). ggml's Vulkan backend refuses an op with a
+ * tensor larger than the device's `maxStorageBufferRange` / `maxBufferSize` (typically 4 GiB on
+ * desktop drivers), and the scheduler runs that op on the CPU instead. A one-graph decode of the
+ * FLUX-style VAE (Z-Image, FLUX.1, FLUX.2, FLUX.3) unfolds its full-resolution 3×3 convolutions over
+ * 256 channels with im2col in F16, 4608 bytes per output pixel, which passes 4 GiB from about
+ * 0.93 MP: FLUX.2 Klein's 1024² decode ran on the CPU of a 24 GB RX 7900 XTX (a 7.4 GB CPU buffer,
+ * 35–38 s), and tiled it took 2.7 s on the GPU. At 768² that tensor is about 2.5 GiB, well under the
+ * cap, so smaller images keep the one-graph decode.
+ */
+export const VULKAN_VAE_TILING_AREA = 768 * 768
+
+/**
+ * The output area above which an image request on `spec` tiles its VAE decode: the Vulkan threshold
+ * while the server runs on a Vulkan build's device, the general one elsewhere and after the CPU
+ * fallback (the CPU backend has no per-tensor cap).
+ */
+export function imageVaeTilingArea(spec: Pick<ServerSpec, 'backend' | 'cpuFallback'>): number {
+  return spec.backend === 'vulkan' && !spec.cpuFallback ? VULKAN_VAE_TILING_AREA : VAE_TILING_AREA
+}
 
 /**
  * Pixel-frames (width × height × frames) above which a video request turns VAE tiling on. A video
@@ -224,13 +246,15 @@ function customSigmas(defaults: DiffusionFamilyDefaults, steps: number): number[
  * images go in. sd.cpp resizes the init image to `width`×`height` itself, which is how Upscale works.
  *
  * sd.cpp reads integers with `is_number_integer()` and floats with `is_number()`, so `1` for a
- * `cfgScale` of 1.0 is accepted (checked in its `common.cpp`).
+ * `cfgScale` of 1.0 is accepted (checked in its `common.cpp`). The VAE decode is tiled past
+ * `tilingArea` pixels: {@link imageVaeTilingArea} of the running server.
  */
 export function buildImgGenRequest(
   request: ImageGenerateRequest,
   defaults: DiffusionFamilyDefaults,
   seed: number,
-  inputs: ResolvedInputs
+  inputs: ResolvedInputs,
+  tilingArea: number = VAE_TILING_AREA
 ): Record<string, unknown> {
   const guidance: Record<string, unknown> = { txt_cfg: request.cfgScale }
   const distilled = request.guidance ?? defaults.guidance
@@ -264,7 +288,7 @@ export function buildImgGenRequest(
     if (usesMask(workflow) && inputs.mask !== undefined) body['mask_image'] = inputs.mask
   }
   if (usesReferences(workflow) && inputs.refs.length > 0) body['ref_images'] = inputs.refs
-  if (request.width * request.height > VAE_TILING_AREA) body['vae_tiling_params'] = { enabled: true }
+  if (request.width * request.height > tilingArea) body['vae_tiling_params'] = { enabled: true }
   return body
 }
 

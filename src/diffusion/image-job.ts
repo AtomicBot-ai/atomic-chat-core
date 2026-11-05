@@ -13,7 +13,7 @@ import type {
   ImageRecipe,
   ImageSource,
 } from '../contracts/index.js'
-import { buildImgGenRequest } from './args.js'
+import { buildImgGenRequest, imageVaeTilingArea } from './args.js'
 import { diffusionError, internalError } from './errors.js'
 import { isBlankOutput } from './gallery.js'
 import type { JobKind, SaveContext } from './job-kind.js'
@@ -193,7 +193,8 @@ export const IMAGE_JOB_KIND: JobKind<
     outputs: [],
   }),
   resolveInputs,
-  buildBody: (request, spec, seed, inputs) => buildImgGenRequest(request, spec.defaults, seed, inputs),
+  buildBody: (request, spec, seed, inputs) =>
+    buildImgGenRequest(request, spec.defaults, seed, inputs, imageVaeTilingArea(spec)),
   trackerShape: (request) => ({ steps: sampledSteps(request), batch: request.batchSize }),
   progressModel: () => (snapshot) => snapshot,
   emitJob: (emit, job) => emit('diffusion:job', { job }),
