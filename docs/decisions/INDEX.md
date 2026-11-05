@@ -177,3 +177,4 @@ add a new one that says which record it supersedes.
 - [Keep CUDA runtime repair cancellable and coherent](2026-11-04-keep-cuda-runtime-repair-cancellable-and-coherent.md)
 - [Scope binary failures to the engine release](2026-11-04-scope-binary-failures-to-the-engine-release.md)
 - [Let a host keep its own report tags](2026-11-04-let-a-host-keep-its-own-report-tags.md)
+- [Pin FastFlowLM build inputs before changing the server](2026-11-05-pin-fastflowlm-build-inputs.md)

@@ -1,0 +1,125 @@
+name: FastFlowLM candidate
+on:
+  workflow_dispatch:
+  push:
+    branches: [change/add-fastflowlm-runtime]
+    paths:
+      - 'scripts/fastflowlm/**'
+      - '.github/workflows/fastflowlm-candidate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64-npu }
+          - { os: windows-2022, platform: win-x64-npu }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 110
+    env:
+      GIT_CONFIG_COUNT: '2'
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'false'
+      GIT_CONFIG_KEY_1: core.longpaths
+      GIT_CONFIG_VALUE_1: 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Verify recipe and clone pinned FLM
+        shell: bash
+        run: |
+          python -m unittest discover -s scripts/fastflowlm
+          python - <<'PY'
+          import json, subprocess
+          from pathlib import Path
+          lock = json.loads(Path("scripts/fastflowlm/provenance.json").read_text())
+          subprocess.run(["git", "clone", "--depth", "1", "--branch", lock["tag"], "--recurse-submodules",
+                          "--shallow-submodules", "--jobs", "4", lock["upstream"], "source"], check=True)
+          PY
+      - name: Build and stage the portable Linux installation
+        if: runner.os == 'Linux'
+        run: |
+          docker build -t atomic-flm-builder scripts/fastflowlm
+          mkdir installed
+          docker run --rm -v "$PWD/source:/source" -v "$PWD/installed:/installed" \
+            -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*' \
+            --entrypoint /bin/bash atomic-flm-builder -ec \
+            'python3 /opt/atomic-flm/build.py /source && cmake --install /source/src/build --prefix /installed'
+          python scripts/fastflowlm/package_engine.py pack artifacts --platform linux-x64-npu --source source --installed installed
+      - name: Set up pinned Windows toolchain
+        if: runner.os == 'Windows'
+        run: ./scripts/fastflowlm/setup-ci-windows.ps1
+      - name: Build and stage Windows engine
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python scripts/fastflowlm/build.py --installed-windows-toolchain source
+          python scripts/fastflowlm/package_engine.py pack artifacts --platform win-x64-npu --source source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flm-${{ matrix.platform }}
+          path: artifacts/*
+          if-no-files-found: error
+          compression-level: 0
+
+  probe:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x64-npu }
+          - { os: windows-2022, platform: win-x64-npu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: flm-${{ matrix.platform }}
+          path: artifacts
+      - name: Check for an absent AMD accelerator and system XRT
+        if: runner.os == 'Linux'
+        run: |
+          test ! -e /sys/module/amdxdna
+          test -z "$(find /dev -path '/dev/accel/accel*' -print -quit)"
+          ldconfig -p > "$RUNNER_TEMP/host-libraries"
+          if grep -q libxrt_core "$RUNNER_TEMP/host-libraries"; then exit 1; fi
+      - name: Check for an absent AMD accelerator and driver DLL
+        if: runner.os == 'Windows'
+        run: |
+          if (Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'PCI\VEN_1022&DEV_17F0*' }) { throw 'AMD NPU present' }
+          if (Get-Command xrt_coreutil.dll -ErrorAction SilentlyContinue) { throw 'XRT DLL on PATH' }
+          if (Test-Path "$env:windir/System32/xrt_coreutil.dll") { throw 'System XRT present' }
+      - name: Verify hash, unpack and execute local-only protocol from the archive
+        run: python scripts/fastflowlm/package_engine.py probe artifacts --platform ${{ matrix.platform }}
+
+  provenance:
+    needs: probe
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flm-*
+          merge-multiple: true
+          path: artifacts
+      - run: python3 scripts/fastflowlm/package_engine.py manifest artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flm-qualified-candidate
+          path: |
+            artifacts/*.zip
+            artifacts/*.tar.gz
+            artifacts/*-provenance.json
+          if-no-files-found: error
+          compression-level: 0

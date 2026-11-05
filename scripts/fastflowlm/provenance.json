@@ -1,0 +1,62 @@
+{
+  "upstream": "https://github.com/ROCm/FastFlowLM.git",
+  "tag": "v1.0.11",
+  "commit": "f37cdd29edc777cf3db1e385da8e7bfadc57d0b3",
+  "objects": {
+    "src/lib": "463572dcc2358f9f944d2042cc30b7420a34152d",
+    "src/lib/xrt": "0a6602499a1a67981ae4bc786afdb4e62da01d5e",
+    "src/xclbins": "574d3f49f3ed24c2d80da94235e1607dd900b922",
+    "LICENSE_RUNTIME.txt": "83fc70d7d9989cd864116cdd9fb2aa9cffe0b13f",
+    "LICENSE_BINARY.txt": "d0476c9551245939a806b68e2d6c5824e98afd37",
+    "THIRD_PARTY_NOTICES.txt": "e56676b0b07c123182717e949780633d863bb887",
+    "src/cmake/FlmAudioCodecs.cmake": "cd74dd7e9ff2a3b07a912b5e2ce1a0dceddea1c3",
+    "src/cmake/FlmImageCodecs.cmake": "ef1831f3764a91e02ec10f9e485790f53bf1d71a",
+    ".github/script/setup_windows_deps.ps1": "7ed9fd9d0caba288508260b864f5d1c95822bfe4"
+  },
+  "submodules": {
+    "third_party/tokenizers-cpp": "acbdc5a27ae01ba74cda756f94da698d40f11dfe",
+    "third_party/tokenizers-cpp/msgpack": "092bc69b6e815980bce7808595c914dd3a29f905",
+    "third_party/tokenizers-cpp/sentencepiece": "11051e3b73b3a6222a52acd720e39805dc7545ab",
+    "third_party/xgrammar": "97787376faee5ed8466cfad57c99855e4ce2f6aa",
+    "third_party/xgrammar/3rdparty/cpptrace": "6689d14c203eed390ae7bb64f56a983cfd7dff9c",
+    "third_party/xgrammar/3rdparty/dlpack": "bbd2f4d32427e548797929af08cfe2a9cbb3cf12",
+    "third_party/xgrammar/3rdparty/googletest": "df1544bcee0c7ce35cd5ea0b3eb8cc81855a4140"
+  },
+  "cargo_lock_sha256": "98618ae2a82a51d1cf287c2a7dbdfb4df53711f792437d549a532327d33b587d",
+  "rust": "1.99.1",
+  "linux": {
+    "image": "ghcr.io/rocm/fastflowlm/build-environment@sha256:e0b27cf639e0cb4352d713241a41ef5680a59defadc131d377ddcfb652888e81",
+    "gcc": "13.3.0",
+    "upstream_job": "https://github.com/ROCm/FastFlowLM/actions/runs/40798900265/job/123201973356",
+    "rust_components": [
+      {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rustc-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "2ff05ff9c08a90861e7f6e4065b40a8b87463b4576186fd613871c3e37f2091f"
+      },
+      {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-std-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "109b074225bf5b9ea3820890876bfdf4ed161adbfaf94b2b4b5984c85ee5d958"
+      },
+      {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/cargo-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "53f3521949404d595efb06a55c12c5658d4ed1c75566f33d3d514eaebe70bd8a"
+      }
+    ]
+  },
+  "windows": {
+    "image": "20261021.278.1",
+    "vs_version": "18.11.12315.225",
+    "msvc": "19.51.36260.0",
+    "sdk": "10.0.26100.0",
+    "cmake": "4.4.4",
+    "vcpkg": "8c5c88430ac864cf4fe8de4be61f69f003d23ffe",
+    "upstream_job": "https://github.com/ROCm/FastFlowLM/actions/runs/40798900276/job/123201973436",
+    "build_tools": {
+      "url": "https://download.visualstudio.microsoft.com/download/pr/e07fb79d-d4ec-45bc-b19d-200bc819ee8d/3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2/vs_BuildTools.exe",
+      "sha256": "3b21743cfbd0458e7f4dba87981fb8b99602a974c7439b857878cfa3e9fba5f2"
+    },
+    "cmake_zip_sha256": "bace36e94b31c68ab6fa295f26dfa11219e0701cf7c94b0284a7d1cb13dac536"
+  },
+  "atomic_revision": 1,
+  "patch_sha256": "0ec939add152776106853a856e38dc3e5a7f0cedaad87e7ff86990339744ded6"
+}
