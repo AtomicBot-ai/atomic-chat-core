@@ -60,7 +60,12 @@ import type {
   TurboquantRelease,
   UpstreamOfferOptions,
 } from '../catalog/index.js'
-import { findLatestPrismVersionForBackend, gpuDriverKey, isBackendMarkedBad } from '../select/index.js'
+import {
+  findLatestPrismVersionForBackend,
+  gpuDriverKey,
+  isAmdGpu,
+  isBackendMarkedBad,
+} from '../select/index.js'
 import { readBadBackends } from '../install/runtime-backend.js'
 import { CORE_VERSION } from '../../version.js'
 import { scanInstalledBackends } from '../installed/index.js'
@@ -261,6 +266,7 @@ export class BackendAdvisor {
         appVersion: request.app_version ?? null,
         proxy: request.proxy ?? null,
       },
+      await this.rocmFacts(facts),
       requirements
     )
   }
@@ -269,11 +275,11 @@ export class BackendAdvisor {
     facts: HardwareFacts,
     current: string,
     options: FetchOptions,
+    rocm: RocmHostProbe | undefined,
     requirements: BuildRequirements | null = null
   ): Promise<BackendCatalogResponse> {
     const { osType, arch, gpus } = facts
     const cpuExtensions = facts.cpuExtensions ?? []
-    const rocm = await this.rocmFacts(osType)
     const features = this.policy.features(osType, cpuExtensions, gpus, rocm)
     const supported = this.policy.supportedBackends(osType, arch, features)
 
@@ -433,7 +439,8 @@ export class BackendAdvisor {
     // One catalog per pass, fetched lazily inside the detection guard (the app fetched it there too,
     // so a slow release stream trips the 20 s guard the same way) and shared with the resolver.
     let catalogPromise: Promise<BackendCatalogResponse> | null = null
-    const catalogOnce = () => (catalogPromise ??= this.catalogFor(facts, current, options))
+    const rocm = request.assume_no_gpu ? undefined : await this.rocmFacts(facts)
+    const catalogOnce = () => (catalogPromise ??= this.catalogFor(facts, current, options, rocm))
     const warn = (message: string) => this.log('warn', message)
 
     const detection: IdealBackendResult = request.assume_no_gpu
@@ -444,7 +451,7 @@ export class BackendAdvisor {
             arch: facts.arch,
             cpuExtensions: facts.cpuExtensions ?? [],
             gpus: facts.gpus,
-            ...(await this.rocmInput(facts.osType)),
+            ...(rocm ? { rocm } : {}),
             listAvailableBackends: async () => (await catalogOnce()).available,
             probeTier: (tier) => this.probeTier(tier, facts),
             onWarn: warn,
@@ -652,20 +659,14 @@ export class BackendAdvisor {
     return { coreVersion: this.deps.coreVersion ?? CORE_VERSION, allowCandidates }
   }
 
-  private async rocmFacts(osType: string): Promise<RocmHostProbe | undefined> {
-    if ((this.provider !== 'llamacpp' && this.provider !== 'atomic-prism') || osType !== 'linux')
-      return undefined
+  private async rocmFacts(facts: HardwareFacts): Promise<RocmHostProbe | undefined> {
+    if (facts.osType !== 'linux' || !facts.gpus.some(isAmdGpu)) return undefined
     try {
       return await (this.deps.rocmProbe ?? probeLinuxRocmHost)()
     } catch (err) {
       this.log('warn', `catalog: ROCm probe failed: ${err instanceof Error ? err.message : String(err)}`)
       return undefined
     }
-  }
-
-  private async rocmInput(osType: string): Promise<{ rocm?: RocmHostProbe }> {
-    const rocm = await this.rocmFacts(osType)
-    return rocm ? { rocm } : {}
   }
 
   private now(): number {

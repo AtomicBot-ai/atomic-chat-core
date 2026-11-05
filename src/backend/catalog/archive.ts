@@ -25,15 +25,18 @@ import { stripBom } from '../version.js'
  */
 export const GGML_ORG_DOWNLOAD_BASE = 'https://github.com/ggml-org/llama.cpp/releases/download'
 
+export const LINUX_ROCM_BACKEND = 'linux-rocm-10.0-x64'
+
 /**
  * Internal Linux backend id → ggml-org asset infix (between `bin-` and `.tar.gz`). Upstream calls
  * its Linux builds `ubuntu-*`; the app surfaces them as `linux-*`. The whitelist is deliberately
- * narrow (`s390x`, `rocm-*`, `openvino-*`, the Snapdragon build are dropped). The arm64 CUDA builds
+ * narrow (`s390x`, `openvino-*`, the Snapdragon build are dropped). The arm64 CUDA builds
  * carry a toolkit minor and are translated by pattern (`linuxUpstreamInfix`), not listed here.
  */
 export const LINUX_UPSTREAM_ASSET_BY_BACKEND: Readonly<Record<string, string>> = {
   'linux-cpu-x64': 'ubuntu-x64',
   'linux-vulkan-x64': 'ubuntu-vulkan-x64',
+  [LINUX_ROCM_BACKEND]: 'ubuntu-rocm-10.0-x64',
   'linux-cpu-arm64': 'ubuntu-arm64',
   'linux-vulkan-arm64': 'ubuntu-vulkan-arm64',
 }
@@ -119,6 +122,7 @@ export function friendlyBackendLabel(backend: string): string {
   if (id.includes('opencl-adreno')) return 'OpenCL (Adreno)'
   if (id.includes('cuda-13')) return 'CUDA 13'
   if (id.includes('cuda-12')) return 'CUDA 12'
+  if (id === LINUX_ROCM_BACKEND) return 'ROCm 10.0'
   if (id.includes('rocm')) {
     const version = /rocm-(\d+\.\d+)/.exec(id)?.[1]
     return version ? `ROCm ${version} (~1 GB)` : 'ROCm (~1 GB)'

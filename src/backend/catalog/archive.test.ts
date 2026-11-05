@@ -39,6 +39,25 @@ describe('getBackendArchiveName / getBackendDownloadUrl (app backend.test.ts)', 
     expect(getBackendArchiveName('b9691', 'linux-cpu-x64')).toBe('llama-b9691-bin-ubuntu-x64.tar.gz')
     expect(LINUX_BACKEND_BY_UPSTREAM_ASSET['ubuntu-x64']).toBe('linux-cpu-x64')
   })
+  it('round-trips the published Linux HIP archive and uses its mirror checksum', () => {
+    const name = 'llama-b11617-bin-ubuntu-rocm-10.0-x64.tar.gz'
+    const id = 'linux-rocm-10.0-x64'
+    const manifest = {
+      tag_name: 'b11617',
+      download_base: 'https://mirror.test',
+      assets: [{ name, size: 15, sha256: 'abc' }],
+    }
+    expect(parseManifestForPlatform(manifest, 'linux', 'x64')).toEqual([
+      { version: 'b11617', backend: id, order: 0 },
+    ])
+    expect(parseManifestForPlatform(manifest, 'linux', 'arm64')).toEqual([])
+    expect(resolveBackendArchiveSource('b11617', id, manifest)).toEqual({
+      url: `https://mirror.test/b11617/${name}`,
+      size: 15,
+      sha256: 'abc',
+    })
+  })
+
   it('translates the Linux arm64 ids, the CUDA one by pattern', () => {
     expect(getBackendArchiveName('b11344', 'linux-cpu-arm64')).toBe('llama-b11344-bin-ubuntu-arm64.tar.gz')
     expect(getBackendArchiveName('b11344', 'linux-vulkan-arm64')).toBe(
@@ -116,6 +135,7 @@ describe('friendlyBackendLabel', () => {
     ['linux-cpu-x64', 'CPU'],
     ['win-cuda-13-x64', 'CUDA 13'],
     ['win-cuda-12.4-x64', 'CUDA 12'],
+    ['linux-rocm-10.0-x64', 'ROCm 10.0'],
     ['win-rocm-7.14-x64', 'ROCm 7.14 (~1 GB)'],
     ['win-rocm-10.0-x64', 'ROCm 10.0 (~1 GB)'],
     ['win-rocm-x64', 'ROCm (~1 GB)'],

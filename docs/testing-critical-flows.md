@@ -117,3 +117,9 @@ terminal OOM and a terminal 503. The compiled-binary fake-ingest scenario exerci
 routes and checks the grouping and absence of prompt text.
 
 PR #75 review regressions: CUDA delivery and BackendService tests prove cancellation remains terminal, an incomplete runtime is replaced coherently, and failed copies cannot report success. Backend selection, fallback and advisor tests prove binary failures are release-specific while GPU incompatibility remains driver-specific. Argument tests reject overflowing model context windows. These isolated tests do not establish real Windows GPU readiness.
+
+Linux x64 upstream ROCm selection and installation remain **Partial**. The advisor tests cover
+the compiled gfx target list and installed-device check. The installer test exercises a staged
+HIP pack and preserves the previous executable when the replacement sees no GPU. The compiled
+Linux test installs a scripted pack through the control route. The real Radeon chat scenario in
+`test/app-e2e/README.md` still needs hardware evidence.

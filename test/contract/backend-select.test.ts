@@ -180,6 +180,7 @@ function correctedMergeExpectation(input: Extract<Input, { kind: 'merge' }>, exp
  * (features.ts `gpuMeetsCuda13DriverForArch`), so Turing on the case's 581.42 no longer gets it.
  */
 const WINDOWS_TURING_CUDA13_CASE = 'features_windows_turing_7_5_is_the_cuda13_floor'
+const LINUX_ROCM_CASE = 'supported_linux_x86_64_rocm_flag_ignored'
 
 for (const [set, port] of [
   ['backend-select', UPSTREAM],
@@ -195,10 +196,10 @@ for (const [set, port] of [
       expect(cases.map((c) => c.name).sort()).toEqual([...index.cases].sort())
     })
 
-    it('records only the merge `order` shape and the Windows Turing CUDA 13 gate as known divergences', () => {
+    it('records only the merge `order` shape and the two hardware selection changes as known divergences', () => {
       expect(Object.keys(knownDivergence)).toEqual(
         set === 'backend-select'
-          ? ['merge_remote_without_order_defaults_to_zero', WINDOWS_TURING_CUDA13_CASE]
+          ? ['merge_remote_without_order_defaults_to_zero', WINDOWS_TURING_CUDA13_CASE, LINUX_ROCM_CASE]
           : ['merge_remote_without_order_defaults_to_zero']
       )
     })
@@ -231,6 +232,8 @@ for (const [set, port] of [
         }
       } else if (c.name in knownDivergence && c.input.kind === 'merge') {
         expect(run(port, c.input)).toEqual(correctedMergeExpectation(c.input, c.expected as BackendVersion[]))
+      } else if (c.name === LINUX_ROCM_CASE && c.name in knownDivergence) {
+        expect(run(port, c.input)).toEqual(['linux-cpu-x64', 'linux-rocm-10.0-x64', 'linux-vulkan-x64'])
       } else if (c.name === WINDOWS_TURING_CUDA13_CASE && c.name in knownDivergence) {
         expect(run(port, c.input)).toEqual({ ...(c.expected as object), cuda13: false })
       } else {

@@ -135,7 +135,7 @@ export function recordPolicyOf(policy: BackendProviderPolicy): OptimalRecordPoli
 
 export const UPSTREAM_POLICY: BackendProviderPolicy = {
   provider: 'llamacpp-upstream',
-  features: (osType, cpuExtensions, gpus) => getSupportedFeatures(osType, cpuExtensions, gpus),
+  features: getSupportedFeatures,
   supportedBackends: determineSupportedBackends,
   merge: listSupportedBackends,
   filterBySupport: filterBackendsBySupport,
@@ -165,6 +165,7 @@ export const UPSTREAM_POLICY: BackendProviderPolicy = {
       cpuExtensions: input.cpuExtensions,
       gpus: input.gpus,
       listAvailableBackends: input.listAvailableBackends,
+      ...(input.rocm ? { rocm: input.rocm } : {}),
       probeTier: input.probeTier,
       ...(input.onWarn ? { onWarn: input.onWarn } : {}),
     }),

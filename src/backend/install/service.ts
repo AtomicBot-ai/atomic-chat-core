@@ -39,6 +39,7 @@ import {
 import type { DownloadItem, Downloader, FsRetryOptions, ProxyConfig } from '../../downloads/index.js'
 import { extractArchive, normalizeBackendLayout } from '../../downloads/index.js'
 import {
+  LINUX_ROCM_BACKEND,
   findPrismRelease,
   getBackendArchiveName,
   getCudartArchiveName,
@@ -67,6 +68,8 @@ import {
   turboquantCudaToolkit,
 } from '../turboquant.js'
 import { parseBackendVersion, parseBinaryVersion, stripBom } from '../version.js'
+import { parseDeviceOutput } from '../../runtime/llamacpp/index.js'
+import { buildProcessEnv, discoverCudaPaths, nodeCudaProbeEnv } from '../../runtime/shared/index.js'
 import { verifyWindowsBackendBinary } from './windows-launch-check.js'
 import { deliverWindowsCudaRuntime } from './cuda-runtime-source.js'
 
@@ -614,6 +617,33 @@ export class BackendService {
         } catch (error) {
           throw new Error(
             `The downloaded ${version}/${backend} backend failed its launch check (${String(error)}). Keeping the current backend.`
+          )
+        }
+      } else if (
+        platform === 'linux' &&
+        this.deps.provider === 'llamacpp-upstream' &&
+        backend === LINUX_ROCM_BACKEND
+      ) {
+        // The CPU backend can still start when ggml-hip fails to load. Exercise the GPU plugin
+        // before the atomic swap, with the library search path the model load will use.
+        const bin = join(staging, 'build', 'bin')
+        const baseEnv = this.deps.env ?? process.env
+        const { env, cwd } = buildProcessEnv({
+          platform,
+          baseEnv,
+          exeDir: bin,
+          cuda: discoverCudaPaths(nodeCudaProbeEnv(platform, baseEnv)),
+          userEnv: {},
+        })
+        const { stdout, stderr } = await execFileAsync(join(bin, 'llama-server'), ['--list-devices'], {
+          env,
+          cwd,
+          timeout: LAUNCH_CHECK_TIMEOUT_MS,
+        })
+        if (!parseDeviceOutput(`${stdout}\n${stderr}`).some((device) => /^ROCm\d+$/i.test(device.id))) {
+          throw new AtomicCoreError(
+            'GPU_BACKEND_INCOMPATIBLE',
+            'The downloaded ROCm build could not enumerate an AMD GPU. Check the ROCm runtime and GPU device permissions, or select Vulkan.'
           )
         }
       } else if (platform === 'win32') {

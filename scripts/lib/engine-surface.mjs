@@ -60,6 +60,7 @@ export const MIRROR_WHITELIST = [
   { platform: 'windows', pattern: 'win-cuda-\\d+\\.\\d+-arm64\\.zip', required: false },
   { platform: 'linux', pattern: 'ubuntu-x64\\.tar\\.gz', required: true },
   { platform: 'linux', pattern: 'ubuntu-vulkan-x64\\.tar\\.gz', required: true },
+  { platform: 'linux', pattern: 'ubuntu-rocm-10\\.0-x64\\.tar\\.gz', required: false },
   { platform: 'linux', pattern: 'ubuntu-arm64\\.tar\\.gz', required: true },
   { platform: 'linux', pattern: 'ubuntu-vulkan-arm64\\.tar\\.gz', required: false },
   { platform: 'linux', pattern: 'ubuntu-cuda-\\d+\\.\\d+-arm64\\.tar\\.gz', required: false },
