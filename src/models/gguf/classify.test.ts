@@ -10,6 +10,9 @@ import {
   isEmbeddingGguf,
   isMtpCapable,
   matchesMtpLoadFailure,
+  DRAFT_ONLY_GGUF_ARCHITECTURES,
+  NO_TOKENIZER_MODELS,
+  standaloneGgufRefusal,
 } from './classify.js'
 
 describe('matchesMtpLoadFailure', () => {
@@ -168,5 +171,35 @@ describe('upstreamDecisionTypeOf', () => {
   it('keeps an upstream decision GGUF out of the embedding models', () => {
     const julia = { 'general.architecture': 'modern-bert', 'modern-bert.decision.type': 'laya' }
     expect(isEmbeddingGguf(julia)).toBe(false)
+  })
+})
+
+describe('standaloneGgufRefusal', () => {
+  // The header of Ternary-Bonsai-27B-dspark-bf16.gguf as Atomic-Chat #383 read it.
+  const dspark = { 'general.architecture': 'dspark', 'tokenizer.ggml.model': 'none' }
+
+  it.each([
+    [dspark, { reason: 'draft-architecture', architecture: 'dspark' }],
+    [{ 'general.architecture': ' DSpark ' }, { reason: 'draft-architecture', architecture: 'dspark' }],
+    [
+      { 'general.architecture': 'qwen35', 'tokenizer.ggml.model': 'none' },
+      { reason: 'no-tokenizer', tokenizer: 'none' },
+    ],
+    [
+      { 'general.architecture': 'llama', 'tokenizer.ggml.model': ' no_vocab ' },
+      { reason: 'no-tokenizer', tokenizer: 'no_vocab' },
+    ],
+    [{ 'general.architecture': 'qwen35', 'tokenizer.ggml.model': 'gpt2' }, undefined],
+    [{ 'general.architecture': 'gemma3', 'tokenizer.ggml.model': 'llama' }, undefined],
+    // A header that names no tokenizer is left to the engine, which says why it cannot load it.
+    [{ 'general.architecture': 'llama' }, undefined],
+    [{}, undefined],
+    [null, undefined],
+    [undefined, undefined],
+  ])('%j → %j', (metadata, expected) => expect(standaloneGgufRefusal(metadata)).toEqual(expected))
+
+  it('names the draft architecture and the no-vocabulary tokenizer values llama.cpp knows', () => {
+    expect([...DRAFT_ONLY_GGUF_ARCHITECTURES]).toEqual(['dspark'])
+    expect([...NO_TOKENIZER_MODELS].sort()).toEqual(['no_vocab', 'none'])
   })
 })

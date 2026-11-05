@@ -181,4 +181,7 @@ add a new one that says which record it supersedes.
 - [Let a host keep its own report tags](2026-11-04-let-a-host-keep-its-own-report-tags.md)
 - [Cancel superseded diffusion jobs before dropping their session](2026-11-05-cancel-superseded-diffusion-jobs.md)
 - [Bound GPU probe and MLX binary lookup diagnostics](2026-11-05-bound-gpu-and-mlx-probe-diagnostics.md)
+- [Tile the image VAE from above 768² on Vulkan](2026-11-05-tile-the-image-vae-earlier-on-vulkan.md)
+- [List llama.cpp devices from the pack a load runs on](2026-11-05-list-devices-from-the-pack-a-load-runs-on.md)
+- [Give mlx-server the llama.cpp answer cap](2026-11-05-give-mlx-the-llama-answer-cap.md)
 - [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)

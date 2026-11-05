@@ -1649,6 +1649,77 @@ describe('hardware facts', () => {
     }
   )
 
+  it.skipIf(process.platform === 'win32')(
+    'lists the devices of the configured pack, not of the best-ranked one (Atomic-Chat#350)',
+    async () => {
+      const core = await createCore({
+        hardware: {
+          probe: async () => ({
+            info: {
+              cpu: {
+                name: 'AMD Ryzen 5 7500F',
+                core_count: 6,
+                arch: 'x86_64',
+                extensions: ['avx2'],
+                extensions_known: true,
+              },
+              os_type: 'windows',
+              os_name: 'Probe OS',
+              total_memory: 32_768,
+              gpus: [
+                {
+                  name: 'AMD Radeon RX 7900 XTX',
+                  vendor: 'AMD',
+                  total_memory: 24_560,
+                  uuid: 'gpu-0',
+                  driver_version: '32.0.26008.1',
+                  nvidia_info: null,
+                  vulkan_info: { index: 0, device_type: 'DiscreteGpu', api_version: '', device_id: 0x744c },
+                },
+              ],
+            },
+            warnings: [],
+          }),
+        },
+      })
+      // A gfx1100 card ranks ROCm above Vulkan; this ROCm pack enumerates nothing on the host.
+      await data.writeBackend(
+        'llamacpp-upstream',
+        'b7000',
+        'win-rocm-7.1-x64',
+        '#!/bin/sh\necho "Available devices:"\n'
+      )
+      await data.writeBackend(
+        'llamacpp-upstream',
+        'b7000',
+        'win-vulkan-x64',
+        '#!/bin/sh\necho "Available devices:"\necho "  Vulkan0: AMD Radeon RX 7900 XTX (24560 MiB, 24000 MiB free)"\n'
+      )
+      const devices = async () =>
+        (
+          (await (
+            await fetch(`${core.control.url}/atomic/v1/hardware/devices?provider=llamacpp-upstream`, {
+              headers: { authorization: `Bearer ${core.controlToken}` },
+            })
+          ).json()) as { devices: unknown[] }
+        ).devices
+
+      await core.settings.update('llamacpp-upstream', { version_backend: 'b7000/win-vulkan-x64' })
+      expect(await devices()).toEqual([
+        { id: 'Vulkan0', name: 'AMD Radeon RX 7900 XTX', mem: 24_560, free: 24_000 },
+      ])
+      // Selecting the ROCm pack lists what that pack sees.
+      await core.settings.update('llamacpp-upstream', { version_backend: 'b7000/win-rocm-7.1-x64' })
+      expect(await devices()).toEqual([])
+      // A provider that runs no llama.cpp backend here has no devices to list.
+      const other = await fetch(`${core.control.url}/atomic/v1/hardware/devices?provider=no-such-engine`, {
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+      expect(other.status).toBe(200)
+      expect(await other.json()).toEqual({ devices: [] })
+    }
+  )
+
   it.skipIf(process.arch !== 'x64' || process.platform === 'win32')(
     'blocks a CPU backend load on a probed CPU without AVX, and lets an override lift the block',
     async () => {

@@ -24,6 +24,7 @@ import {
   cpuBackendExtraArgs,
   DIFFUSION_BACKEND_ENV,
   hostEnv,
+  imageVaeTilingArea,
   isGgmlUnsupportedOpAbort,
   isM5Brand,
   loadExtraArgs,
@@ -33,6 +34,7 @@ import {
   speedFlags,
   VAE_TILING_AREA,
   VIDEO_VAE_TILING_PIXEL_FRAMES,
+  VULKAN_VAE_TILING_AREA,
   withoutDeviceBackendFlags,
 } from './args.js'
 import type { ArgsHost } from './args.js'
@@ -379,6 +381,24 @@ describe('buildImgGenRequest', () => {
     expect(VAE_TILING_AREA).toBe(1_048_576)
   })
 
+  it('tiles past the area it is given: Vulkan tiles from above 768 squared (Atomic-Chat#350)', () => {
+    const sized = (width: number, height: number) =>
+      buildImgGenRequest(request({ width, height }), PLAIN, 1, NO_INPUTS, VULKAN_VAE_TILING_AREA)
+
+    // The 1024² default and the tall FLUX size: a one-graph decode needs a 4.5 GiB im2col tensor,
+    // which Vulkan refuses and the scheduler runs on the CPU.
+    expect(sized(1024, 1024)['vae_tiling_params']).toEqual({ enabled: true })
+    expect(sized(832, 1216)['vae_tiling_params']).toEqual({ enabled: true })
+    expect(sized(1024, 768)['vae_tiling_params']).toEqual({ enabled: true })
+    // At and below 768² the largest tensor stays well under 4 GiB: one graph, as before.
+    expect(sized(768, 768)).not.toHaveProperty('vae_tiling_params')
+    expect(sized(512, 512)).not.toHaveProperty('vae_tiling_params')
+    expect(VULKAN_VAE_TILING_AREA).toBe(589_824)
+    // 4608 bytes per pixel of F16 im2col over 256 channels: under 4 GiB at the threshold.
+    expect(VULKAN_VAE_TILING_AREA * 256 * 9 * 2).toBeLessThan(4 * 1024 ** 3)
+    expect(1024 * 1024 * 256 * 9 * 2).toBeGreaterThan(4 * 1024 ** 3)
+  })
+
   it('lets request values override the family defaults', () => {
     const body = buildImgGenRequest(
       request({
@@ -420,6 +440,22 @@ describe('buildImgGenRequest', () => {
     expect(json).toContain('"sample_steps":8')
     expect(json).toContain('"txt_cfg":1')
     expect(json).toContain('"seed":42')
+  })
+})
+
+describe('imageVaeTilingArea', () => {
+  it('lowers the threshold only while a Vulkan build runs on its device', () => {
+    const table: Array<[ServerSpec['backend'], boolean, number]> = [
+      ['vulkan', false, VULKAN_VAE_TILING_AREA],
+      // The CPU fallback has no per-tensor cap; only memory decides there.
+      ['vulkan', true, VAE_TILING_AREA],
+      ['metal', false, VAE_TILING_AREA],
+      ['cuda', false, VAE_TILING_AREA],
+      ['rocm', false, VAE_TILING_AREA],
+      ['cpu', false, VAE_TILING_AREA],
+    ]
+    for (const [backend, cpuFallback, area] of table)
+      expect(imageVaeTilingArea({ backend, cpuFallback }), `${backend} cpuFallback=${cpuFallback}`).toBe(area)
   })
 })
 
