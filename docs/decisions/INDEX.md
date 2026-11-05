@@ -181,3 +181,4 @@ add a new one that says which record it supersedes.
 - [Let a host keep its own report tags](2026-11-04-let-a-host-keep-its-own-report-tags.md)
 - [Cancel superseded diffusion jobs before dropping their session](2026-11-05-cancel-superseded-diffusion-jobs.md)
 - [Bound GPU probe and MLX binary lookup diagnostics](2026-11-05-bound-gpu-and-mlx-probe-diagnostics.md)
+- [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)

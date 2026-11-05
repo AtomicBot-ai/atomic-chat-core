@@ -20,6 +20,7 @@ import type { DataLayout } from '../config/index.js'
 import { CORE_VERSION } from '../version.js'
 import {
   identityPermitsTakeover,
+  isProcessAlive,
   processStartEpoch,
   processStartId,
   verifyProcessIdentity,
@@ -258,18 +259,13 @@ export function alreadyRunning(record: LockRecord, verdict: 'match' | 'unknown')
 
 /** Returns true when this caller performed the recovery; false when someone else is doing it. */
 async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<boolean> {
-  const now = deps.now ?? Date.now
   const mutexPath = `${layout.core.instanceLock}.takeover`
   const mutex = await open(mutexPath, 'wx').catch(async (e: unknown) => {
     if (!isEexist(e))
       throw new AtomicCoreError('IO_ERROR', `Cannot create ${mutexPath}`, (e as Error).message, {
         cause: e,
       })
-    const age = await stat(mutexPath).then(
-      (s) => now() - s.mtimeMs,
-      () => 0
-    )
-    if (age > TAKEOVER_MUTEX_TTL_MS) await rm(mutexPath, { force: true }).catch(() => {})
+    if (await mutexIsStale(mutexPath, deps)) await rm(mutexPath, { force: true }).catch(() => {})
     return undefined
   })
   if (!mutex) return false
@@ -286,6 +282,19 @@ async function tryRecoverStale(layout: DataLayout, deps: LockDeps): Promise<bool
     await mutex.close().catch(() => {})
     await rm(mutexPath, { force: true }).catch(() => {})
   }
+}
+
+async function mutexIsStale(mutexPath: string, deps: LockDeps): Promise<boolean> {
+  const now = deps.now ?? Date.now
+  const alive = deps.alive ?? isProcessAlive
+  const [text, info] = await Promise.all([
+    readFile(mutexPath, 'utf8').catch(() => ''),
+    stat(mutexPath).catch(() => undefined),
+  ])
+  if (!info) return false
+  const match = /^(\d+)\r?\n$/.exec(text)
+  if (match && !alive(Number(match[1]))) return true
+  return now() - info.mtimeMs > TAKEOVER_MUTEX_TTL_MS
 }
 
 export interface WaitForOwnerOptions extends LockDeps {

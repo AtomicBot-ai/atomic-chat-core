@@ -255,6 +255,17 @@ describe('release', () => {
     await expect(readFile(mutex, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     await lock.release()
   })
+
+  it('reclaims a takeover mutex left by a dead process without waiting for the age fallback', async () => {
+    const crashedPid = await deadPid()
+    await write({ pid: crashedPid })
+    const mutex = `${data.layout.core.instanceLock}.takeover`
+    await writeFile(mutex, `${crashedPid}\n`)
+    const lock = await InstanceLock.acquire(data.layout, { sleep: async () => {} })
+    expect(lock.record.pid).toBe(process.pid)
+    await expect(readFile(mutex, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await lock.release()
+  })
 })
 
 describe('readLockRecord and parseLockRecord', () => {
