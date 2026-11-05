@@ -34,7 +34,12 @@ import type { DataLayout } from '../../config/index.js'
 import type { ChildProcessRecord, ProcessJournal } from '../../lock/index.js'
 import { processStartId } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
-import { isDecisionCheckpointDir, isDecisionGguf, readGgufMetadataFromFile } from '../../models/index.js'
+import {
+  isDecisionCheckpointDir,
+  isDecisionGguf,
+  readGgufMetadataFromFile,
+  standaloneGgufRefusal,
+} from '../../models/index.js'
 import { resolveLlama3TemplateOverride, STRICT_SYSTEM_GUARD_SIGNATURE } from '../../speculative/index.js'
 import { checkDflashSupport } from '../../speculative/dflash-registry.js'
 import { checkGemmaMtpSupport } from '../../speculative/gemma-mtp-registry.js'
@@ -304,7 +309,7 @@ export class LlamacppRuntime implements LocalRuntime {
     throwIfLoadCancelled(opts.signal)
     const settings = await this.options.readSettings()
     throwIfLoadCancelled(opts.signal)
-    await this.assertNotDecisionModel(modelId, opts)
+    await this.assertStandaloneModel(modelId, opts)
     throwIfLoadCancelled(opts.signal)
     await this.assertCompatible(modelId, opts)
     throwIfLoadCancelled(opts.signal)
@@ -525,22 +530,34 @@ export class LlamacppRuntime implements LocalRuntime {
   /**
    * A decision model (a laya GGUF, a GGUF stamped with `decision.spec`, or a laya checkpoint folder)
    * runs only in the decision module: as a chat or embedding server it answers nothing useful, or
-   * crashes. Refused before the auto-unload, so asking for one never costs the user the chat model.
-   * A model whose header cannot be read is left to the load plan, which says why.
+   * crashes. A speculative-decoding draft (a draft-only architecture, or a file with no tokenizer)
+   * runs only beside its main model: started alone, the server listens and aborts on the first
+   * request. Both are refused before the auto-unload, so asking for one never costs the user the
+   * chat model. A model whose header cannot be read is left to the load plan, which says why.
    */
-  private async assertNotDecisionModel(modelId: string, opts: LoadOptions): Promise<void> {
+  private async assertStandaloneModel(modelId: string, opts: LoadOptions): Promise<void> {
     const { registry } = this.options
     const configured = opts.modelPath ?? (await registry.read(modelId).catch(() => undefined))?.model_path
     if (!configured) return
     const path = registry.resolvePaths({ model_path: configured } as never).modelPath
     const read =
       this.options.readGgufMetadata ?? (async (p: string) => (await readGgufMetadataFromFile(p)).metadata)
-    const decision =
-      (await isDecisionCheckpointDir(path)) || isDecisionGguf(await read(path).catch(() => undefined))
-    if (decision)
-      throw new AtomicCoreError(
+    const decision = () =>
+      new AtomicCoreError(
         'DECISION_MODEL_NOT_CHAT',
         `"${modelId}" is a decision model and cannot be loaded for chat. Decision models run in the decision module (settings: decision.model_path).`,
+        path
+      )
+    if (await isDecisionCheckpointDir(path)) throw decision()
+    const metadata = await read(path).catch(() => undefined)
+    if (isDecisionGguf(metadata)) throw decision()
+    const refusal = standaloneGgufRefusal(metadata)
+    if (refusal)
+      throw new AtomicCoreError(
+        'MODEL_INCOMPATIBLE',
+        refusal.reason === 'draft-architecture'
+          ? `"${modelId}" is a speculative-decoding draft (${refusal.architecture}), not a chat model: it runs only beside its main model and cannot be loaded on its own.`
+          : `"${modelId}" has no tokenizer (tokenizer.ggml.model = ${refusal.tokenizer}), so it cannot be loaded on its own: a file like this is usually a speculative-decoding draft for a main model.`,
         path
       )
   }

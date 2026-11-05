@@ -873,7 +873,7 @@ Tags `[disk_full | disk_permission | disk_file_locked | disk_path_too_long | dis
 
 **MLX** (`tauri-plugin-mlx`). Binary `resources/bin/mlx-server`. Args: `--model <dir> --host 127.0.0.1 --port N`, `--max-kv-size`,
 `--draft-model <dir> --draft-kind <dflash|mtp|eagle3> --draft-block-size`, `--kv-bits F --kv-quant-scheme S` with `uniform|turboquant`.
-Env `MLX_VLM_SINGLE_MODEL=1`. Readiness only via the log: stdout — `uvicorn running on, application startup complete, http server listening,
+Env `MLX_VLM_SINGLE_MODEL=1`, `MLX_VLM_MAX_TOKENS` = min(16384, window) unless already set (ADR 2026-11-05). Readiness only via the log: stdout — `uvicorn running on, application startup complete, http server listening,
 server is listening, server started, ready to accept, server started and listening on`; stderr — `uvicorn running on, application startup complete,
 server is listening, server listening on, server started and listening on`. One load at a time. `api_key ""`; `model_path` = the directory.
 

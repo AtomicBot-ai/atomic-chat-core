@@ -74,9 +74,9 @@ import {
   upstreamManifestForTag,
   llamaBackendFallback,
   OptimalBackendStore,
+  ensureBackend,
   readRuntimeSettings,
   resolveBackendExe,
-  selectInstalledBackend,
 } from '../backend/index.js'
 import { noticeEngineInstall, wireDecision } from '../decision/index.js'
 import {
@@ -1168,16 +1168,22 @@ export async function createAtomicCore(
           },
           validateGguf: (path) => capabilities.validateGguf(path),
           devices: async (provider) => {
-            // Asking a backend what devices it sees needs a backend; with none installed the
-            // honest answer is an empty list, not an error about a missing binary.
-            const resolved = await selectInstalledBackend(
-              layout,
-              provider as LocalProviderId,
-              hardware
-            ).catch(() => undefined)
-            if (!resolved) return []
-            const runtime = (core as AtomicCore).runtime(provider as LocalProviderId)
-            return runtime instanceof LlamacppRuntime ? runtime.getDevices(resolved.path) : []
+            const id = provider as LocalProviderId
+            const runtime = runtimes.get(id)
+            if (!(runtime instanceof LlamacppRuntime)) return []
+            // The devices of the pack a load runs on, which the app's device switches feed: the
+            // configured one while it is installed and has not failed here, else the best installed
+            // one (Atomic-Chat#350: the best-ranked pack answered while another was selected). Asking
+            // needs a backend; with none installed the honest answer is an empty list, not an error
+            // about a missing binary.
+            const facts = cudaGuard.facts(id, hardware)
+            const resolved = await readRuntimeSettings(settings, id, layout, facts)
+              .then(({ config }) => {
+                const [version, backend] = String(config.version_backend ?? '').split('/')
+                return version && backend ? ensureBackend(layout, id, backend, version, facts) : undefined
+              })
+              .catch(() => undefined)
+            return resolved ? runtime.getDevices(resolved.exePath) : []
           },
           embed: (provider, modelId, input, ubatchSize) =>
             embeddings.embed(provider as LocalProviderId, modelId, input, ubatchSize),

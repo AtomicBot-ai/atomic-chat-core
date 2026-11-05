@@ -68,6 +68,37 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
   't5encoder',
 ])
 
+/**
+ * Architectures that exist only as a speculative-decoding draft: the file is a drafter for one main
+ * model (`--spec-type draft-dspark`) and carries no tokenizer of its own (Bonsai-27B-dspark).
+ */
+export const DRAFT_ONLY_GGUF_ARCHITECTURES = new Set(['dspark'])
+
+/** `tokenizer.ggml.model` values llama.cpp loads as no vocabulary at all (`LLAMA_VOCAB_TYPE_NONE`). */
+export const NO_TOKENIZER_MODELS = new Set(['none', 'no_vocab'])
+
+/** Why a GGUF cannot run as a session of its own; the header value that says so. */
+export type StandaloneGgufRefusal =
+  { reason: 'draft-architecture'; architecture: string } | { reason: 'no-tokenizer'; tokenizer: string }
+
+/**
+ * Why a GGUF cannot be served on its own, as a chat or an embedding session: a draft-only
+ * architecture, or no tokenizer. Started anyway, a build that knows the architecture listens and then
+ * aborts on the first request (`GGML_ASSERT(tokenizer && "Tokenizer not initialized. …")`), so the
+ * caller sees a refused connection instead of a failed load (Atomic-Chat #383). `undefined` for any
+ * other file, and for a header that could not be read or names neither.
+ */
+export function standaloneGgufRefusal(metadata: Meta): StandaloneGgufRefusal | undefined {
+  if (!metadata) return undefined
+  const rawArch = metadata['general.architecture']
+  const architecture = typeof rawArch === 'string' ? rawArch.trim().toLowerCase() : ''
+  if (DRAFT_ONLY_GGUF_ARCHITECTURES.has(architecture)) return { reason: 'draft-architecture', architecture }
+  const rawTokenizer = metadata['tokenizer.ggml.model']
+  const tokenizer = typeof rawTokenizer === 'string' ? rawTokenizer.trim().toLowerCase() : ''
+  if (NO_TOKENIZER_MODELS.has(tokenizer)) return { reason: 'no-tokenizer', tokenizer }
+  return undefined
+}
+
 /** Architectures that are decision models by themselves (the Laya family: an mmBERT encoder with a marker head). */
 export const DECISION_GGUF_ARCHITECTURES = new Set(['laya'])
 

@@ -535,7 +535,7 @@
   },
   "src/diffusion/args.ts": {
     "statements": 100,
-    "branches": 98,
+    "branches": 99,
     "functions": 100,
     "lines": 100
   },
@@ -572,6 +572,12 @@
   "src/diffusion/idle.ts": {
     "statements": 100,
     "branches": 80,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/diffusion/image-job.ts": {
+    "statements": 100,
+    "branches": 94,
     "functions": 100,
     "lines": 100
   },
