@@ -713,7 +713,13 @@ export class DiffusionService {
     this.idle = undefined
     this.loading?.abort()
     for (const claim of this.claims) claim.abort()
-    await shutdownSession(this.deps)
+    const id = this.state.activeJobId
+    if (id !== undefined) {
+      const record = this.state.record(id)
+      if (record && !record.remote) record.cancel.requested = true
+    }
+    // A stopped owner cannot let a pending spawn acquire the GPU after shutdown returns.
+    await this.deps.loadLock.run(() => shutdownSession(this.deps))
   }
 
   /**

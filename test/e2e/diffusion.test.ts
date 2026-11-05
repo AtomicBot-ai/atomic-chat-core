@@ -184,6 +184,21 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       ])
     }, 60_000)
 
+    it('stops an active image job and its engine on explicit owner shutdown', async () => {
+      const { ready, pid } = await sd.loadedOwner(ctx, { env: { FAKE_SD_STEP_MS: '400' } })
+      const { jobId } = await json<{ jobId: string }>(
+        await control(ctx, ready, '/diffusion/jobs', {
+          method: 'POST',
+          body: JSON.stringify(sd.sdGenerateRequest({ steps: 40 })),
+        })
+      )
+      await waitFor(async () => (await sdJob(ctx, ready, jobId))?.state === 'generating', 'the job to start')
+      const response = await control(ctx, ready, '/shutdown', { method: 'POST', body: '{}' })
+      expect(response.status).toBe(200)
+      await waitFor(() => !alive(ready.pid) && !alive(pid), 'the owner and its active engine to exit')
+      expect(journalled(ctx)).toEqual([])
+    }, 60_000)
+
     it("reaps a crashed owner's sd-server on the next start", async () => {
       const { pid } = await sd.loadedOwner(ctx)
       for (const daemon of ctx.daemons.splice(0)) daemon.kill('SIGKILL')

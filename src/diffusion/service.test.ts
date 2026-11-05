@@ -16,7 +16,12 @@ import type {
   LocalRecipeEngine,
   SystemInfo,
 } from '../contracts/index.js'
-import { paintedPng, sampleRequest, sampleVideoRequest } from '../../test/helpers/diffusion-fixtures.js'
+import {
+  fakeServer,
+  paintedPng,
+  sampleRequest,
+  sampleVideoRequest,
+} from '../../test/helpers/diffusion-fixtures.js'
 import {
   installFakeSdEngine,
   writeFakeSdLaunchers,
@@ -26,6 +31,7 @@ import type { FakeSdOptions } from '../../test/helpers/fake-sd-server.js'
 import { isProcessAlive, loadCancelledError } from '../runtime/shared/index.js'
 import type { GpuClaim, GpuClaimHook } from '../runtime/shared/index.js'
 import { DiffusionService } from './service.js'
+import type { DiffusionServiceDeps } from './service.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST } from '../engine-builds/service.js'
 import { parseSdcppManifest } from '../engine-builds/manifest.js'
 import type { DownloadItem } from '../downloads/index.js'
@@ -74,6 +80,7 @@ function harness(
     claimGpu?: GpuClaimHook
     systemInfo?: SystemInfo
     env?: NodeJS.ProcessEnv
+    spawn?: DiffusionServiceDeps['spawn']
   } = {}
 ): Harness {
   const events: Harness['events'] = []
@@ -97,6 +104,7 @@ function harness(
     ...(options.claimGpu ? { claimGpu: options.claimGpu } : {}),
     ...(options.systemInfo ? { systemInfo: async () => options.systemInfo as SystemInfo } : {}),
     ...(options.env ? { env: options.env } : {}),
+    ...(options.spawn ? { spawn: options.spawn } : {}),
   })
   service.start()
   services.push(service)
@@ -899,6 +907,43 @@ describe.skipIf(!posix)('generating', () => {
     expect((await h.service.getStatus()).model.loaded?.offload).toBe('group')
     expect(h.reasons()).toContain('offload-fallback')
     expect(h.events.filter((e) => e.name === 'diffusion:error')).toEqual([])
+  })
+
+  it('marks the active job cancelled on shutdown without reporting a crash', async () => {
+    const h = await loadedService({ stepMs: 400 })
+    const { jobId } = await h.service.generate(sampleRequest({ batchSize: 1, width: 32, height: 32 }))
+    await waitFor(() => h.service.getJob(jobId)?.state === 'generating')
+    await h.service.shutdown()
+    await waitFor(() => ['cancelled', 'failed'].includes(h.service.getJob(jobId)?.state ?? ''))
+    expect(h.service.getJob(jobId)?.state).toBe('cancelled')
+    expect(h.events.filter((event) => event.name === 'diffusion:error')).toEqual([])
+    expect(isProcessAlive(h.loaded.pid)).toBe(false)
+  })
+
+  it('waits for an aborted pending spawn to clean up before shutdown returns', async () => {
+    const server = fakeServer()
+    let finishSpawn: (() => void) | undefined
+    const h = harness({
+      spawn: async () => {
+        await new Promise<void>((resolve) => (finishSpawn = resolve))
+        return server.handle
+      },
+    })
+    await h.service.configure({ dataFolder })
+    await installFakeSdEngine(layout)
+    const loading = h.service.loadModel(await loadRequest()).catch((error: unknown) => error)
+    await waitFor(() => finishSpawn !== undefined)
+    let returned = false
+    const closing = h.service.shutdown().then(() => (returned = true))
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(returned).toBe(false)
+    } finally {
+      finishSpawn?.()
+      await closing
+    }
+    expect(await loading).toMatchObject({ code: 'CANCELLED' })
+    expect(server.terminated).toHaveLength(1)
   })
 
   it('shuts down: the server is gone and nothing loads any more', async () => {

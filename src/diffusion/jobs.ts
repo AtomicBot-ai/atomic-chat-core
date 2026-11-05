@@ -179,15 +179,23 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
   request: Req
 ): Promise<StartedJob<Job>> {
   const { state } = deps
+  if (state.closing) throw cancelledError()
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
   if (spec.modality !== kind.modality)
     throw diffusionError('MODEL_INCOMPATIBLE', kind.messages.wrongModel, spec.modelId)
+  const current = () => {
+    if (state.closing || state.spec !== spec) throw cancelledError()
+    if (state.activeJobId !== undefined)
+      throw diffusionError('JOB_BUSY', kind.messages.busy, state.activeJobId)
+  }
+  current()
   await kind.validate(request, spec, { isFile: deps.isFile })
+  current()
   const plan = await kind.prepare?.(deps, request, spec)
+  current()
 
   const id = randomUUID().replaceAll('-', '')
-  if (state.activeJobId !== undefined) throw diffusionError('JOB_BUSY', kind.messages.busy, state.activeJobId)
   state.activeJobId = id
   state.clearIdle()
 
@@ -201,7 +209,7 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
   state.insertJob(record)
   emitJob(deps, id)
 
-  const done = execute(deps, kind, id, request, record.cancel).then(
+  const done = execute(deps, kind, id, request, record.cancel, spec).then(
     (outcome): JobResult<Job> => {
       finishJob(deps, id, { ok: true, outputs: outcome.job.outputs })
       if (state.activeJobId === id) state.activeJobId = undefined
@@ -320,10 +328,17 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   kind: JobKind<Req, Job, Item, Progress, Decoded>,
   id: string,
   request: Req,
-  cancel: CancelFlag
+  cancel: CancelFlag,
+  spec: ServerSpec
 ): Promise<JobOutcome<Job>> {
+  const current = () => {
+    if (cancel.requested || deps.state.closing || deps.state.spec !== spec || deps.state.activeJobId !== id)
+      throw cancelledError()
+  }
+  current()
   const seed = seedOf(request, deps)
   const inputs = await kind.resolveInputs(request, deps)
+  current()
   const started = deps.now()
   const record = deps.state.record(id)
   if (!record) throw internalError('job record vanished')

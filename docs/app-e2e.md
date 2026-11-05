@@ -72,6 +72,19 @@ ignored. Scenarios 6 and 12 below describe the flag round-trip as it was planned
 
 These are target scenarios, not claims of implemented coverage. Record evidence/grade before each phase exit.
 
+## Diffusion owner shutdown acceptance (2026-11-05)
+
+With an isolated desktop profile and the matching app-core binary, start a long image or video
+generation and wait until the UI shows sampling progress. Fully quit the application. Confirm the
+owner and `sd-server` processes exit and their child journal is empty; the loopback test Sentry sink
+must receive no `ENGINE_CRASHED` report for the intentional stop. Repeat with a source image whose
+read is held while the model is replaced or unloaded: no job may run on the replacement model, and
+the UI must show the existing cancellation outcome. A real native engine crash must still surface.
+
+The core-side regression is automated in `src/diffusion/{jobs,service}.test.ts`; explicit owner
+shutdown is also driven through the compiled binary in `test/e2e/diffusion.test.ts`. This desktop
+acceptance scenario is not claimed as executed by those tests.
+
 ## Stage 3 evidence (2026-09-16)
 
 - `npm run verify` builds and drives the core binary on an isolated data folder. `test/e2e/owner.test.ts`
