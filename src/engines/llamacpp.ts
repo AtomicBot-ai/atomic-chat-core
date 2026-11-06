@@ -70,8 +70,10 @@ function installError(error: unknown): AtomicCoreError {
   if (error instanceof AtomicCoreError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (message === DOWNLOAD_CANCELLED)
-    return new AtomicCoreError('CANCELLED', 'The engine update was cancelled.')
-  return new AtomicCoreError('ENGINE_INSTALL_FAILED', message)
+    return new AtomicCoreError('CANCELLED', 'The engine update was cancelled.', undefined, {
+      cause: error,
+    })
+  return new AtomicCoreError('ENGINE_INSTALL_FAILED', message, undefined, { cause: error })
 }
 
 export class LlamacppEngine implements EngineHandle {

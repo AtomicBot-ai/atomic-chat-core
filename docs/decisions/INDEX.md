@@ -187,3 +187,4 @@ add a new one that says which record it supersedes.
 - [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)
 - [Tag sd.cpp install probe failures with finite diagnostic codes](2026-11-05-tag-sdcpp-install-probe-failures.md)
 - [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
+- [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
