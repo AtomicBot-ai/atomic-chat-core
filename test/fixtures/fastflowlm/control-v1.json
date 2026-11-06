@@ -1,0 +1,270 @@
+{
+  "check": {
+    "verdict": "engine-not-installed",
+    "reason": "Install a verified FastFlowLM build.",
+    "requirements": {
+      "minimum_flm_version": "flm-1.0.11-r1",
+      "local_only_protocol": 1,
+      "npu_generation": "xdna2"
+    },
+    "metadata": null
+  },
+  "versions": {
+    "engine": "fastflowlm",
+    "kind": "engine-build",
+    "active_choice": "core",
+    "builds": [],
+    "active": null,
+    "latest": {
+      "version": "flm-1.0.11-r1",
+      "variant": "linux-x64-npu",
+      "published_at": "2026-11-05T00:00:00Z",
+      "download_bytes": 123
+    },
+    "update": {
+      "needed": false,
+      "target": null,
+      "apply": "swap"
+    },
+    "source": "remote",
+    "source_error": null,
+    "error": null
+  },
+  "accelerators": {
+    "ready": false,
+    "devices": [
+      {
+        "id": "PCI\\VEN_1022&DEV_17F0&SUBSYS_513717AA&REV_20\\4",
+        "generation": "xdna2",
+        "driver_version": null,
+        "ready": false,
+        "pci_device_id": "1022:17f0",
+        "bdf": "0000:c4:00.1",
+        "pnp_hardware_id": "PCI\\VEN_1022&DEV_17F0&SUBSYS_513717AA&REV_20",
+        "driver": "missing",
+        "firmware": null,
+        "node": null,
+        "accessible": null,
+        "xrt_visible": null
+      }
+    ],
+    "reason": "driver-missing",
+    "blockers": [
+      "driver-missing",
+      "engine-not-installed"
+    ],
+    "runtime_account": "HOST\\user",
+    "runtime_mode": "interactive",
+    "runtime_service": null,
+    "memlock_bytes": null,
+    "engine_version": null,
+    "required": {
+      "driver": "32.0.203.304",
+      "firmware": null,
+      "memlock_bytes": null,
+      "xrt": "selected engine opens the same PCI device"
+    },
+    "automatic_repair_available": false
+  },
+  "operation": {
+    "operation_id": "operation-1",
+    "request_id": "request-1",
+    "revision": 3,
+    "state": "preparing-host",
+    "plan": {
+      "plan_digest": "sha256:e98052dfa301264711547f33ed59237791b0d4844250e58bd914ba5055b14d36",
+      "manifest_digest": "sha256:3faf3fa91146a36bee308ab98180308f217f2d692877515ed93a8d3c2c159312",
+      "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+      "runtime_account": "atomic",
+      "runtime_service": "atomic-chat.service",
+      "blockers": [
+        "driver-missing"
+      ],
+      "changes": [
+        {
+          "code": "package-source",
+          "text": "Verify the signed package source.",
+          "params": {
+            "url": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/",
+            "suite": "noble",
+            "component": "main",
+            "fingerprint": "881CF4B40B0BFA288D6776E83BF36CFA0BD50AEC"
+          }
+        },
+        {
+          "code": "install-packages",
+          "text": "Install the pinned AMD NPU dependencies for the running kernel."
+        }
+      ],
+      "packages": [
+        {
+          "name": "amdxdna-dkms",
+          "version": "7.0.0-rc1+git20260310.6b13cb8f4-noble1",
+          "sha256": "ea9f07d227d91878f3c660dc82b6abe4e4454b0c25d4ffd383920e6bed083893",
+          "source": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/pool/main/a/amdxdna-dkms/amdxdna-dkms_7.0.0-rc1+git20260310.6b13cb8f4-noble1_amd64.deb"
+        }
+      ],
+      "runtime_mode": "system-service"
+    },
+    "reason": null,
+    "pending_host_step": {
+      "step_id": "step-1",
+      "nonce": "nonce-1",
+      "expected_operation_revision": 3,
+      "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+      "parameters_digest": "sha256:ace43bdefc8013743abfb2ca4321e6da57ffd9e40620bdc56558c760a5abf055",
+      "action": "linux.install-amd-npu",
+      "recipe_id": "fastflowlm-linux-ubuntu-noble",
+      "parameters": {
+        "manifest_id": "fastflowlm-linux-r1",
+        "manifest_digest": "sha256:3faf3fa91146a36bee308ab98180308f217f2d692877515ed93a8d3c2c159312",
+        "recipe_revision": 1,
+        "runtime_account": "atomic",
+        "runtime_mode": "system-service",
+        "runtime_service": "atomic-chat.service",
+        "environment_manifest": {
+          "schema_version": 1,
+          "engine": "fastflowlm",
+          "platform": "linux",
+          "manifest_id": "fastflowlm-linux-r1",
+          "recipes": [
+            {
+              "revision": 1,
+              "min_core_version": "0.20.0",
+              "hardware": {
+                "npu_generation": "xdna2",
+                "pci_device_ids": [
+                  "1022:17f0"
+                ]
+              },
+              "qualification": {
+                "build_version": "flm-1.0.11-r2",
+                "evidence": {
+                  "size": 1,
+                  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "url": "https://github.com/AtomicBot-ai/atomic-chat-core/releases/download/flm-1.0.11-r2/fixture.json"
+                }
+              },
+              "recipe_id": "fastflowlm-linux-ubuntu-noble",
+              "action": "linux.install-amd-npu",
+              "platforms": [
+                {
+                  "os": "linux",
+                  "distribution": "ubuntu",
+                  "version": "24.04",
+                  "arch": "x64",
+                  "kernel_release": "6.17.0-1-generic"
+                }
+              ],
+              "sources": [
+                {
+                  "id": "amd",
+                  "url": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/",
+                  "suite": "noble",
+                  "component": "main",
+                  "signing_fingerprint": "881CF4B40B0BFA288D6776E83BF36CFA0BD50AEC"
+                }
+              ],
+              "packages": [
+                {
+                  "name": "amdxdna-dkms",
+                  "version": "7.0.0-rc1+git20260310.6b13cb8f4-noble1",
+                  "architecture": "amd64",
+                  "source": "amd",
+                  "path": "pool/main/a/amdxdna-dkms/amdxdna-dkms_7.0.0-rc1+git20260310.6b13cb8f4-noble1_amd64.deb",
+                  "size": 315696,
+                  "sha256": "ea9f07d227d91878f3c660dc82b6abe4e4454b0c25d4ffd383920e6bed083893"
+                }
+              ],
+              "firmware_version": "1.1.2.64",
+              "xrt": "bundled",
+              "memlock_bytes": 2147483648
+            }
+          ]
+        },
+        "device_instance_id": "0000:c4:00.1",
+        "package_names": [
+          "amdxdna-dkms"
+        ],
+        "device_access": false,
+        "memlock": false
+      }
+    }
+  },
+  "states": [
+    "checking",
+    "awaiting-consent",
+    "preparing-host",
+    "reboot-required",
+    "relogin-required",
+    "verifying",
+    "ready",
+    "failed",
+    "cancelled"
+  ],
+  "consent": {
+    "approved_plan_digest": "sha256:e98052dfa301264711547f33ed59237791b0d4844250e58bd914ba5055b14d36",
+    "expected_revision": 2
+  },
+  "receipt": {
+    "step_id": "step-1",
+    "nonce": "nonce-1",
+    "expected_operation_revision": 3,
+    "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+    "parameters_digest": "sha256:ace43bdefc8013743abfb2ca4321e6da57ffd9e40620bdc56558c760a5abf055",
+    "outcome": "completed",
+    "receipt_id": "receipt-1"
+  },
+  "maintenance": {
+    "stopping": {
+      "operation_id": "guard-1",
+      "request_id": "request-2",
+      "model_id": "qwen3-0.6b-npu2",
+      "kind": "replace",
+      "ready_to_mutate": false,
+      "state": "stopping"
+    },
+    "held": {
+      "operation_id": "guard-1",
+      "request_id": "request-2",
+      "model_id": "qwen3-0.6b-npu2",
+      "kind": "replace",
+      "ready_to_mutate": true,
+      "state": "held"
+    },
+    "completed": {
+      "operation_id": "guard-1",
+      "request_id": "request-2",
+      "model_id": "qwen3-0.6b-npu2",
+      "kind": "replace",
+      "ready_to_mutate": false,
+      "state": "completed"
+    }
+  },
+  "errors": {
+    "FASTFLOWLM_ENGINE_NOT_INSTALLED": 404,
+    "FASTFLOWLM_LOCAL_ONLY_MISMATCH": 422,
+    "FASTFLOWLM_INVALID_INSTALLATION": 422,
+    "FASTFLOWLM_ENVIRONMENT_NOT_READY": 409,
+    "FASTFLOWLM_DEVICE_BUSY": 409,
+    "FASTFLOWLM_TIMEOUT": 504,
+    "FASTFLOWLM_PROCESS_CRASH": 500
+  },
+  "sources": {
+    "defaults": {
+      "catalog": "https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/models/catalog.json",
+      "builds": "https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/fastflowlm-manifest.json",
+      "environment": "https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/runtimes/environments/fastflowlm-windows.json"
+    },
+    "overrides": {
+      "ATOMIC_MODEL_CATALOG_URL": "file:///test/catalog.json",
+      "ATOMIC_FASTFLOWLM_MANIFEST_URL": "https://fixture.invalid/builds.json",
+      "ATOMIC_FASTFLOWLM_ENVIRONMENT_MANIFEST_URL": "file:///test/environment.json"
+    },
+    "resolved": {
+      "catalog": "file:///test/catalog.json",
+      "builds": "https://fixture.invalid/builds.json",
+      "environment": "file:///test/environment.json"
+    }
+  }
+}

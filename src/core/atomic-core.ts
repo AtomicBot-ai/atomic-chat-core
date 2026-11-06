@@ -27,10 +27,12 @@ import type { EmbeddingService } from '../embedding/index.js'
 import type { DiffusionService } from '../diffusion/index.js'
 import type { AudioService } from '../audio/index.js'
 import type { CoreEmitter } from '../events/index.js'
+import type { FlmMaintenance } from '../runtime/fastflowlm/index.js'
+import type { PreparationCoordinator } from '../runtime/fastflowlm/environment/index.js'
 import type { ManagedRuntimes } from '../runtime/environment/index.js'
 import { assertNotLoadedByLegacy } from '../lock/index.js'
 import type { InstanceLock } from '../lock/index.js'
-import type { ModelRegistry } from '../models/index.js'
+import type { FastFlowLmRegistry, ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
@@ -67,7 +69,7 @@ export interface AtomicCoreParts {
    * (task 2.16w round 1, finding 2) has its own, a different `model.yml` schema entirely, so this
    * map holds either. `AtomicCore.registry`'s overloads narrow the return type back per provider.
    */
-  registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
+  registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry | FastFlowLmRegistry>
   control: ControlServer
   log: CoreLogger
   controlToken: string
@@ -85,6 +87,8 @@ export interface AtomicCoreParts {
   /** Audio generation on audio.cpp: its own module, like image generation. */
   audio: AudioService
   /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  fastFlowLmMaintenance: FlmMaintenance
+  fastFlowLmOperations: PreparationCoordinator
   managed: ManagedRuntimes
   /**
    * The public server's trusted hosts, kept in this one array while it runs: every managed session
@@ -133,7 +137,7 @@ export class AtomicCore {
   readonly externalSessions: ExternalSessions
   private readonly lock: InstanceLock
   private readonly runtimes: Map<LocalProviderId, LocalRuntime>
-  private readonly registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>
+  private readonly registries: Map<LocalProviderId, ModelRegistry | ManagedModelRegistry | FastFlowLmRegistry>
   private readonly log: CoreLogger
   private readonly appLeaseTimer: NodeJS.Timeout | undefined
   private readonly errors: ErrorSink | undefined
@@ -158,6 +162,8 @@ export class AtomicCore {
   /** Audio generation on audio.cpp: the resident `audiocpp_server`, its jobs and the gallery. */
   readonly audio: AudioService
   /** The managed container runtime: its durable operations, and what a snapshot shows of them. */
+  readonly fastFlowLmMaintenance: FlmMaintenance
+  readonly fastFlowLmOperations: PreparationCoordinator
   readonly managed: ManagedRuntimes
   /**
    * The decision model (`llama-server --decision`): `scoreCandidates` and `decide` for the router,
@@ -185,6 +191,8 @@ export class AtomicCore {
     this.appLeaseTimer = parts.appLeaseTimer
     this.diffusion = parts.diffusion
     this.audio = parts.audio
+    this.fastFlowLmMaintenance = parts.fastFlowLmMaintenance
+    this.fastFlowLmOperations = parts.fastFlowLmOperations
     this.managed = parts.managed
     this.decision = parts.decision
     this.embedding = parts.embedding
@@ -269,10 +277,13 @@ export class AtomicCore {
    * already gives. `unknownProvider` when this core does not offer the provider at all (a managed one
    * off Linux and Windows, for instance).
    */
-  registry(provider?: Exclude<LocalProviderId, ManagedProviderId>): ModelRegistry
+  registry(provider: 'fastflowlm'): FastFlowLmRegistry
+  registry(provider?: Exclude<LocalProviderId, ManagedProviderId | 'fastflowlm'>): ModelRegistry
   registry(provider: ManagedProviderId): ManagedModelRegistry
-  registry(provider: LocalProviderId): ModelRegistry | ManagedModelRegistry
-  registry(provider: LocalProviderId = LOCAL_PROVIDER): ModelRegistry | ManagedModelRegistry {
+  registry(provider: LocalProviderId): ModelRegistry | ManagedModelRegistry | FastFlowLmRegistry
+  registry(
+    provider: LocalProviderId = LOCAL_PROVIDER
+  ): ModelRegistry | ManagedModelRegistry | FastFlowLmRegistry {
     const registry = this.registries.get(provider)
     if (!registry) throw unknownProvider(provider, this.registries.keys())
     return registry
@@ -399,6 +410,8 @@ export class AtomicCore {
       // next core to resume, so this never races the lock release below.
       await this.managed.shutdown(AbortSignal.timeout(5_000)).catch(() => {})
       for (const runtime of this.runtimes.values()) await runtime.shutdown()
+      await this.fastFlowLmOperations.close()
+      await this.fastFlowLmMaintenance.close()
       await this.localSessions.releaseAll()
       await this.control.close()
       await this.lock.release()

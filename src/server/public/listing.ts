@@ -38,6 +38,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'foundry-local': 'foundry-local',
   'litert-lm': 'litert-lm',
   'geniex': 'geniex',
+  'fastflowlm': 'fastflowlm',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

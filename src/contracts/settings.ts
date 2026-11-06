@@ -212,6 +212,11 @@ export interface SglangProviderConfig {
   default_repetition_penalty: string
 }
 
+export interface FastFlowLmConfig {
+  ctx_len: number
+  timeout: number
+}
+
 export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
   ? MlxConfig
   : P extends 'foundation-models'
@@ -228,7 +233,9 @@ export type ProviderSettings<P extends LocalProviderId> = P extends 'mlx'
               ? LiteRtLmConfig
               : P extends 'geniex'
                 ? GeniexConfig
-                : LlamacppConfig
+                : P extends 'fastflowlm'
+                  ? FastFlowLmConfig
+                  : LlamacppConfig
 
 /** UI descriptor of one setting (mirrors the app's SettingComponentProps). */
 export interface SettingDescriptor {

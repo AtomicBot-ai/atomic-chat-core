@@ -146,7 +146,7 @@ def main():
                     if 'not found' in closure:
                         raise ValueError(f'unresolved shared library for {obj}')
             check_tree(tree, args.platform)
-            subprocess.run([sys.executable, str(HERE / 'probe.py'), str(tree / exe)], check=True, cwd=temp)
+            subprocess.run([sys.executable, str(HERE / 'probe.py'), str(tree / exe), "--expect-no-device"], check=True, cwd=temp)
 
 
 if __name__ == '__main__':

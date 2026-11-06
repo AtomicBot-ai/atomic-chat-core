@@ -57,13 +57,17 @@ export interface HostStepStepOutcome {
 }
 
 export interface HostStepResult {
+  operation_id?: string
+  expected_operation_revision?: number
   schema_version: 1
   step_id: string
   /**
    * `reboot-required` (change `add-tensorrt-llm-windows`): the step succeeded, and what it changed
    * takes effect only after Windows restarts — today only `windows.enable-wsl` answers it.
    */
-  outcome: 'completed' | 'reboot-required' | 'failed'
+  outcome:
+    'completed' | 'reboot-required' | 'relogin-required' | 'service-restart-required' | 'declined' | 'failed'
+  activation?: { kind: 'restart-service'; unit: string; account: string; scope: 'system' | 'user' }
   /** 0 when completed, the failing command's exit code, or null when no command failed. */
   exit_code: number | null
   log_tail: string

@@ -48,7 +48,12 @@ export interface ProbeDeps {
    * Run a tool. Resolves with the exit code on a non-zero exit (the caller reads `stderr`); rejects
    * only when the tool could not be started (not found, not executable) or did not finish in time.
    */
-  run: (file: string, args: string[], timeoutMs: number) => Promise<ToolResult>
+  run: (
+    file: string,
+    args: string[],
+    timeoutMs: number,
+    options?: { env: NodeJS.ProcessEnv; cwd: string }
+  ) => Promise<ToolResult>
   fs: ProbeFs
   os: {
     totalmem: () => number

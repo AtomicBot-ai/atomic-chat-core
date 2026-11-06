@@ -1,0 +1,299 @@
+{
+  "gemma4-it:12b": {
+    "size": 12000000000,
+    "flm_min_version": "1.0.4",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4-12b",
+      "think": true,
+      "parameter_size": "12B",
+      "quantization_level": "Q4_0"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja",
+      "image_audio_weights.q4nx",
+      "processor_config.json",
+      "attn_global.xclbin",
+      "attn_global_image.xclbin",
+      "attn_sliding.xclbin",
+      "audio_image_mm.xclbin",
+      "dequant_mm.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin"
+    ]
+  },
+  "lfm2.5-tk:1.2b": {
+    "size": 1200000000,
+    "flm_min_version": "0.9.27",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2.5-tk",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "1.2B",
+      "quantization_level": "Q4_0"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja",
+      "attn.xclbin",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin"
+    ]
+  },
+  "lfm3:1.7b": {
+    "size": 1700000000,
+    "flm_min_version": "1.0.11",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm3",
+      "think": true,
+      "think_toggleable": true,
+      "parameter_size": "1.7B",
+      "quantization_level": "Q4_0"
+    },
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja",
+      "attn.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin"
+    ]
+  },
+  "minicpm-v-4.7:1b": {
+    "size": 1000000000,
+    "flm_min_version": "1.0.8",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "minicpm-v-4.7",
+      "think": true,
+      "parameter_size": "1B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_weight.q4nx",
+      "chat_template.jinja",
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm_a.xclbin",
+      "vision_mm_b.xclbin"
+    ]
+  },
+  "nemotron3.5-bolt:e4b": {
+    "size": 4000000000,
+    "flm_min_version": "1.0.11",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e",
+      "think": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_weight.q4nx",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "configuration.json",
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "swa.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin"
+    ]
+  },
+  "qwen3.5:0.8b": {
+    "size": 800000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "0.8B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_weight.q4nx",
+      "chat_template.jinja",
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin"
+    ]
+  },
+  "qwen3.5:2b": {
+    "size": 2000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "2B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_weight.q4nx",
+      "chat_template.jinja",
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin"
+    ]
+  },
+  "qwen3.6-moe:35b-a3b": {
+    "size": 35000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.6-moe",
+      "think": true,
+      "parameter_size": "35B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_weight.q4nx",
+      "chat_template.jinja",
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "conv.xclbin",
+      "dequant_mm.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin"
+    ]
+  },
+  "qwen3.8-mtp:27b": {
+    "size": 27000000000,
+    "flm_min_version": "1.0.7",
+    "max_prefill_len": 4096,
+    "default_context_length": 4096,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.8-mtp",
+      "think": true,
+      "parameter_size": "27B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "chat_template.jinja",
+      "vision_weight.q4nx",
+      "GateDeltaNet_prefill.xclbin",
+      "MTP_layer.xclbin",
+      "attention_layer.xclbin",
+      "attention_prefill.xclbin",
+      "conv.xclbin",
+      "deltanet_layer.xclbin",
+      "dequant_mm.xclbin",
+      "lm_head.xclbin",
+      "lm_head_8.xclbin",
+      "vision_attn.xclbin",
+      "vision_mm_a.xclbin",
+      "vision_mm_b.xclbin"
+    ]
+  },
+  "qwen3:0.6b": {
+    "size": 600000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3",
+      "think": false,
+      "think_toggleable": true,
+      "parameter_size": "0.6B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "attn.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin"
+    ]
+  }
+}

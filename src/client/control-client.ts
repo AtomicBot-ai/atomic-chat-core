@@ -12,6 +12,15 @@ import type { ChatGptStatus } from '../credentials/index.js'
 import { AtomicCoreError, CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import { CORE_VERSION } from '../version.js'
 import type {
+  FastFlowLmAccelerators,
+  FastFlowLmCheckRequest,
+  FastFlowLmCheckResult,
+  FastFlowLmProbePlan,
+  FastFlowLmOperation,
+  FastFlowLmMaintenance,
+  FastFlowLmMaintenanceRequest,
+  FastFlowLmMaintenanceResult,
+  FastFlowLmConsent,
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
@@ -50,6 +59,7 @@ import type {
   ModelCompatibilityResponse,
   PrismFamiliesResponse,
   EnvironmentSnapshot,
+  FastFlowLmHostReceipt,
   ManagedHostReceipt,
   ProbeEnvironmentInput,
   RequirementPlan,
@@ -268,6 +278,85 @@ export class CoreClient {
   removeEngineBuild(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
+    })
+  }
+
+  checkFastFlowLmModel(request: FastFlowLmCheckRequest): Promise<FastFlowLmCheckResult> {
+    return this.call('/models/fastflowlm/check', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  fastFlowLmAccelerators(): Promise<FastFlowLmAccelerators> {
+    return this.call('/runtimes/fastflowlm/accelerators')
+  }
+
+  probeFastFlowLm(): Promise<FastFlowLmProbePlan> {
+    return this.call('/runtimes/fastflowlm/probe', { method: 'POST', body: JSON.stringify({}) })
+  }
+
+  beginFastFlowLmOperation(request: { request_id: string }): Promise<FastFlowLmOperation> {
+    return this.call('/runtimes/fastflowlm/operations', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  fastFlowLmOperations(): Promise<FastFlowLmOperation[]> {
+    return this.call('/runtimes/fastflowlm/operations')
+  }
+
+  fastFlowLmOperation(id: string): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}`)
+  }
+
+  consentFastFlowLmOperation(id: string, consent: FastFlowLmConsent): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}/consent`, {
+      method: 'POST',
+      body: JSON.stringify(consent),
+    })
+  }
+
+  /** Claim after journalling the launch intent. Only this caller may dispatch the returned step. */
+  claimFastFlowLmHostStep(id: string, expectedRevision: number): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}/claim-host-step`, {
+      method: 'POST',
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+    })
+  }
+
+  submitFastFlowLmHostReceipt(id: string, receipt: FastFlowLmHostReceipt): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}/host-step-receipt`, {
+      method: 'POST',
+      body: JSON.stringify(receipt),
+    })
+  }
+
+  cancelFastFlowLmOperation(id: string): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
+  resumeFastFlowLmOperation(id: string, expectedRevision: number): Promise<FastFlowLmOperation> {
+    return this.call(`/runtimes/fastflowlm/operations/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify({ expected_revision: expectedRevision }),
+    })
+  }
+
+  beginFastFlowLmMaintenance(request: FastFlowLmMaintenanceRequest): Promise<FastFlowLmMaintenanceResult> {
+    return this.call('/models/fastflowlm/maintenance', { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  listFastFlowLmMaintenance(): Promise<FastFlowLmMaintenance[]> {
+    return this.call('/models/fastflowlm/maintenance')
+  }
+
+  fastFlowLmMaintenance(id: string): Promise<FastFlowLmMaintenance> {
+    return this.call(`/models/fastflowlm/maintenance/${encodeURIComponent(id)}`)
+  }
+
+  completeFastFlowLmMaintenance(id: string): Promise<FastFlowLmMaintenance> {
+    return this.call(`/models/fastflowlm/maintenance/${encodeURIComponent(id)}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     })
   }
 

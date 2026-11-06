@@ -1,10 +1,43 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
-import { ProcessJournal } from '../lock/index.js'
+import { ProcessJournal, processStartId, type ChildProcessRecord } from '../lock/index.js'
+import { reapOrphans } from './reap-orphans.js'
 
 useCoreHarness()
 
 describe('recovering from a previous owner', () => {
+  it('retains a confirmed live entry when the OS refuses termination', async () => {
+    const journal = await ProcessJournal.open(data.layout)
+    const identity = await processStartId(process.pid)
+    expect(identity).toBeTypeOf('string')
+    const record: ChildProcessRecord = {
+      instance_id: 'previous-owner',
+      pid: process.pid,
+      process_start_id: identity!,
+      exe: '/backends/flm-real',
+      provider: 'fastflowlm',
+      model_id: 'protected-model',
+      port: 3999,
+      started_at: new Date().toISOString(),
+    }
+    await journal.add(record)
+    const originalKill = process.kill.bind(process)
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (signal === 0) return originalKill(pid, signal)
+      throw Object.assign(new Error('Operation not permitted'), { code: 'EPERM' })
+    })
+    const log = vi.fn()
+    try {
+      await reapOrphans(journal, 'new-owner', log)
+      expect(kill).toHaveBeenCalledWith(process.pid, 'SIGTERM')
+      expect(journal.list()).toEqual([record])
+      expect((await ProcessJournal.open(data.layout)).list()).toEqual([record])
+      expect(log).toHaveBeenCalledWith('warn', expect.stringContaining('until exit can be confirmed'))
+    } finally {
+      kill.mockRestore()
+    }
+  })
+
   it('terminates a backend the dead owner left running and forgets the entry', async () => {
     const { spawn } = await import('node:child_process')
     const { processStartId } = await import('../lock/index.js')

@@ -173,7 +173,16 @@ export async function pipeBody(
   try {
     for await (const chunk of withIdleTimeout(source, STREAM_IDLE_TIMEOUT_MS)) {
       if (closed) break
-      if (!res.write(chunk)) await new Promise((resolve) => res.once('drain', resolve))
+      if (!res.write(chunk) && !res.destroyed)
+        await new Promise<void>((resolve) => {
+          const resume = () => {
+            res.off('drain', resume)
+            res.off('close', resume)
+            resolve()
+          }
+          res.once('drain', resume)
+          res.once('close', resume)
+        })
     }
   } catch {
     // The upstream failed or stalled mid-stream; the client gets what arrived before it.

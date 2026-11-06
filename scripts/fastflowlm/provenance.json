@@ -57,6 +57,6 @@
     },
     "cmake_zip_sha256": "bace36e94b31c68ab6fa295f26dfa11219e0701cf7c94b0284a7d1cb13dac536"
   },
-  "atomic_revision": 1,
-  "patch_sha256": "0ec939add152776106853a856e38dc3e5a7f0cedaad87e7ff86990339744ded6"
+  "atomic_revision": 2,
+  "patch_sha256": "5f696d2a508b3209eee418bc3bbe7528864e95dad2d89cd8619de6446f040541"
 }

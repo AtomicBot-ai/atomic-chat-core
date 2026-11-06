@@ -8,6 +8,10 @@ using json = nlohmann::json;
 
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
+    if (version<4>("32.0.204.1") <= version<4>("32.0.203.304") ||
+        version<4>("31.0.203.999") >= version<4>("32.0.203.304")) return 1;
+    try { version<4>("32.0.203"); return 1; }
+    catch (const std::runtime_error&) {}
     const fs::path root(argv[1]);
     const auto config = root / "selected.json";
     std::ofstream(config) << "{}";

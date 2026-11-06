@@ -184,6 +184,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'MODEL_NOT_LOADED':
     case 'NO_MODEL_LOADED':
     case 'JOB_NOT_FOUND':
+    case 'FASTFLOWLM_ENGINE_NOT_INSTALLED':
     case 'ENGINE_MISSING':
     case 'MODEL_MISSING':
     case 'SIDE_FILE_MISSING':
@@ -217,6 +218,8 @@ export function statusForCode(code: ErrorCode): number {
     case 'MANAGED_PREREQUISITE_BLOCKED':
     case 'MANAGED_RELOGIN_REQUIRED':
     case 'MANAGED_REBOOT_REQUIRED':
+    case 'FASTFLOWLM_DEVICE_BUSY':
+    case 'FASTFLOWLM_ENVIRONMENT_NOT_READY':
     case 'GPU_BUSY':
     case 'UNSUPPORTED_MODE':
     case 'SESSION_GENERATION_STALE':
@@ -247,6 +250,8 @@ export function statusForCode(code: ErrorCode): number {
     case 'REMOTE_UNSUPPORTED':
     case 'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED':
     case 'LITERT_LM_VARIANT_UNSUPPORTED':
+    case 'FASTFLOWLM_INVALID_INSTALLATION':
+    case 'FASTFLOWLM_LOCAL_ONLY_MISMATCH':
     case 'GENIEX_VARIANT_UNSUPPORTED':
       return 422
     case 'REMOTE_NOT_CONFIGURED':
@@ -284,6 +289,7 @@ export function statusForCode(code: ErrorCode): number {
     case 'EMBEDDING_UNAVAILABLE':
       return 503
     case 'MODEL_LOAD_TIMED_OUT':
+    case 'FASTFLOWLM_TIMEOUT':
     case 'SERVER_START_TIMED_OUT':
       return 504
     default:

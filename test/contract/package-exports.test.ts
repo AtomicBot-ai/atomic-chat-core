@@ -66,6 +66,11 @@ describe('package exports', () => {
         './models': await import('../../src/models/index.js'),
       }
       const models = entries['./models'] as Record<string, unknown>
+      expect(typeof entries['./client'].buildFastFlowLmConfig).toBe('function')
+      expect(typeof entries['./client'].fastFlowLmSources).toBe('function')
+      expect(typeof entries['./models'].FastFlowLmRegistry).toBe('function')
+      expect(typeof entries['./host'].executeHostStep).toBe('function')
+      expect(entries['./contracts'].ENGINE_BUILD_IDS).toContain('fastflowlm')
       expect(typeof models['ModelRegistry']).toBe('function')
       expect(typeof models['fetchHfGgufFiles']).toBe('function')
       expect(models).not.toHaveProperty('downloadHfModel')

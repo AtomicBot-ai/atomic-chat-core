@@ -319,9 +319,9 @@ export function dataLayout(root: string): DataLayout {
             tmpDir: join(providerRoot, 'tmp'),
             logsDir: join(providerRoot, 'logs'),
           }
+        case 'fastflowlm':
         case 'geniex':
-          // Change `add-geniex-runtime` (task 6.1): builds (the SDK's lib/**), models the clients download,
-          // the host's cache, each host's runtime files, temporary images of requests and logs.
+          // Clients own the model trees. The core keeps builds and runtime state alongside them.
           return {
             root: providerRoot,
             backendsDir: join(providerRoot, 'backends'),

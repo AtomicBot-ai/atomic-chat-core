@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-05 — Limit Ubuntu NPU installation to the approved transaction](2026-11-05-limit-ubuntu-npu-installation-to-the-approved-transaction.md)
+
 - [2026-11-05 — Offer the upstream Linux x64 ROCm build](2026-11-05-offer-upstream-linux-rocm.md)
 
 - [2026-11-04 — Run only GPU builds the card can run, and retry a failed GPU load once on the next build](2026-11-04-run-only-gpu-builds-the-card-can-run-and-retry-once.md)
@@ -185,3 +187,14 @@ add a new one that says which record it supersedes.
 - [List llama.cpp devices from the pack a load runs on](2026-11-05-list-devices-from-the-pack-a-load-runs-on.md)
 - [Give mlx-server the llama.cpp answer cap](2026-11-05-give-mlx-the-llama-answer-cap.md)
 - [Pin FastFlowLM build inputs before changing the server](2026-11-05-pin-fastflowlm-build-inputs.md)
+- [Validate FastFlowLM installer plans before projection](2026-11-05-validate-fastflowlm-catalog-plans-in-clients.md)
+- [Verify the local-only FLM executable before publishing an engine build](2026-11-05-probe-fastflowlm-before-engine-swap.md)
+
+- [Build and verify the same local FastFlowLM model configuration](2026-11-05-build-local-flm-model-config.md)
+- [Publish FastFlowLM compatibility and operation recovery on control protocol 2](2026-11-05-fastflowlm-control-wire.md)
+- [Probe the selected FastFlowLM build as the runtime owner](2026-11-05-probe-fastflowlm-as-runtime-owner.md)
+
+- [Pin FastFlowLM preparation to the measured owner and qualified recipe](2026-11-05-pin-fastflowlm-preparation.md)
+
+- [Bind the Windows NPU driver to one device instance](2026-11-05-bind-the-windows-npu-driver-to-one-device.md)
+- [Serialize FastFlowLM model changes and generation](2026-11-05-serialize-fastflowlm-model-changes-and-generation.md)

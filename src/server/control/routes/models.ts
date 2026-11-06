@@ -12,6 +12,23 @@ import type { ControlRouteContext, ControlServerDeps } from '../types.js'
 export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx: ControlRouteContext): void {
   const { p } = ctx
 
+  if (deps.fastFlowLmPreparation) {
+    const plan = deps.fastFlowLmPreparation
+    router.post(p('/runtimes/fastflowlm/probe'), async (req, res) => {
+      const body = await readJsonBody(req)
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length)
+        throw new AtomicCoreError(
+          'INVALID_REQUEST',
+          'FastFlowLM probes the current runtime identity and accepts no parameters.'
+        )
+      sendJson(res, 200, await plan())
+    })
+  }
+  if (deps.fastFlowLmAccelerators) {
+    const probe = deps.fastFlowLmAccelerators
+    router.get(p('/runtimes/fastflowlm/accelerators'), async (_req, res) => sendJson(res, 200, await probe()))
+  }
+
   router.get(p('/sessions'), (_req, res) => sendJson(res, 200, { sessions: deps.sessions() }))
 
   // Registered ahead of `load`: a cancel is never queued behind the load it stops.

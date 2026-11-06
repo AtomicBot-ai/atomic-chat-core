@@ -15,6 +15,7 @@ import type {
 import type { AudioErrorEvent, AudioJobEvent, AudioStateEvent } from './audio.js'
 import type { EngineBuildChangedEvent } from './engine-builds.js'
 import type { EngineChangedEvent } from './engines.js'
+import type { FastFlowLmOperation } from './fastflowlm.js'
 import type { FoundryLocalAcceleratorsEvent } from './foundry-local.js'
 import type { LiteRtLmAcceleratorsEvent } from './litert-lm.js'
 import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js'
@@ -199,6 +200,9 @@ export interface CoreEvents {
    */
   'environment:changed': EnvironmentSnapshot
   'environment:operation': EnvironmentOperation
+
+  /** Full preparation operation, also returned by GET /runtimes/fastflowlm/operations/:id. */
+  'fastflowlm:operation': FastFlowLmOperation
 
   /**
    * An sd.cpp or MLX build was installed, removed, or cleaned up at start (spec `engine-builds`):

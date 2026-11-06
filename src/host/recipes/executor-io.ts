@@ -39,6 +39,7 @@ import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { hostExec } from '../../runtime/environment/index.js'
 import type { HostStepExecutorDeps } from './executor.js'
+import { installLinuxNpu } from './linux-npu-io.js'
 import { INSTALL_CONTAINER_RUNTIME_RECIPE } from './install-container-runtime.js'
 
 /** The slice of an open file the executor uses; node's `FileHandle` is one. */
@@ -251,7 +252,8 @@ export function nodeHostStepDeps(env: NodeJS.ProcessEnv, fs: HostFs = nodeHostFs
   })
   const invokingUid = invokingUidFrom(env)
   const folder = folderOwners(invokingUid)
-  return {
+  const deps: HostStepExecutorDeps = {
+    installLinuxNpu: (target) => installLinuxNpu(target, deps),
     readRequest: (path) => readRequest(fs, folder, requestOwners(invokingUid), path),
     writeResult: (path, text) => writeAtomically(fs, folder, path, text, 0o644),
     readFile: (path) => readFileOrNull(fs, path),
@@ -265,4 +267,5 @@ export function nodeHostStepDeps(env: NodeJS.ProcessEnv, fs: HostFs = nodeHostFs
     now: () => Date.now(),
     invokingUid,
   }
+  return deps
 }

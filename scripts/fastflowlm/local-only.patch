@@ -72,10 +72,10 @@ index 5e16386..f2a7572 100644
      size_t len = 0;
 diff --git a/src/include/atomic_local.hpp b/src/include/atomic_local.hpp
 new file mode 100644
-index 0000000..06bb4d7
+index 0000000..914ba7f
 --- /dev/null
 +++ b/src/include/atomic_local.hpp
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,108 @@
 +#pragma once
 +
 +#include <array>
@@ -100,15 +100,16 @@ index 0000000..06bb4d7
 +}
 +
 +// Compare dotted versions numerically and reject malformed local metadata.
-+inline std::array<unsigned, 3> version(std::string_view value) {
-+    std::array<unsigned, 3> result{};
++template<std::size_t N = 3>
++inline std::array<unsigned, N> version(std::string_view value) {
++    std::array<unsigned, N> result{};
 +    for (unsigned i = 0; i < result.size(); ++i) {
 +        const char* end = value.data() + value.size();
 +        const auto parsed = std::from_chars(value.data(), end, result[i]);
-+        if (parsed.ec != std::errc{} || (i == 2 ? parsed.ptr != end :
++        if (parsed.ec != std::errc{} || (i + 1 == N ? parsed.ptr != end :
 +            parsed.ptr == end || *parsed.ptr != '.'))
 +            throw std::runtime_error("invalid_local_version");
-+        if (i < 2) value.remove_prefix(parsed.ptr - value.data() + 1);
++        if (i + 1 < N) value.remove_prefix(parsed.ptr - value.data() + 1);
 +    }
 +    return result;
 +}
@@ -324,7 +325,7 @@ index 08c0c06..b13b743 100644
      routes[key] = handler;
  }
 diff --git a/src/src/main.cpp b/src/src/main.cpp
-index 814fb52..bbc370e 100644
+index 814fb52..6fde7f1 100644
 --- a/src/src/main.cpp
 +++ b/src/src/main.cpp
 @@ -1,3 +1,4 @@
@@ -332,20 +333,109 @@ index 814fb52..bbc370e 100644
  /// \file main.cpp
  /// \brief Main entry point for the FLM application
  /// \author FastFlowLM Team
-@@ -545,6 +546,12 @@ static flm_rt::device* open_npu_device(std::string* why) {
+@@ -215,7 +216,7 @@ std::string identify_npu_arch() {
+ 
+ #endif
+ 
+-static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
++static bool sanity_check_npu_stack(bool quiet, bool json_output = false, bool read_only = false, int accel_index = -1) {
+     bool print_human = !quiet && !json_output;
+ #ifdef FLM_ENABLE_CORE
+     // Everything below reads the NPU's geometry and this process's memlock
+@@ -289,8 +290,8 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+     bool drm_version_ok = true;
+     bool kernel_ok = true;
+ 
+-    for (int i = 0; i < 16; ++i) {
+-        std::string dev_name = "/dev/accel/accel" + std::to_string(i);
++    for (int i = 0; i < (accel_index < 0 ? 16 : 1); ++i) {
++        std::string dev_name = "/dev/accel/accel" + std::to_string(accel_index < 0 ? i : accel_index);
+         int fd = open(dev_name.c_str(), O_RDWR);
+ 
+         if (fd < 0) {
+@@ -407,7 +408,7 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+             : std::to_string(static_cast<unsigned long long>(rl.rlim_cur));
+         if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < 100 * 1024 * 1024) {
+             struct rlimit rl_new = { RLIM_INFINITY, RLIM_INFINITY };
+-            if (setrlimit(RLIMIT_MEMLOCK, &rl_new) == 0) {
++            if (!read_only && setrlimit(RLIMIT_MEMLOCK, &rl_new) == 0) {
+                 rl.rlim_cur = RLIM_INFINITY;
+                 rl.rlim_max = RLIM_INFINITY;
+                 validation_json["memlock_limit"] = "infinity";
+@@ -467,12 +468,13 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+ 
+     std::string min_drv = __NPU_VERSION__;
+     std::string drv = get_driver_version("NPU Compute Accelerator Device");
+-    int mver_0, mver_1, mver_2, mver_3;
+-    int ver_0, ver_1, ver_2, ver_3;
+-    sscanf(min_drv.c_str(), "%d.%d.%d.%d", &mver_0, &mver_1, &mver_2, &mver_3);
+-    sscanf(drv.c_str(), "%d.%d.%d.%d", &ver_0, &ver_1, &ver_2, &ver_3);
+-
+-    if (ver_3 < mver_3) {
++    bool supported_driver = false;
++    try {
++        supported_driver = atomic_local::version<4>(drv) >= atomic_local::version<4>(min_drv);
++    } catch (const std::runtime_error&) {
++        // Missing or malformed WMI evidence cannot establish readiness.
++    }
++    if (!supported_driver) {
+         if (print_human) {
+             header_print("Error", "NPU driver version doesn't meet the minimum!");
+         }
+@@ -545,6 +547,13 @@ static flm_rt::device* open_npu_device(std::string* why) {
  ///@param argv the arguments
  ///@return the exit code
  int main(int argc, char* argv[]) {
 +    if (argc == 3 && std::string_view(argv[1]) == "atomic-capabilities" &&
 +        std::string_view(argv[2]) == "--json") {
 +        std::cout << nlohmann::json{{"upstream_commit", ATOMIC_FLM_COMMIT},
-+            {"atomic_revision", ATOMIC_FLM_REVISION}, {"local_only_protocol", 1}}.dump() << std::endl;
++            {"atomic_revision", ATOMIC_FLM_REVISION}, {"local_only_protocol", 1},
++            {"environment_probe_protocol", 1}}.dump() << std::endl;
 +        return 0;
 +    }
  #ifdef _WIN32
      SetConsoleOutputCP(CP_UTF8);
      SetConsoleCP(CP_UTF8);
-@@ -559,6 +566,29 @@ int main(int argc, char* argv[]) {
+@@ -553,12 +562,68 @@ int main(int argc, char* argv[]) {
+     preload_bundled_libraries();
+ #endif
+     
++    // Run before catalog discovery. Validation and XRT use separate processes:
++    // amdxdna can refuse a second open while the DRM handle is still held.
++#ifndef _WIN32
++    if (argc == 4 && std::string_view(argv[1]) == "atomic-validate" && std::string_view(argv[2]) == "--json") {
++        std::string_view index(argv[3]);
++        int accel_index = -1;
++        auto parsed = std::from_chars(index.data(), index.data() + index.size(), accel_index);
++        if (parsed.ec != std::errc{} || parsed.ptr != index.data() + index.size() || accel_index < 0)
++            return 2;
++        return sanity_check_npu_stack(false, true, true, accel_index) ? 0 : 1;
++    }
++#endif
++    if (argc == 3 && std::string_view(argv[2]) == "--json") {
++        if (std::string_view(argv[1]) == "atomic-validate")
++            return sanity_check_npu_stack(false, true, true) ? 0 : 1;
++        if (std::string_view(argv[1]) == "atomic-xrt") {
++            nlohmann::json result = {{"open", false}};
++            try {
++                flm_rt::device device(0);
++#ifdef _WIN32
++                result["pci"] = nlohmann::json::parse(device.get_info<flm_rt::info::device::pcie_info>());
++#else
++                result["bdf"] = device.get_info<flm_rt::info::device::bdf>();
++#endif
++                result["open"] = true;
++            } catch (const std::exception&) {
++                // The caller associates an unavailable XRT with this build.
++            }
++            std::cout << result.dump() << std::endl;
++            return result["open"].get<bool>() ? 0 : 1;
++        }
++    }
++
+     // Parse command line arguments using Boost Program Options
+     program_args_t parsed_args;
+     if (!arg_utils::parse_options(argc, argv, parsed_args)) {
          return 1;
      }
  
@@ -375,7 +465,7 @@ index 814fb52..bbc370e 100644
      if (parsed_args.command == "help") {
          return 0;
      }
-@@ -735,7 +765,7 @@ int main(int argc, char* argv[]) {
+@@ -735,7 +800,7 @@ int main(int argc, char* argv[]) {
  #ifdef _WIN32
              std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + parsed_args.power_mode + " > NUL 2>&1";
              header_print("FLM", "Configuring NPU Power Mode to " + parsed_args.power_mode + (got_power_mode ? "" : " (flm default)"));
@@ -384,7 +474,7 @@ index 814fb52..bbc370e 100644
  #endif
          }
          else{
-@@ -819,7 +849,9 @@ int main(int argc, char* argv[]) {
+@@ -819,7 +884,9 @@ int main(int argc, char* argv[]) {
          ModelDownloader downloader(availble_models);
  
          // Ensure models directory exists
@@ -395,7 +485,7 @@ index 814fb52..bbc370e 100644
              std::filesystem::create_directories(models_dir);
          }
  
-@@ -839,7 +871,7 @@ int main(int argc, char* argv[]) {
+@@ -839,7 +906,7 @@ int main(int argc, char* argv[]) {
              runner.run();
  
          } else if (parsed_args.command == "serve") {

@@ -105,6 +105,14 @@ export function createGuestRecipeRunner(options: {
       writeResult: async () => undefined,
     }
     const result = await executeHostStep('guest/guest-recipe.request.json', deps)
-    return { outcome: result.outcome, log_tail: result.log_tail }
+    return {
+      outcome:
+        result.outcome === 'declined' ||
+        result.outcome === 'relogin-required' ||
+        result.outcome === 'service-restart-required'
+          ? 'failed'
+          : result.outcome,
+      log_tail: result.log_tail,
+    }
   }
 }

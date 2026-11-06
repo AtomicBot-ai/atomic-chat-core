@@ -173,6 +173,7 @@ def main():
     parser.add_argument("--model-base", type=Path)
     parser.add_argument("--model-info", type=Path)
     parser.add_argument("--checkpoint")
+    parser.add_argument("--expect-no-device", action="store_true")
     args = parser.parse_args()
     live = (args.catalog, args.model_base, args.model_info, args.checkpoint)
     if any(live) and not all(live):
@@ -193,7 +194,12 @@ def main():
             identity = json.loads(subprocess.check_output([binary, "atomic-capabilities", "--json"],
                                                          cwd=work, env=env, timeout=15))
             require(identity == {"upstream_commit": LOCK["commit"], "atomic_revision": LOCK["atomic_revision"],
-                                 "local_only_protocol": 1}, "wrong build identity")
+                                 "local_only_protocol": 1, "environment_probe_protocol": 1}, "wrong build identity")
+            if args.expect_no_device:
+                checked = subprocess.run([binary, "atomic-validate", "--json"], cwd=work, env=env,
+                                         capture_output=True, text=True, timeout=20)
+                require(checked.returncode == 1 and json.loads(checked.stdout)["ready"] is False,
+                        "expected a negative stack validation on the no-driver runner")
             negative_cases(binary, work, env, url)
             if all(live):
                 live_case(binary, work, env, args, url)

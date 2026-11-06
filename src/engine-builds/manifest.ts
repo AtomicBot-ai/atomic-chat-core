@@ -21,6 +21,10 @@
  * kept — the catalog shows it — but `assetInstallable` says no: nothing unverified is executed.
  */
 
+import { parseFastFlowLmManifest, type FastFlowLmManifest } from './fastflowlm-manifest.js'
+import { createHash } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
+import { FASTFLOWLM_MANIFEST_URL, fastFlowLmSources } from '../client/index.js'
 import { mkdir, readFile as nodeReadFile, rename, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -649,19 +653,27 @@ export interface ManifestKind<T> {
   urlEnv: string
   parse(data: unknown): T
   cacheFile: string
+  /** Pin the source URL and reject changes to an already published build identity. */
+  immutableSource?: {
+    url(value: string): string
+    check(previous: T, next: T): void
+  }
 }
 
-/** The manifest document of each engine. */
+/** The manifest document of each registered engine. */
 export interface ManifestOf {
   'sd-cpp': SdcppManifest
   'mlx': MlxManifest
   'foundry-local': FoundryLocalManifest
   'litert-lm': LiteRtLmManifest
+  'fastflowlm': FastFlowLmManifest
   'geniex': GeniexManifest
   'audio-cpp': AudiocppManifest
 }
 
-export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: ManifestKind<ManifestOf[K]> } {
+export function manifestKinds(layout: DataLayout): {
+  [K in EngineBuildId]: ManifestKind<ManifestOf[K]>
+} {
   return {
     'sd-cpp': {
       label: 'sd.cpp manifest',
@@ -695,6 +707,24 @@ export function manifestKinds(layout: DataLayout): { [K in EngineBuildId]: Manif
       parse: (data) =>
         parseLiteRtLmManifest(data, { coreVersion: CORE_VERSION, abis: SUPPORTED_LITERT_LM_ABI }),
       cacheFile: join(layout.provider('litert-lm').root, 'litert-lm-manifest.cache.json'),
+    },
+    'fastflowlm': {
+      label: 'FastFlowLM manifest',
+      url: FASTFLOWLM_MANIFEST_URL,
+      urlEnv: 'ATOMIC_FASTFLOWLM_MANIFEST_URL',
+      immutableSource: {
+        url: (value) => fastFlowLmSources('linux', { ATOMIC_FASTFLOWLM_MANIFEST_URL: value }).builds,
+        check(previous, next) {
+          const published = new Map(previous.releases.map((r) => [r.version, r]))
+          for (const r of next.releases) {
+            const old = published.get(r.version)
+            if (old && !isDeepStrictEqual(old, r))
+              throw new Error('Immutable FastFlowLM release changed: ' + r.version)
+          }
+        },
+      },
+      parse: parseFastFlowLmManifest,
+      cacheFile: join(layout.provider('fastflowlm').root, 'fastflowlm-manifest.cache.json'),
     },
     'geniex': {
       label: 'GenieX manifest',
@@ -743,12 +773,21 @@ export interface ManifestReadOptions {
 export class EngineManifestSource<T> {
   /** Only a document the source itself gave; a cache fallback is retried on the next read. */
   private memory: { fetchedAt: number; manifest: T } | null = null
+  private readonly cachePath: string
+  private readonly pinnedUrl?: string
   private inFlight: Promise<ManifestRead<T>> | null = null
 
   constructor(
     private readonly kind: ManifestKind<T>,
     private readonly deps: EngineManifestSourceDeps
-  ) {}
+  ) {
+    this.cachePath = kind.cacheFile
+    if (kind.immutableSource) {
+      this.pinnedUrl = this.sourceUrl()
+      if (this.pinnedUrl !== kind.url)
+        this.cachePath += '.' + createHash('sha256').update(this.pinnedUrl).digest('hex')
+    }
+  }
 
   async read(options: ManifestReadOptions = {}): Promise<ManifestRead<T>> {
     const now = this.deps.now ?? Date.now
@@ -778,10 +817,16 @@ export class EngineManifestSource<T> {
 
   private async resolve(proxy: ProxyConfig | null): Promise<ManifestRead<T>> {
     const now = this.deps.now ?? Date.now
-    const url = this.sourceUrl()
+    const url = this.pinnedUrl ?? this.sourceUrl()
     let error: string
     try {
-      const manifest = this.kind.parse(JSON.parse(await this.fetchText(url, proxy)))
+      const manifest = this.kind.parse(
+        JSON.parse(await this.fetchText(this.kind.immutableSource?.url(url) ?? url, proxy))
+      )
+      if (this.kind.immutableSource) {
+        const previous = this.memory?.manifest ?? (await this.cached())
+        if (previous) this.kind.immutableSource.check(previous, manifest)
+      }
       const fetchedAt = now()
       this.memory = { fetchedAt, manifest }
       await this.writeCache(manifest, fetchedAt)
@@ -819,7 +864,7 @@ export class EngineManifestSource<T> {
 
   private async readCache(): Promise<{ fetchedAt: number; manifest: T } | null> {
     try {
-      const raw = JSON.parse(await (this.deps.readFile ?? defaultReadFile)(this.kind.cacheFile)) as unknown
+      const raw = JSON.parse(await (this.deps.readFile ?? defaultReadFile)(this.cachePath)) as unknown
       if (!isRecord(raw) || typeof raw['fetched_at'] !== 'number') return null
       return { fetchedAt: raw['fetched_at'], manifest: this.kind.parse(raw['manifest']) }
     } catch {
@@ -829,7 +874,7 @@ export class EngineManifestSource<T> {
 
   /** Write-then-rename; a failure only costs the offline fallback, so it is logged, not thrown. */
   private async writeCache(manifest: T, fetchedAt: number): Promise<void> {
-    const path = this.kind.cacheFile
+    const path = this.cachePath
     const temporary = `${path}.tmp-${process.pid}-${fetchedAt}`
     try {
       await mkdir(join(path, '..'), { recursive: true })
