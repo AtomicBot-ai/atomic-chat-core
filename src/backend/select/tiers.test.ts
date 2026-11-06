@@ -189,7 +189,7 @@ describe('tier probing', () => {
       b('b10809', 'win-vulkan-x64'),
     ]
     const all = features({ cuda12: true, cuda13: true, rocm: true, vulkan: true })
-    expect(windowsGpuTiers(all, catalog, 'x64', [amd(), { total_memory: 8192 }])).toEqual([
+    expect(windowsGpuTiers(all, catalog, 'x64', [{ ...amd(), total_memory: 8192 }])).toEqual([
       'win-cuda-13.3-x64',
       'win-cuda-12.4-x64',
       'win-rocm-10.0-x64',
