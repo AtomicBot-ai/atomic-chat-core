@@ -1,6 +1,6 @@
 // A separate local-only process. Its HTTP fixtures exercise the real gateway, sockets and journal.
 import { createServer } from 'node:http'
-import { writeFileSync, existsSync } from 'node:fs'
+import { appendFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 const args = process.argv.slice(2)
 const checkpoint = args[1],
@@ -30,6 +30,7 @@ const server = createServer(async (req, res) => {
   }
   if (body.model !== checkpoint) return send(400, { error: 'wrong checkpoint' })
   const text = body.messages[0].content
+  appendFileSync(join(cache, 'requests.jsonl'), JSON.stringify(body) + '\n')
   if (text === 'hold' || text === 'hang') {
     stuck = text === 'hang'
     busy = true
@@ -52,6 +53,24 @@ const server = createServer(async (req, res) => {
     model: checkpoint,
     usage: { completion_tokens: 1 },
     choices: [{ message: { content: 'hello' }, finish_reason: 'stop' }],
+  }
+  if (text === 'tool-result') {
+    const call = {
+      id: 'call-1',
+      type: 'function',
+      function: { name: 'weather', arguments: '{"city":"Paris"}' },
+    }
+    result.choices = [
+      {
+        [body.stream ? 'delta' : 'message']: {
+          role: 'assistant',
+          content: null,
+          reasoning_content: 'Look up weather.',
+          tool_calls: [call],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ]
   }
   if (body.stream) {
     res.writeHead(200, { 'content-type': 'text/event-stream' })

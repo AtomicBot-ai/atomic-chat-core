@@ -9,13 +9,18 @@ import type { ModelYmlFastFlowLm } from '../../src/contracts/index.js'
 /** The staging Qwen3 layout with tiny synthetic bytes and their own matching hashes. */
 export async function writeFlmInstallation(
   root: string,
-  config = { flm_version: '0.9.22', max_position_embeddings: 40960 }
+  config = { flm_version: '0.9.22', max_position_embeddings: 40960 },
+  variantId = candidate.definition.variant_id,
+  weights = 'model.q4nx'
 ) {
   const d = parseFastFlowLmDescriptor(candidate.definition)
+  d.variant_id = variantId
   const relative = 'fastflowlm/models/' + d.variant_id
   const dir = join(root, relative)
   for (const f of d.files) {
-    const bytes = Buffer.from(f.path === 'config.json' ? JSON.stringify(config) : f.path)
+    const bytes = Buffer.from(
+      f.path === 'config.json' ? JSON.stringify(config) : f.path === 'model.q4nx' ? weights : f.path
+    )
     f.size = bytes.length
     f.sha256 = createHash('sha256').update(bytes).digest('hex')
     await mkdir(dirname(join(dir, f.path)), { recursive: true })

@@ -43,3 +43,32 @@ it('translates both enabled and disabled thinking per request', () => {
       expect(flmChatRequest({ ...chat, ...value }, 'public', 'qwen3:0.6b', capable).think).toBe(enabled)
   }
 })
+
+it('preserves qualified tool and structured-output requests while mapping only the checkpoint and thinking', () => {
+  const request = {
+    ...chat,
+    messages: [
+      { role: 'system', content: 'Use the supplied weather tool.' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'weather', arguments: '{}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call-1', content: 'sunny' },
+    ],
+    tools: [{ type: 'function', function: { name: 'weather', parameters: { type: 'object' } } }],
+    tool_choice: 'auto',
+    response_format: { type: 'json_schema', json_schema: { name: 'result', schema: { type: 'object' } } },
+    max_tokens: 64,
+    temperature: 0.25,
+    stream: true,
+  }
+  expect(
+    flmChatRequest(request, 'public', 'qwen3:0.6b', {
+      chat: true,
+      tools: true,
+      reasoning: true,
+      structured_output: true,
+    })
+  ).toEqual({ ...request, model: 'qwen3:0.6b', think: true })
+})

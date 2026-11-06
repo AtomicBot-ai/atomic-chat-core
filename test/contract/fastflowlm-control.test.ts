@@ -1,3 +1,4 @@
+import { installFakeBackend } from '../helpers/fake-backend-pack.js'
 import windowsXrt from '../fixtures/fastflowlm/windows-xrt-pci.json' with { type: 'json' }
 import { nodeLauncher } from '../helpers/engine-builds-mirror.js'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
@@ -220,7 +221,18 @@ describe('FLM control wire from the authenticated owner', () => {
       })
       const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken }),
         id = metadata.variant_id
+      const gpuPack = await installFakeBackend(data.layout, { gpu: true, backend: 'win-avx2-x64-cuda-cu12' })
+      await data.writeModel('gpu-model')
+      const gpu = await core.load('llamacpp-upstream', 'gpu-model', {
+        exePath: gpuPack.exePath,
+        versionBackend: gpuPack.versionBackend,
+        timeoutSecs: 5,
+      })
+      expect(core.runtime('llamacpp-upstream').gpuOccupancy?.()).toMatchObject([
+        { model_id: 'gpu-model', cards: 'all', state: 'ready' },
+      ])
       await core.load('fastflowlm', id, { timeoutSecs: 5 })
+      expect(core.runtime('llamacpp-upstream').list()[0]?.pid).toBe(gpu.pid)
       const { port } = await core.startPublicServer({ port: 0 })
       const response = await fetch('http://127.0.0.1:' + port + '/v1/chat/completions', {
         method: 'POST',
@@ -229,11 +241,24 @@ describe('FLM control wire from the authenticated owner', () => {
       })
       expect(response.status).toBe(200)
       expect(await response.json()).toMatchObject({ model: id, usage: { completion_tokens: 1 } })
+      // A duplicate load and maintenance compete for the same runtime lock. Either load wins
+      // before begin, or it observes the durable guard; neither may outlive ready_to_mutate.
+      const competingLoad = core.load('fastflowlm', id).catch((error: unknown) => error)
       const guard = await client.beginFastFlowLmMaintenance({
         request_id: 'rm-1',
         model_id: id,
         kind: 'remove',
       })
+      await competingLoad
+      expect(core.runtime('fastflowlm').list()).toEqual([])
+      expect(core.runtime('llamacpp-upstream').list()[0]?.pid).toBe(gpu.pid)
+      const gpuChat = await fetch('http://127.0.0.1:' + port + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpu-model', messages: [{ role: 'user', content: 'Still running?' }] }),
+      })
+      expect(gpuChat.status).toBe(200)
+      expect(await gpuChat.json()).toMatchObject({ choices: [{ message: { content: expect.any(String) } }] })
       expect(guard.ready_to_mutate).toBe(true)
       await expect(core.load('fastflowlm', id)).rejects.toMatchObject({ code: 'MANAGED_OPERATION_CONFLICT' })
       await rm(dir, { recursive: true })
