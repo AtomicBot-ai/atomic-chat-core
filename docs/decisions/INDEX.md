@@ -212,3 +212,6 @@ add a new one that says which record it supersedes.
 - [Import the shipped FastFlowLM chat catalog with editorial recommendations](2026-11-06-import-upstream-flm-catalog.md)
 
 - [Verify FLM content only during download](2026-11-06-verify-flm-content-only-on-download.md) — Keep payload SHA-256 in the installer and remove full-file reads from registry lookups and load preparation.
+- [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
+- [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
+- [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)
