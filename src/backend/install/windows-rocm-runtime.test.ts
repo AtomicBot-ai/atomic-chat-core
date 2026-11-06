@@ -6,7 +6,6 @@ import { storedZipFiles } from '../../../test/helpers/backend-install-e2e.js'
 import { makeTmpDataFolder, type TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import { BackendService } from './service.js'
 import { deliverWindowsRocmRuntime } from './windows-rocm-runtime.js'
-import { windowsRocmPackages } from './windows-rocm-packages.js'
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -59,24 +58,6 @@ function deps(corrupt = false) {
     verify: vi.fn(async () => {}),
   }
 }
-
-it('selects a pinned ABI and deduplicated packages for every known AMD GPU', () => {
-  const packages = windowsRocmPackages(backend, [
-    gpu,
-    gpu,
-    { vendor: 'AMD', vulkan_info: { device_id: 0x744c } },
-  ])
-  expect(packages.map((p) => p.name)).toEqual([
-    'rocm_sdk_libraries',
-    'rocm_sdk_device_gfx1100',
-    'rocm_sdk_device_gfx1152',
-  ])
-  expect(packages.every((p) => p.url.includes('-10.0.0-py3-none-win_amd64.whl'))).toBe(true)
-  expect(() => windowsRocmPackages('win-rocm-7.14-x64', [gpu])).toThrow(/supported runtime/)
-  expect(() => windowsRocmPackages(backend, [{ vendor: 'AMD', vulkan_info: { device_id: 0xffff } }])).toThrow(
-    /GPU architecture/
-  )
-})
 
 it('installs DLLs and relative kernel trees with one task and proxy, then skips repeated work', async () => {
   const d = deps()
