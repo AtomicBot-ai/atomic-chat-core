@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
-import { join } from 'node:path'
+import { posix } from 'node:path'
 import { promisify } from 'node:util'
 import { nodeProbeDeps } from '../../hardware/index.js'
 import { preparationHost, matchesNpuFirmware } from '../../runtime/fastflowlm/environment/index.js'
@@ -114,8 +114,9 @@ export async function installLinuxNpu(t: LinuxNpuTarget, deps: Deps, io = native
         )
     }
     if (t.mode.endsWith('-service')) {
-      const base = t.mode === 'user-service' ? join(home, '.config/systemd/user') : '/etc/systemd/system'
-      limitFile = join(base, unit + '.d', '60-atomic-npu.conf')
+      const base =
+        t.mode === 'user-service' ? posix.join(home, '.config/systemd/user') : '/etc/systemd/system'
+      limitFile = posix.join(base, unit + '.d', '60-atomic-npu.conf')
       limitText = '[Service]\nLimitMEMLOCK=' + t.recipe.memlock_bytes + '\n'
     } else {
       limitFile = '/etc/security/limits.d/90-atomic-npu-' + uid + '.conf'
@@ -219,7 +220,7 @@ export async function installLinuxNpu(t: LinuxNpuTarget, deps: Deps, io = native
     }
     if (limitFile) {
       if (!sameLimit && t.mode === 'user-service') {
-        const config = join(stage, 'user-limit.conf')
+        const config = posix.join(stage, 'user-limit.conf')
         await writeFile(config, limitText, { mode: 0o644, flag: 'wx' })
         await chmod(config, 0o644)
         await asUser('/usr/bin/install', '-D', '-m', '0644', config, limitFile)

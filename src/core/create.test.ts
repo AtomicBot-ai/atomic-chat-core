@@ -2630,6 +2630,7 @@ it.skipIf(process.platform === 'win32')(
       platform: 'linux',
       foundryLocalHost: { arch: 'x64', glibcVersion: '2.39' },
       env: { ATOMIC_FASTFLOWLM_MANIFEST_URL: pathToFileURL(manifest).href },
+      hardware: { fastFlowLm: { fs: linuxFastFlowLmPci() } },
       fetch: async (input) => {
         if (String(input) !== asset.url) return new Response(null, { status: 404 })
         downloads.push(String(input))

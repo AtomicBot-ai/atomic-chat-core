@@ -43,7 +43,10 @@ it('the compiled host helper refuses a substituted Windows NPU package before to
         ['-NoProfile', '-NonInteractive', '-Command', secure],
         {
           env: {
-            ...process.env,
+            SystemRoot: process.env.SystemRoot,
+            PATH: join(process.env.SystemRoot!, 'System32'),
+            TEMP: tmpdir(),
+            TMP: tmpdir(),
             // Hosted runners start in PowerShell 7; Windows PowerShell must load its own modules.
             PSModulePath: join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
             STEP_DIR: directory,
