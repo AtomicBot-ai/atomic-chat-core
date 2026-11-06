@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-06 — Wait for FLM cancellation within one deadline](2026-11-06-wait-for-flm-cancellation-within-one-deadline.md)
+
 - [2026-11-05 — Limit Ubuntu NPU installation to the approved transaction](2026-11-05-limit-ubuntu-npu-installation-to-the-approved-transaction.md)
 
 - [2026-11-05 — Offer the upstream Linux x64 ROCm build](2026-11-05-offer-upstream-linux-rocm.md)

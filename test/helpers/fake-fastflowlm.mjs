@@ -35,7 +35,11 @@ const server = createServer(async (req, res) => {
     stuck = text === 'hang'
     busy = true
     res.once('close', () => {
-      if (!stuck) busy = false
+      // The native handler can take time to observe the closed socket and release the NPU.
+      if (!stuck)
+        setTimeout(() => {
+          busy = false
+        }, 200)
     })
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' })

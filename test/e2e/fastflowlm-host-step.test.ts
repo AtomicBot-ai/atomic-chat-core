@@ -35,9 +35,11 @@ it(
  $ErrorActionPreference='Stop'
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
  foreach ($p in @($env:STEP_DIR,$env:STEP_FILE)) {
-   $a=Get-Acl -LiteralPath $p
+   if ([IO.Directory]::Exists($p)) { $item=[IO.DirectoryInfo]::new($p) }
+   else { $item=[IO.FileInfo]::new($p) }
+   $a=$item.GetAccessControl()
    $a.SetSecurityDescriptorSddlForm("O:$($sid)D:P(A;;FA;;;$($sid))(A;;FA;;;SY)(A;;FA;;;BA)")
-   Set-Acl -LiteralPath $p -AclObject $a
+   $item.SetAccessControl($a)
  }
  `
         const acl = spawnSync(

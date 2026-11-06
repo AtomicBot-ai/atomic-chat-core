@@ -1,6 +1,7 @@
 import { ownedFlmPath } from './owned-path.js'
 import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, win32 } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import {
   AtomicCoreError,
   type FastFlowLmAccelerators,
@@ -312,18 +313,25 @@ export class FastFlowLmRuntime implements LocalRuntime {
       // This invalid chat takes the same native generation lock and returns before inference.
       // Receiving its precise local-only rejection proves the previous handler released that lock.
       try {
-        const response = await fetch(url + '/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-          redirect: 'error',
-          signal: AbortSignal.timeout(3000),
-        })
-        if (
-          response.status === 400 &&
-          ((await response.json()) as { error?: unknown }).error === 'invalid_local_request'
-        )
-          return
+        const signal = AbortSignal.timeout(3000)
+        while (!signal.aborted) {
+          const response = await fetch(url + '/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+            redirect: 'error',
+            signal,
+          })
+          if (response.status === 400) {
+            if (((await response.json()) as { error?: unknown }).error === 'invalid_local_request') return
+            break
+          }
+          await response.body?.cancel()
+          if (response.status !== 503) break
+          // The probe may beat the worker's disconnect handler. Keep the queue held while busy,
+          // using one deadline for all attempts rather than restarting the cancellation budget.
+          await delay(50, undefined, { signal })
+        }
       } catch {
         /* The native worker failed to acknowledge cancellation. */
       }
