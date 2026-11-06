@@ -39,19 +39,20 @@ export function parseFastFlowLmDefinition(
       d.name.trim() &&
       typeof d.license === 'string' &&
       d.license.trim() &&
-      typeof d.gated === 'boolean',
+      typeof d.gated === 'boolean' &&
+      (d.recommended === undefined || typeof d.recommended === 'boolean'),
     'metadata'
   )
   const q = d.qualification
   check(
     record(q) &&
-      (q.status === 'qualified' || q.status === 'candidate') &&
+      (q.status === 'qualified' || q.status === 'upstream' || q.status === 'candidate') &&
       Array.isArray(q.evidence) &&
       q.evidence.every((v) => matches(v, /^https:\/\//)) &&
       (q.status === 'candidate' || q.evidence.length > 0),
     'qualification'
   )
-  check(q.status === 'qualified' || options.allowCandidates === true, 'unqualified candidate')
+  check(q.status !== 'candidate' || options.allowCandidates === true, 'unqualified candidate')
   const paths = new Map(descriptor.files.map((f) => [f.path.toLowerCase(), f.path]))
   check(record(d.components), 'components')
   const covered = new Set<string>()

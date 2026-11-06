@@ -5,7 +5,12 @@
  */
 
 import { lstat } from 'node:fs/promises'
-import { FastFlowLmRuntime, FlmMaintenance, ownedFlmPath } from '../runtime/fastflowlm/index.js'
+import {
+  FastFlowLmRuntime,
+  FlmMaintenance,
+  ownedFlmPath,
+  createFlmProbe,
+} from '../runtime/fastflowlm/index.js'
 import { randomUUID } from 'node:crypto'
 import { homedir, release as osRelease, totalmem } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -290,8 +295,8 @@ export async function createAtomicCore(
         emit: (name, payload) => emitter.emit(name, payload),
         readSettings: () =>
           readRuntimeSettings(settings, provider, layout, cudaGuard.facts(provider, hardware)),
-        ensureBackendReady: (backend, version) =>
-          cudaGuard.ensureBackend(
+        ensureBackendReady: async (backend, version) => {
+          const ready = await cudaGuard.ensureBackend(
             layout,
             provider,
             backend,
@@ -302,7 +307,10 @@ export async function createAtomicCore(
             // runtime; a rejection is what makes the guard pick another pack.
             (repairBackend, repairVersion) =>
               backendService(provider).repairCudaRuntime(repairVersion, repairBackend)
-          ),
+          )
+          await backendService(provider).repairRocmRuntime(ready.version, ready.backend)
+          return ready
+        },
         // A GPU build this card or driver cannot run (CUDA 13 on Turing before R616, a pack Windows
         // cannot load) is remembered and the load is retried once on the next installed build.
         backendFallback: (failed, reason) =>
@@ -687,6 +695,7 @@ export async function createAtomicCore(
       const existing = backendServices.get(provider)
       if (existing) return existing
       const created = new BackendService({
+        readGpus: async () => (await hardware.facts()).gpus,
         onFailure,
         layout,
         provider,
@@ -796,7 +805,7 @@ export async function createAtomicCore(
         desktop: options.ownerScope === 'app',
       })
     }
-    const flmProbe = () => flmBuildLock.run(inspectNpu)
+    const flmProbe = createFlmProbe(flmBuildLock, inspectNpu)
     const flmPaths = layout.provider('fastflowlm')
     const fastFlowLmMaintenance: FlmMaintenance = new FlmMaintenance(
       join(flmPaths.runtimeDir!, 'maintenance'),
@@ -812,8 +821,9 @@ export async function createAtomicCore(
       },
       async (op) => {
         const path = join(flmModels.modelsDir, op.model_id)
+        // Only a first installation can roll back to absence; replacement of an existing model stays guarded.
         if (
-          op.kind === 'remove' &&
+          (op.kind === 'remove' || op.initially_absent === true) &&
           !(await lstat(path).catch((e: NodeJS.ErrnoException) => {
             if (e.code === 'ENOENT') return null
             throw e
@@ -822,7 +832,12 @@ export async function createAtomicCore(
           return
         await flmModels.get(op.model_id)
       },
-      layout.root
+      layout.root,
+      async (id) =>
+        !(await lstat(join(flmModels.modelsDir, id)).catch((e: NodeJS.ErrnoException) => {
+          if (e.code === 'ENOENT') return null
+          throw e
+        }))
     )
     const flmRuntime: FastFlowLmRuntime | undefined = flmHost.platform
       ? new FastFlowLmRuntime({
@@ -922,6 +937,7 @@ export async function createAtomicCore(
     const flmPreparation = async (pinned?: FlmManifest, pinnedBuild?: string | null) => {
       const facts = await flmProbe()
       const plan = await probePreparation(facts, platform, foundryLocalArch, {
+        pinned: pinned !== undefined,
         host: () => preparationHost(flmDeps, nativeHostFacts.osRelease),
         manifest: () => (pinned ? Promise.resolve(pinned) : flmEnvironment.latest()),
         selectedBuild: async () => {

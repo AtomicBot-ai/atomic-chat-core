@@ -90,6 +90,9 @@ export function gpuInfoFromProbe(gpu: GpuProbeInfo, index: number): GpuInfo {
   return {
     name: typeof extra.name === 'string' ? extra.name : `GPU ${index}`,
     total_memory: typeof gpu.total_memory === 'number' ? gpu.total_memory : 0,
+    ...(typeof gpu.shared_memory === 'number' && Number.isFinite(gpu.shared_memory) && gpu.shared_memory > 0
+      ? { shared_memory: gpu.shared_memory }
+      : {}),
     vendor: typeof gpu.vendor === 'string' ? gpu.vendor : 'Unknown (vendor_id: 0)',
     uuid: typeof extra.uuid === 'string' ? extra.uuid : `override-${index}`,
     driver_version: gpu.driver_version ?? '',

@@ -596,6 +596,7 @@ describe('managed environment wire shapes', () => {
       'linux.install-container-runtime',
       'windows.enable-wsl',
       'linux.install-amd-npu',
+      'linux.configure-runtime-memlock',
       'windows.install-amd-npu',
     ])
     // The Windows causes a client switches on (change `add-tensorrt-llm-windows`); the app relays them.

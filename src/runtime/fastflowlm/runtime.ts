@@ -1,3 +1,4 @@
+import { flmLaunchSettings } from './launch-settings.js'
 import { ownedFlmPath } from './owned-path.js'
 import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { dirname, isAbsolute, join, win32 } from 'node:path'
@@ -171,10 +172,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
       )
     throwIfLoadCancelled(opts.signal)
     const settings = { ...(await this.options.settings()), ...opts.overrides }
-    const context = Math.min(
-      metadata.context_length,
-      Number(settings.ctx_len) > 0 ? Math.floor(Number(settings.ctx_len)) : metadata.context_length
-    )
+    const launch = flmLaunchSettings(settings, metadata.context_length)
     const timeout = opts.timeoutSecs ?? (Number(settings.timeout) > 0 ? Number(settings.timeout) : 600)
     await ownedFlmPath(this.options.dataRoot, this.options.cache)
     await mkdir(this.options.cache, { recursive: true, mode: 0o700 })
@@ -186,7 +184,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
         join(cache, 'xclbins', id),
         this.options.platform === 'win32' ? 'junction' : 'dir'
       )
-      return await this.launch(model, build.dir, cache, context, timeout, opts)
+      return await this.launch(model, build.dir, cache, launch, timeout, opts)
     } catch (error) {
       await rm(cache, { recursive: true, force: true })
       throw error
@@ -196,7 +194,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
     model: Installed,
     build: string,
     cache: string,
-    context: number,
+    launch: ReturnType<typeof flmLaunchSettings>,
     timeout: number,
     opts: LocalLoadOptions
   ): Promise<SessionInfo> {
@@ -239,8 +237,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
               '127.0.0.1',
               '--port',
               String(port),
-              '--ctx-len',
-              String(context),
+              ...launch.args,
               '--backend',
               'flm',
             ],
@@ -375,7 +372,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
           },
           process,
           exe,
-          extra: { metadata, context, gateway },
+          extra: { metadata, context: launch.context, gateway },
         },
         opts.signal
       )

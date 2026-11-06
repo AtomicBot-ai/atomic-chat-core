@@ -2,6 +2,7 @@ import { win32 } from 'node:path'
 import type { ProbeDeps } from '../../../hardware/index.js'
 import { parseOsRelease } from '../../environment/index.js'
 import type { PreparationHost } from './plan.js'
+import { runtimeProcess } from './memlock.js'
 
 /** Only the running host can supply the distribution, kernel and workstation identity. */
 export async function preparationHost(deps: ProbeDeps, release: string): Promise<PreparationHost> {
@@ -37,6 +38,11 @@ export async function preparationHost(deps: ProbeDeps, release: string): Promise
     if (r?.code === 0 && r.stdout.trim() === '1') host.version = '11'
   }
   if (os === 'linux') {
+    const owner = runtimeProcess(
+      await deps.fs.readFile('/proc/self/stat').catch(() => ''),
+      await deps.fs.readFile('/proc/sys/kernel/random/boot_id').catch(() => '')
+    )
+    if (owner) host.process = owner
     const [info, mounts, ostree] = await Promise.all([
       deps.fs.readFile('/etc/os-release').catch(() => null),
       deps.fs.readFile('/proc/self/mountinfo').catch(() => ''),

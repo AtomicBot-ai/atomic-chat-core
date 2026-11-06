@@ -61,7 +61,7 @@ it('resolves the one committed installation and its launch inputs without networ
 it.each([
   'missing marker',
   'missing kernel',
-  'same-size corrupt weights',
+  'wrong weight size',
   'foreign file',
   'wrong model_path',
   'double models',
@@ -77,8 +77,8 @@ it.each([
     case 'missing kernel':
       await rm(join(dir, 'attn.xclbin'))
       break
-    case 'same-size corrupt weights':
-      await writeFile(join(dir, 'model.q4nx'), 'model.Q4NX')
+    case 'wrong weight size':
+      await writeFile(join(dir, 'model.q4nx'), 'short')
       break
     case 'foreign file':
       await writeFile(join(dir, 'unplanned.xclbin'), 'x')
@@ -165,4 +165,28 @@ it('distinguishes an absent model after removal from a partial installation on l
   await expect(registry.forLoad(fixture.metadata.variant_id)).rejects.toMatchObject({
     code: 'FASTFLOWLM_INVALID_INSTALLATION',
   })
+})
+
+it('releases verified file handles before the client publishes or removes the installation', async () => {
+  await registry.get(fixture.metadata.variant_id)
+  const moved = fixture.dir + '-published'
+  await rename(fixture.dir, moved)
+  await rename(moved, fixture.dir)
+  await registry.get(fixture.metadata.variant_id)
+  await rm(fixture.dir, { recursive: true })
+})
+
+// Integrity belongs to the downloader; browsing and loading only inspect installation metadata.
+it('does not rehash installed payloads during lookup, listing, checks or load preparation', async () => {
+  const { dir, metadata } = fixture
+  for (const file of metadata.files) {
+    if (file.path !== 'config.json') await writeFile(join(dir, file.path), Buffer.alloc(file.size, 33))
+  }
+  const config = join(dir, 'config.json')
+  await writeFile(config, (await readFile(config, 'utf8')).replace('40960', '40961'))
+  const model = await registry.get(metadata.variant_id)
+  expect((await registry.forLoad(metadata.variant_id)).id).toBe(model.id)
+  expect((await registry.byPath(dir)).id).toBe(model.id)
+  expect((await registry.scan()).skipped).toEqual([])
+  expect((await registry.list()).map((entry) => entry.id)).toEqual([model.id])
 })

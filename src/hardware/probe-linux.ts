@@ -21,7 +21,7 @@ export async function probeLinux(deps: ProbeDeps): Promise<HardwareProbeResult> 
   const [cpuinfo, osRelease, drm, icd, nvidia, vulkan] = await Promise.allSettled([
     deps.fs.readFile('/proc/cpuinfo'),
     deps.fs.readFile('/etc/os-release'),
-    scanDrm(deps),
+    scanDrm(deps, common.totalMemoryMiB),
     scanIcdDirs(deps),
     runNvidiaSmi(deps),
     runVulkaninfo(deps),
@@ -80,22 +80,40 @@ export function prettyName(osRelease: string): string | undefined {
 }
 
 /** Every `card<N>` under `/sys/class/drm` that has a readable PCI vendor and device id. */
-async function scanDrm(deps: ProbeDeps): Promise<SysfsGpu[]> {
+async function scanDrm(deps: ProbeDeps, systemMemoryMiB: number): Promise<SysfsGpu[]> {
   const nodes = (await deps.fs.readdir(DRM_DIR)).filter(isCardNode).sort(byCardNumber)
   const gpus: SysfsGpu[] = []
   for (const card of nodes) {
     const device = `${DRM_DIR}/${card}/device`
-    const [vendor, deviceId, vramTotal, bootVga, deviceLink, driverLink] = await Promise.all([
+    const [
+      vendor,
+      deviceId,
+      vramTotal,
+      bootVga,
+      deviceLink,
+      driverLink,
+      gttTotal,
+      gcMajor,
+      gcMinor,
+      gcRevision,
+    ] = await Promise.all([
       deps.fs.readFile(`${device}/vendor`).catch(() => undefined),
       deps.fs.readFile(`${device}/device`).catch(() => undefined),
       deps.fs.readFile(`${device}/mem_info_vram_total`).catch(() => undefined),
       deps.fs.readFile(`${device}/boot_vga`).catch(() => undefined),
       deps.fs.readlink(device).catch(() => undefined),
       deps.fs.readlink(`${device}/driver`).catch(() => undefined),
+      deps.fs.readFile(`${device}/mem_info_gtt_total`).catch(() => undefined),
+      ...['major', 'minor', 'revision'].map((part) =>
+        deps.fs.readFile(`${device}/ip_discovery/die/0/GC/0/${part}`).catch(() => undefined)
+      ),
     ])
     if (vendor === undefined || deviceId === undefined) continue // a virtual or platform device
     const gpu = sysfsGpuFromFiles({
       card,
+      systemMemoryMiB,
+      ...(gttTotal !== undefined ? { gttTotal } : {}),
+      graphicsVersion: [gcMajor, gcMinor, gcRevision].map((v) => v?.trim() ?? '').join('.'),
       vendor,
       device: deviceId,
       ...(vramTotal !== undefined ? { vramTotal } : {}),

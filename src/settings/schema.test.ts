@@ -60,7 +60,7 @@ describe('settingsSchema', () => {
     ['foundry-local', 1],
     ['litert-lm', 3],
     ['geniex', 4],
-    ['fastflowlm', 2],
+    ['fastflowlm', 7],
   ])('%s has %i descriptors (PLAN.md §8.1)', (provider, count) => {
     expect(settingsSchema(provider)).toHaveLength(count)
   })

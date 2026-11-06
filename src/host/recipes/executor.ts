@@ -14,6 +14,8 @@
  * This file never touches the file system, the network or a process itself.
  */
 
+import { linuxMemlockTarget } from './linux-memlock.js'
+import type { LinuxMemlockStepParameters } from '../../contracts/index.js'
 import { linuxNpuTarget, type LinuxNpuTarget } from './linux-amd-npu.js'
 import { npuRequestTarget } from './windows-amd-npu.js'
 import { createHash } from 'node:crypto'
@@ -51,6 +53,7 @@ export interface HostCommandOutput {
 }
 
 export interface HostStepExecutorDeps {
+  configureRuntimeMemlock?: (target: LinuxMemlockStepParameters) => Promise<void>
   installLinuxNpu?: (
     target: LinuxNpuTarget
   ) => Promise<'completed' | 'reboot-required' | 'relogin-required' | 'service-restart-required'>
@@ -628,7 +631,8 @@ async function execute(
   if (
     launchDigest !== undefined ||
     request.action === 'windows.install-amd-npu' ||
-    request.action === 'linux.install-amd-npu'
+    request.action === 'linux.install-amd-npu' ||
+    request.action === 'linux.configure-runtime-memlock'
   ) {
     if (createHash('sha256').update(text, 'utf8').digest('hex') !== launchDigest)
       return refuse('The request does not match the pre-elevation launch digest.')
@@ -636,6 +640,32 @@ async function execute(
   // A request copied or renamed into another step's slot would otherwise report under that step.
   if (fileName !== `${request.step_id}.request.json`)
     return refuse(`step_id ${request.step_id} does not match the request file name ${fileName}`)
+  if (request.action === 'linux.configure-runtime-memlock') {
+    const target = linuxMemlockTarget(request)
+    if (!target || !deps.configureRuntimeMemlock)
+      return refuse('Unsupported runtime memory target or policy digest.')
+    const receipt = {
+      schema_version: 1 as const,
+      ...echo,
+      step_id: request.step_id,
+      error_code: null,
+      operation_id: request.operation_id,
+      expected_operation_revision: request.expected_operation_revision,
+      finished_at: deps.now(),
+      steps: [],
+    }
+    try {
+      await deps.configureRuntimeMemlock(target)
+      return {
+        ...receipt,
+        outcome: 'completed',
+        exit_code: 0,
+        log_tail: 'Runtime memory limit applied and saved. Verify NPU readiness as the server account.',
+      }
+    } catch (error) {
+      return { ...receipt, outcome: 'failed', exit_code: null, log_tail: tail((error as Error).message) }
+    }
+  }
   if (request.action === 'linux.install-amd-npu') {
     const target = linuxNpuTarget(request)
     if (!target || !deps.installLinuxNpu)

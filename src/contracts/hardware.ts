@@ -25,6 +25,8 @@ export interface GpuProbeInfo {
   vendor?: string | null
   /** MiB. */
   total_memory?: number
+  /** MiB of measured GPU-accessible system memory on a confirmed Linux AMD APU; not extra VRAM. */
+  shared_memory?: number
   nvidia_info?: {
     /** NVML `"major.minor"`, e.g. `"7.5"`; empty when NVML did not report it. */
     compute_capability?: string
@@ -110,6 +112,8 @@ export interface GpuInfo {
   name: string
   /** MiB. */
   total_memory: number
+  /** MiB of GPU-accessible system RAM (GTT), capped by host RAM; do not add to system memory. */
+  shared_memory?: number
   /** `"NVIDIA" | "AMD" | "Intel" | "Unknown (vendor_id: N)"`. */
   vendor: string
   /** NVIDIA: the NVML uuid without `GPU-`; others: an opaque stable id (PCI bus id / PNP instance). */

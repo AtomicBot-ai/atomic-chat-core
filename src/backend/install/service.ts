@@ -1,3 +1,5 @@
+import { deliverWindowsRocmRuntime } from './windows-rocm-runtime.js'
+import type { GpuProbeInfo } from '../../contracts/index.js'
 import type { FailureDiagnostic, FailureObserver } from '../../contracts/index.js'
 import { withLoadDiag } from '../../contracts/index.js'
 /**
@@ -300,6 +302,10 @@ export function backendExeName(osType: string): string {
 
 export interface BackendServiceDeps {
   onFailure?: FailureObserver
+  /** Hardware-owned PCI facts used to choose AMD's architecture-specific runtime kernels. */
+  readGpus?: () => Promise<readonly GpuProbeInfo[]>
+  /** Test seam for the HIP plugin check after delivering its runtime. */
+  verifyRocmBackend?: (packDir: string) => Promise<void>
 
   layout: DataLayout
   provider: LocalProviderId
@@ -492,6 +498,63 @@ export class BackendService {
    * downloaded again, because the updater screen calls this for every row it offers and a user
    * clicking twice should not re-fetch half a gigabyte.
    */
+  private readonly rocmRepairs = new Map<string, Promise<void>>()
+
+  /** Repair older installs before load; never let the CUDA fallback guard swallow a HIP error. */
+  async repairRocmRuntime(version: string, backend: string, options?: InstallBackendOptions): Promise<void> {
+    if (
+      (this.deps.platform ?? process.platform) !== 'win32' ||
+      this.deps.provider !== 'llamacpp-upstream' ||
+      !backend.startsWith('win-rocm-')
+    )
+      return
+    const key = `${version}/${backend}`
+    const pending = this.rocmRepairs.get(key)
+    if (pending) return pending
+    const packDir = getBackendDir(this.deps.layout.provider(this.deps.provider), backend, version)
+    const work = this.deliverRocm(
+      packDir,
+      backend,
+      options?.taskId ?? `rocm-runtime-${key}`,
+      options?.proxy,
+      async () => {
+        if (await this.inUse(version, backend))
+          throw new AtomicCoreError(
+            'BACKEND_IN_USE',
+            'Unload models using this ROCm build before repairing its runtime.'
+          )
+      }
+    )
+    this.rocmRepairs.set(key, work)
+    try {
+      await work
+    } finally {
+      this.rocmRepairs.delete(key)
+    }
+  }
+
+  private async deliverRocm(
+    packDir: string,
+    backend: string,
+    taskId: string,
+    proxy?: ProxyConfig | null,
+    beforeWrite?: () => Promise<void>
+  ): Promise<void> {
+    if (this.deps.provider !== 'llamacpp-upstream' || !backend.startsWith('win-rocm-')) return
+    await deliverWindowsRocmRuntime(
+      { provider: this.deps.provider, backend, packDir },
+      {
+        gpus: (await this.deps.readGpus?.()) ?? [],
+        downloader: this.deps.downloader,
+        taskId,
+        ...(proxy ? { proxy } : {}),
+        ...(beforeWrite ? { beforeWrite } : {}),
+        ...(this.deps.env ? { env: this.deps.env } : {}),
+        ...(this.deps.verifyRocmBackend ? { verify: this.deps.verifyRocmBackend } : {}),
+      }
+    )
+  }
+
   /**
    * Before a load: make an installed Windows CUDA pack carry its whole CUDA runtime. The provider's
    * own repair runs first (its companion, as it always did); whatever it could not supply comes from
@@ -557,6 +620,7 @@ export class BackendService {
     }
     const target = getBackendDir(this.deps.layout.provider(this.deps.provider), backend, version)
     if (!options.force && (await this.isInstalled(version, backend))) {
+      await this.repairRocmRuntime(version, backend, options)
       return { version, backend, installed: false, path: target }
     }
 
@@ -647,6 +711,7 @@ export class BackendService {
           )
         }
       } else if (platform === 'win32') {
+        await this.deliverRocm(staging, backend, options.taskId, options.proxy)
         // A Windows CUDA pack is only installed with its whole CUDA runtime beside it: without cudart or
         // cuBLAS, ggml-cuda.dll does not load and the "CUDA" pack quietly runs on the CPU. `--version`
         // does not load the CUDA backend, so the launch check below cannot see this. What the archive

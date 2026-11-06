@@ -18,6 +18,8 @@ import { FastFlowLmRuntime } from './runtime.js'
 let root: string, cache: string, id: string, runtime: FastFlowLmRuntime, journal: ProcessJournal
 let takeFirstPort = false
 let deviceBusy = false
+let launchValues: Record<string, unknown> = {}
+let launchArgs: string[] = []
 const events: string[] = []
 beforeEach(async () => {
   root = await realpath(await mkdtemp(join(tmpdir(), 'flm-runtime-')))
@@ -29,6 +31,8 @@ beforeEach(async () => {
   events.length = 0
   takeFirstPort = false
   deviceBusy = false
+  launchValues = {}
+  launchArgs = []
   runtime = new FastFlowLmRuntime({
     registry: new FastFlowLmRegistry(layout),
     cache,
@@ -43,13 +47,14 @@ beforeEach(async () => {
       PATH: '/untrusted/bin',
     },
     trustedHosts: [],
-    settings: async () => ({}),
+    settings: async () => launchValues,
     resolveBuild: async () => ({ tag: flmBuild, dir: join(root, 'build') }),
     probe: async () => flmFacts(deviceBusy ? ['device-busy'] : []),
     assertLoadable: async () => {},
     lock: new AsyncMutex(),
     emit: (name) => events.push(name),
     spawn: (spec, opts) => {
+      launchArgs = [...spec.args]
       expect(spec.exe).toBe(join(root, 'build', 'flm-real'))
       expect(spec.env).toMatchObject({ PATH: '/usr/bin:/bin' })
       for (const key of ['HF_TOKEN', 'OPENAI_API_KEY', 'FLM_BACKEND'])
@@ -72,8 +77,8 @@ afterEach(async () => {
   await runtime.shutdown()
   await rm(root, { recursive: true, force: true })
 })
-async function load(modelId = id) {
-  const pending = runtime.load(modelId, { timeoutSecs: 10 })
+async function load(modelId = id, overrides: Record<string, unknown> = {}) {
+  const pending = runtime.load(modelId, { timeoutSecs: 10, overrides })
   let dir = ''
   await vi.waitFor(
     async () => {
@@ -297,4 +302,33 @@ it('does not stop an unproven PID or grant mutation while its previous session m
   await expect(runtime.unload(id)).rejects.toMatchObject({ code: 'FASTFLOWLM_DEVICE_BUSY' })
   await expect(runtime.load(id)).rejects.toMatchObject({ code: 'FASTFLOWLM_DEVICE_BUSY' })
   expect(journal.list()).toHaveLength(1)
+})
+
+it('passes FastFlowLM launch settings and per-load overrides, reporting the effective context', async () => {
+  launchValues = {
+    ctx_len: 8000,
+    pmode: 'performance',
+    prefill_chunk_len: 5000,
+    prefix_cache_mb: 1024,
+    prefix_slots: 0,
+    prefix_min_gain: 0,
+  }
+  await load(id, { pmode: 'balanced' })
+  expect(launchArgs).toEqual(
+    expect.arrayContaining([
+      '--ctx-len',
+      '8192',
+      '--pmode',
+      'balanced',
+      '--prefill-chunk-len',
+      '8192',
+      '--prefix-cache-mb',
+      '1024',
+      '--prefix-slots',
+      '0',
+      '--prefix-min-gain',
+      '0',
+    ])
+  )
+  expect(runtime.routePolicy(id)?.contextLength).toBe(8192)
 })

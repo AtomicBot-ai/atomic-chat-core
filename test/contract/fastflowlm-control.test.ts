@@ -1,7 +1,7 @@
 import { installFakeBackend } from '../helpers/fake-backend-pack.js'
 import windowsXrt from '../fixtures/fastflowlm/windows-xrt-pci.json' with { type: 'json' }
 import { nodeLauncher } from '../helpers/engine-builds-mirror.js'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, expectTypeOf, it } from 'vitest'
@@ -113,47 +113,65 @@ describe('FLM control wire from the authenticated owner', () => {
     })
     const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
     expect(await client.fastFlowLmAccelerators()).toEqual(wire.accelerators)
-    expect(await client.probeFastFlowLm()).toMatchObject({
+    const manual = {
       status: 'blocked',
-      blockers: expect.arrayContaining(['manifest-unavailable']),
-    })
-    await writeFile(environment, JSON.stringify(windowsManifest()))
-    expect(await client.probeFastFlowLm()).toMatchObject({
-      status: 'action-required',
-      runtime_account: wire.accelerators.runtime_account,
-      engine_version: 'flm-1.0.11-r2',
-      changes: [{ code: 'install-driver' }],
-    })
-    expect((await client.fastFlowLmAccelerators()).automatic_repair_available).toBe(true)
-    const request = { request_id: 'windows-driver' }
-    const operation = await client.beginFastFlowLmOperation(request)
-    const id = operation.operation_id
-    expect(await client.beginFastFlowLmOperation(request)).toEqual(operation)
-    expect(await client.fastFlowLmOperations()).toEqual([operation])
-    const approved = await client.consentFastFlowLmOperation(id, {
-      expected_revision: operation.revision,
-      approved_plan_digest: operation.plan.plan_digest,
-    })
-    const claimed = await client.claimFastFlowLmHostStep(id, approved.revision)
-    const step = claimed.pending_host_step!
-    expect(await client.fastFlowLmOperation(id)).toEqual(claimed)
-    await client.cancelFastFlowLmOperation(id)
-    const receipt = {
-      receipt_id: 'declined',
-      nonce: step.nonce,
-      step_id: step.step_id,
-      expected_operation_revision: step.expected_operation_revision,
-      recipe_digest: step.recipe_digest,
-      parameters_digest: step.parameters_digest,
-      outcome: 'declined' as const,
+      packages: [],
+      changes: [],
+      recipe_id: null,
+      blockers: expect.arrayContaining(['driver-missing']),
+      driver_setup: {
+        commands: [],
+        links: [
+          { label: 'AMD driver downloads', url: 'https://www.amd.com/en/support/download/drivers.html' },
+        ],
+      },
     }
-    const cancelled = await client.submitFastFlowLmHostReceipt(id, receipt)
-    expect(cancelled.state).toBe('cancelled')
-    expect(await client.resumeFastFlowLmOperation(id, cancelled.revision)).toEqual(cancelled)
-    await expect(client.submitFastFlowLmHostReceipt(id, receipt)).rejects.toMatchObject({
-      code: 'MANAGED_RECEIPT_CONFLICT',
+    expect(await client.probeFastFlowLm()).toMatchObject(manual)
+    await writeFile(environment, JSON.stringify(windowsManifest()))
+    expect(await client.probeFastFlowLm()).toMatchObject(manual)
+    expect((await client.fastFlowLmAccelerators()).automatic_repair_available).toBe(false)
+    const operation = await client.beginFastFlowLmOperation({ request_id: 'windows-driver' })
+    expect(operation).toMatchObject({
+      state: 'failed',
+      pending_host_step: null,
+      plan: { packages: [], changes: [] },
     })
+    expect(await client.fastFlowLmOperations()).toEqual([operation])
+
+    // A previous release may have already approved a driver operation before this policy changed.
+    const journal = join(data.root, 'fastflowlm/runtime/operations', operation.operation_id + '.json')
+    const saved = JSON.parse(await readFile(journal, 'utf8'))
+    saved.record.approvedManifest = windowsManifest()
+    saved.record.build = 'flm-1.0.11-r2'
+    saved.record.operation.plan.manifest_digest = canonicalDigest(saved.record.approvedManifest)
+    saved.record.operation.plan.recipe_digest = canonicalDigest(saved.record.approvedManifest.recipes[0])
+    await writeFile(journal, JSON.stringify({ ...saved, digest: canonicalDigest(saved.record) }))
+    const resumed = await client.resumeFastFlowLmOperation(operation.operation_id, operation.revision)
+    expect(resumed.state).toBe('awaiting-consent')
+    expect(resumed.plan.packages[0]?.version).toBe('32.0.203.314')
+    const approved = await client.consentFastFlowLmOperation(resumed.operation_id, {
+      expected_revision: resumed.revision,
+      approved_plan_digest: resumed.plan.plan_digest,
+    })
+    const claimed = await client.claimFastFlowLmHostStep(approved.operation_id, approved.revision)
+    expect(claimed.pending_host_step?.action).toBe('windows.install-amd-npu')
+    const step = claimed.pending_host_step!
+    await client.cancelFastFlowLmOperation(claimed.operation_id)
+    expect(
+      (
+        await client.submitFastFlowLmHostReceipt(claimed.operation_id, {
+          receipt_id: 'declined',
+          nonce: step.nonce,
+          step_id: step.step_id,
+          expected_operation_revision: step.expected_operation_revision,
+          recipe_digest: step.recipe_digest,
+          parameters_digest: step.parameters_digest,
+          outcome: 'declined',
+        })
+      ).state
+    ).toBe('cancelled')
   })
+
   it.skipIf(process.platform === 'win32')(
     'routes public chat to the installed checkpoint and blocks load until client removal completes',
     async () => {
@@ -431,7 +449,9 @@ it('carries consent, receipt and maintenance recovery through the SDK without ch
   expect(step.expected_operation_revision).toBe(consented.revision)
   expect(step.parameters_digest).toBe(canonicalDigest(step.parameters))
   expect(step.recipe_digest).toBe(consented.plan.recipe_digest)
-  expect(step.parameters.manifest_digest).toBe(consented.plan.manifest_digest)
+  expect('manifest_digest' in step.parameters ? step.parameters.manifest_digest : null).toBe(
+    consented.plan.manifest_digest
+  )
   const receipt: ManagedHostReceipt = {
     step_id: step.step_id,
     nonce: step.nonce,

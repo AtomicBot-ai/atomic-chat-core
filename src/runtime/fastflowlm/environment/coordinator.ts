@@ -12,6 +12,7 @@ import {
 import { AsyncMutex } from '../../../diffusion/index.js'
 import { canonicalDigest } from '../../environment/index.js'
 import type { FlmManifest } from './manifest.js'
+import { RUNTIME_MEMLOCK, RUNTIME_MEMLOCK_DIGEST } from './memlock.js'
 import { PreparationJournal, type PreparationRecord } from './operation-journal.js'
 
 interface Options {
@@ -75,14 +76,39 @@ function view(plan: FastFlowLmProbePlan): FastFlowLmOperation['plan'] {
 }
 function makeStep(
   plan: FastFlowLmProbePlan,
-  manifest: FlmManifest,
+  manifest: FlmManifest | null,
   device: string,
   next: number
 ): FastFlowLmHostStep {
-  const recipe = manifest.recipes.find(
+  if (
+    plan.recipe_id === RUNTIME_MEMLOCK.recipe_id &&
+    plan.recipe_digest === RUNTIME_MEMLOCK_DIGEST &&
+    plan.runtime_process &&
+    plan.runtime_account &&
+    plan.runtime_mode
+  ) {
+    const parameters = {
+      runtime_account: plan.runtime_account,
+      runtime_mode: plan.runtime_mode,
+      runtime_service: plan.runtime_service,
+      runtime_process: plan.runtime_process,
+    }
+    return {
+      step_id: randomUUID(),
+      nonce: randomUUID(),
+      expected_operation_revision: next,
+      recipe_id: RUNTIME_MEMLOCK.recipe_id,
+      recipe_digest: RUNTIME_MEMLOCK_DIGEST,
+      action: 'linux.configure-runtime-memlock',
+      parameters,
+      parameters_digest: canonicalDigest(parameters),
+    }
+  }
+  const recipe = manifest?.recipes.find(
     (r) => r.recipe_id === plan.recipe_id && r.revision === plan.recipe_revision
   )
   if (
+    !manifest ||
     !recipe ||
     !plan.runtime_account ||
     !plan.runtime_mode ||
@@ -111,6 +137,7 @@ function makeStep(
     return { ...base, action: recipe.action, parameters: common, parameters_digest: canonicalDigest(common) }
   const parameters = {
     ...common,
+    ...(plan.runtime_process ? { runtime_process: plan.runtime_process } : {}),
     package_names: plan.packages.map((p) => p.name),
     device_access: plan.changes.some((c) => c.code === 'device-access'),
     memlock: plan.changes.some((c) =>
@@ -252,7 +279,11 @@ export class PreparationCoordinator {
       const manifest =
         r.approvedManifest ?? (plan.manifest_digest && (await this.options.pinned(plan.manifest_digest)))
       const target = facts.devices.filter((d) => d.generation === 'xdna2')
-      if (!manifest || target.length !== 1 || target[0]!.id !== r.device)
+      if (
+        (!manifest && plan.recipe_id !== RUNTIME_MEMLOCK.recipe_id) ||
+        target.length !== 1 ||
+        target[0]!.id !== r.device
+      )
         throw new AtomicCoreError(
           'MANAGED_PLAN_CHANGED',
           'The selected device or pinned manifest has changed.'
