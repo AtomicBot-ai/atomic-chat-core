@@ -198,3 +198,5 @@ add a new one that says which record it supersedes.
 
 - [Bind the Windows NPU driver to one device instance](2026-11-05-bind-the-windows-npu-driver-to-one-device.md)
 - [Serialize FastFlowLM model changes and generation](2026-11-05-serialize-fastflowlm-model-changes-and-generation.md)
+- [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)
+- [Tag sd.cpp install probe failures with finite diagnostic codes](2026-11-05-tag-sdcpp-install-probe-failures.md)

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises'
+import type * as Fs from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
 import { classifyFailure, diagnosticTags } from '../telemetry/diagnostics.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -16,6 +17,11 @@ import {
 } from './instance-lock.js'
 import type { LockRecord } from './instance-lock.js'
 import { processStartEpoch } from './process-identity.js'
+
+vi.mock(import('node:fs/promises'), async (original) => {
+  const fs = await original()
+  return { ...fs, rm: vi.fn(fs.rm) }
+})
 
 let data: TmpDataFolder
 beforeEach(async () => {
@@ -141,6 +147,86 @@ describe('InstanceLock.acquire', () => {
     await (won[0] as PromiseFulfilledResult<InstanceLock>).value.release()
   })
 
+  it('serializes two starters reclaiming the same abandoned takeover mutex', async () => {
+    const crashedPid = await deadPid()
+    await write({ pid: crashedPid })
+    const mutex = `${data.layout.core.instanceLock}.takeover`
+    await writeFile(mutex, `${crashedPid}\n`)
+    let onFirstRemoval!: () => void
+    const firstRemoval = new Promise<void>((resolve) => {
+      onFirstRemoval = resolve
+    })
+    let onContention!: () => void
+    const secondContended = new Promise<void>((resolve) => {
+      onContention = resolve
+    })
+    const fs = await vi.importActual<typeof Fs>('node:fs/promises')
+    let removing = false
+    let overlappingRemovals = false
+    vi.mocked(rm).mockImplementation(async (path, options) => {
+      if (path !== mutex) return fs.rm(path, options)
+      if (removing) {
+        overlappingRemovals = true
+        onContention()
+      }
+      removing = true
+      onFirstRemoval()
+      await secondContended
+      try {
+        await fs.rm(path, options)
+      } finally {
+        removing = false
+      }
+    })
+    try {
+      const first = InstanceLock.acquire(data.layout, { platform: 'aix' })
+      await firstRemoval
+      const second = InstanceLock.acquire(data.layout, {
+        platform: 'aix',
+        sleep: async (ms) => {
+          onContention()
+          await new Promise((resolve) => setTimeout(resolve, ms))
+        },
+      })
+      const results = await Promise.allSettled([first, second])
+      expect(overlappingRemovals).toBe(false)
+      const winners = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []))
+      expect(winners).toHaveLength(1)
+      const winner = winners[0]!
+      expect(results).toContainEqual({
+        status: 'rejected',
+        reason: expect.objectContaining({ code: 'CORE_ALREADY_RUNNING' }) as unknown,
+      })
+      expect(await readLockRecord(data.layout.core.instanceLock)).toMatchObject({
+        instance_id: winner.instanceId,
+      })
+      await winner.release()
+    } finally {
+      onContention()
+      vi.mocked(rm).mockImplementation(fs.rm)
+    }
+  })
+
+  it('leaves the takeover mutex untouched while a live recovery claimant is paused', async () => {
+    const crashedPid = await deadPid()
+    await write({ pid: crashedPid })
+    const mutex = `${data.layout.core.instanceLock}.takeover`
+    await writeFile(mutex, `${crashedPid}\n`)
+    const peer = join(
+      data.layout.core.dir,
+      'instance.lock.recover-99999999-unknown-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+    )
+    await writeFile(peer, '')
+    const deps = {
+      platform: 'aix' as const,
+      sleep: async () => {},
+      alive: (pid: number) => pid === 99999999 || pid === process.pid,
+    }
+    await expect(InstanceLock.acquire(data.layout, deps)).rejects.toMatchObject({ code: 'CORE_START_FAILED' })
+    expect(await readFile(mutex, 'utf8')).toBe(`${crashedPid}\n`)
+    expect(await readFile(peer, 'utf8')).toBe('')
+  })
+
   it('recovers a lock that is not valid JSON at all', async () => {
     await writeFile(data.layout.core.instanceLock, '{ this is not json')
     expect(await inspectLock(data.layout, { sleep: async () => {}, now: fakeClock() })).toEqual({
@@ -253,6 +339,22 @@ describe('release', () => {
     const lock = await InstanceLock.acquire(data.layout)
     expect(lock.record.pid).toBe(process.pid)
     await expect(readFile(mutex, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await lock.release()
+  })
+
+  it('reclaims a takeover mutex left by a dead process without waiting for the age fallback', async () => {
+    const crashedPid = await deadPid()
+    await write({ pid: crashedPid })
+    const mutex = `${data.layout.core.instanceLock}.takeover`
+    const claim = `instance.lock.recover-${crashedPid}-unknown-11111111-1111-4111-8111-111111111111`
+    await writeFile(join(data.layout.core.dir, claim), '')
+    await writeFile(mutex, `${crashedPid}\n`)
+    const lock = await InstanceLock.acquire(data.layout, { sleep: async () => {} })
+    expect(lock.record.pid).toBe(process.pid)
+    await expect(readFile(mutex, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(
+      (await readdir(data.layout.core.dir)).filter((name) => name.startsWith('instance.lock.recover-'))
+    ).toEqual([])
     await lock.release()
   })
 })

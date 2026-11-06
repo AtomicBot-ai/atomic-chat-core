@@ -1,3 +1,4 @@
+import { sentryAgentDiagnosticTags } from './sentry-agent-diagnostics.js'
 import {
   DIAGNOSTIC_VERSION,
   FAILURE_CATEGORIES,
@@ -203,6 +204,7 @@ export function diagnosticTags(
 ): Record<string, string | number | null | undefined> {
   const causeCode = [...errorChain(error)].reverse().map(errorCodeOf).find(Boolean)
   return {
+    ...sentryAgentDiagnosticTags(error),
     diagnostic_version: DIAGNOSTIC_VERSION,
     component: diagnostic.component,
     operation: diagnostic.operation,
