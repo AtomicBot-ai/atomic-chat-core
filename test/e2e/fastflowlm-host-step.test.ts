@@ -41,7 +41,16 @@ it('the compiled host helper refuses a substituted Windows NPU package before to
       const acl = spawnSync(
         join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
         ['-NoProfile', '-NonInteractive', '-Command', secure],
-        { env: { ...process.env, STEP_DIR: directory, STEP_FILE: file }, encoding: 'utf8' }
+        {
+          env: {
+            ...process.env,
+            // Hosted runners start in PowerShell 7; Windows PowerShell must load its own modules.
+            PSModulePath: join(process.env.SystemRoot!, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'),
+            STEP_DIR: directory,
+            STEP_FILE: file,
+          },
+          encoding: 'utf8',
+        }
       )
       if (acl.status !== 0) throw Error(acl.stderr)
     }

@@ -75,15 +75,20 @@ afterEach(async () => {
 async function load(modelId = id) {
   const pending = runtime.load(modelId, { timeoutSecs: 10 })
   let dir = ''
-  await vi.waitFor(async () => {
-    dir = join(
-      cache,
-      (await readdir(cache)).find((s) => s.startsWith('session-') && !existsSync(join(cache, s, 'ready')))!
-    )
-    expect(existsSync(join(dir, 'listened'))).toBe(true)
-  })
+  await vi.waitFor(
+    async () => {
+      dir = join(
+        cache,
+        (await readdir(cache)).find((s) => s.startsWith('session-') && !existsSync(join(cache, s, 'ready')))!
+      )
+      expect(existsSync(join(dir, 'listened'))).toBe(true)
+      // Windows obtains the process start identity through an asynchronous OS query.
+      // A bound socket can precede that query; neither makes the model ready yet.
+      expect(journal.list()).toMatchObject([{ model_id: modelId }])
+    },
+    { timeout: 10_000 }
+  )
   expect(runtime.list()).toEqual([])
-  expect(journal.list()).toMatchObject([{ model_id: modelId }])
   await writeFile(join(dir, 'ready'), '')
   const s = await pending,
     base = 'http://127.0.0.1:' + s.port,
