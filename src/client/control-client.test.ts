@@ -1083,3 +1083,65 @@ describe('managed environments (task 2.6)', () => {
     expect(snapshot.environment_operations?.[0]?.operation_id).toBe('op-1')
   })
 })
+
+describe('FastFlowLM client routes', () => {
+  it('sends typed model checks and routes operation and maintenance IDs as single segments', async () => {
+    const seen: Array<[string, string, unknown]> = []
+    const control = new CoreClient({
+      baseUrl: 'http://localhost',
+      token: 'fixture',
+      fetch: async (url, init) => {
+        seen.push([
+          new URL(String(url)).pathname.slice('/atomic/v1'.length),
+          init?.method ?? 'GET',
+          init?.body ? (JSON.parse(String(init.body)) as unknown) : null,
+        ])
+        return Response.json({})
+      },
+    })
+    const id = 'a/b'
+    const consent = { expected_revision: 2, approved_plan_digest: 'sha256:abc' } as const
+    const receipt = {
+      step_id: 'step',
+      nonce: 'n',
+      expected_operation_revision: 2,
+      recipe_digest: 'sha256:a',
+      parameters_digest: 'sha256:b',
+      outcome: 'completed',
+      receipt_id: 'r',
+    } as const
+    const maintenance = { request_id: 'request', model_id: 'model', kind: 'replace' } as const
+    await control.checkFastFlowLmModel({ model_id: 'model' })
+    await control.fastFlowLmAccelerators()
+    await control.probeFastFlowLm()
+    await control.beginFastFlowLmOperation({ request_id: 'request' })
+    await control.fastFlowLmOperations()
+    await control.fastFlowLmOperation(id)
+    await control.consentFastFlowLmOperation(id, consent)
+    await control.submitFastFlowLmHostReceipt(id, receipt)
+    await control.cancelFastFlowLmOperation(id)
+    await control.resumeFastFlowLmOperation(id, 2)
+    await control.beginFastFlowLmMaintenance(maintenance)
+    await control.listFastFlowLmMaintenance()
+    await control.fastFlowLmMaintenance(id)
+    await control.completeFastFlowLmMaintenance(id)
+    const operations = '/runtimes/fastflowlm/operations'
+    const models = '/models/fastflowlm/maintenance'
+    expect(seen).toEqual([
+      ['/models/fastflowlm/check', 'POST', { model_id: 'model' }],
+      ['/runtimes/fastflowlm/accelerators', 'GET', null],
+      ['/runtimes/fastflowlm/probe', 'POST', {}],
+      [operations, 'POST', { request_id: 'request' }],
+      [operations, 'GET', null],
+      [operations + '/a%2Fb', 'GET', null],
+      [operations + '/a%2Fb/consent', 'POST', consent],
+      [operations + '/a%2Fb/host-step-receipt', 'POST', receipt],
+      [operations + '/a%2Fb/cancel', 'POST', {}],
+      [operations + '/a%2Fb/resume', 'POST', { expected_revision: 2 }],
+      [models, 'POST', maintenance],
+      [models, 'GET', null],
+      [models + '/a%2Fb', 'GET', null],
+      [models + '/a%2Fb/complete', 'POST', {}],
+    ])
+  })
+})

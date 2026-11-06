@@ -19,6 +19,7 @@
  */
 
 import type { EngineBuildId } from '../contracts/index.js'
+import { fastFlowLmBuildKey } from './fastflowlm-manifest.js'
 import { isDateTime } from './manifest.js'
 
 export interface OrderedBuild {
@@ -61,6 +62,7 @@ const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number
   'mlx': publishedKey,
   'foundry-local': publishedKey,
   'litert-lm': publishedKey,
+  'fastflowlm': (build) => fastFlowLmBuildKey(build.tag),
   'geniex': publishedKey,
   'audio-cpp': (build) => audiocppBuildKey(build.tag),
 }

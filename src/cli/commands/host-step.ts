@@ -4,8 +4,8 @@
  * command with `sudo`. It reads the request, runs the recipe, writes `<step>.result.json` beside
  * the request and exits. It never talks to a core.
  *
- * On Windows (change `add-tensorrt-llm-windows`, task 2.4) the app runs it through UAC for the one
- * Windows recipe, `windows.enable-wsl`, and the request folder is trusted by its owner and ACL
+ * On Windows (change `add-tensorrt-llm-windows`, task 2.4) the app runs it through UAC for a
+ * Windows recipe, and the request folder is trusted by its owner and ACL
  * (`executor-io-windows.ts`) instead of uid and mode.
  *
  * Exit codes:
@@ -29,7 +29,7 @@ import type { HostStepExecutorDeps } from '../../host/recipes/index.js'
 import type { CliIo } from '../io.js'
 
 const HOST_STEP_USAGE =
-  'Usage: atomic-chat-core host-step exec <step_id.request.json> [--json]\n' +
+  'Usage: atomic-chat-core host-step exec <step_id.request.json> [--request-sha256 <hex>] [--json]\n' +
   'Exit: 0 completed or reboot-required, 1 failed (see the result file), 2 no result file was written (see stderr).\n'
 
 /** The executor's I/O for the platform this binary runs on. */
@@ -44,7 +44,7 @@ export async function hostStepCommand(
 ): Promise<number> {
   const { values, positionals } = parseArgs({
     args: argv,
-    options: { json: { type: 'boolean' } },
+    options: { 'json': { type: 'boolean' }, 'request-sha256': { type: 'string' } },
     allowPositionals: true,
     strict: true,
   })
@@ -59,7 +59,7 @@ export async function hostStepCommand(
   }
   let result
   try {
-    result = await executeHostStep(requestPath, deps)
+    result = await executeHostStep(requestPath, deps, values['request-sha256'])
   } catch (error) {
     // `executeHostStep` throws only when it could not write a result file: a refused path or folder
     // (`MANAGED_HOST_STEP_INVALID`) or a failed write (ENOSPC, EROFS, ENOENT, ...). Either way the
@@ -70,5 +70,5 @@ export async function hostStepCommand(
   }
   if (values.json) io.stdout(`${JSON.stringify(result, null, 2)}\n`)
   else io.stdout(`${result.step_id || '(unknown step)'}: ${result.outcome} — ${result.log_tail}\n`)
-  return result.outcome === 'failed' ? 1 : 0
+  return result.outcome === 'failed' || result.outcome === 'declined' ? 1 : 0
 }

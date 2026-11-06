@@ -18,11 +18,14 @@
  * path, the path passed in an environment variable rather than spliced into the script. Every file
  * the executor writes goes to a fresh temporary name created exclusively and is renamed into place.
  *
- * Commands: only `wsl.exe`, resolved to `%SystemRoot%\System32\wsl.exe`; anything else is refused —
- * the only recipe that runs on Windows is `windows.enable-wsl`.
+ * Generic command execution permits only the inbox wsl.exe. The NPU action uses its own fixed installer.
  */
 
-import { spawn } from 'node:child_process'
+import { windowsNpuIo } from './windows-npu-io.js'
+import { installWindowsNpu } from './windows-amd-npu.js'
+import { execFile, spawn } from 'node:child_process'
+import { promisify } from 'node:util'
+import { systemEnvironment, windowsSystemDirectory } from './windows-system.js'
 import { randomBytes } from 'node:crypto'
 import { lstat, open, readFile, rename, rm } from 'node:fs/promises'
 import { win32 } from 'node:path'
@@ -119,6 +122,7 @@ export function parseWindowsAcl(output: HostCommandOutput): WindowsAcl {
 
 /** The calls this module makes, injectable so a test fakes owners and ACLs it cannot create. */
 export interface WindowsHostStepIo {
+  systemDirectory?: () => Promise<string>
   /**
    * Runs one command, no shell; `env` is added to the inherited environment, and a name in it
    * replaces the inherited one in any case.
@@ -127,6 +131,7 @@ export interface WindowsHostStepIo {
     command: string,
     args: string[],
     options?: {
+      system32?: string
       timeoutMs?: number
       env?: Record<string, string>
       console?: boolean
@@ -162,15 +167,11 @@ export async function readWindowsAcl(
   path: string,
   options: { exec: WindowsHostStepIo['exec']; systemRoot?: string }
 ): Promise<WindowsAcl> {
-  const systemRoot = (
-    options.systemRoot ??
-    process.env['SystemRoot'] ??
-    process.env['SYSTEMROOT'] ??
-    'C:\\Windows'
-  ).replace(/[\\/]+$/, '')
-  const home = `${systemRoot}\\System32\\WindowsPowerShell\\v1.0`
+  const systemRoot = options.systemRoot ?? win32.dirname(await windowsSystemDirectory())
+  const home = win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0')
   return parseWindowsAcl(
     await options.exec(`${home}\\powershell.exe`, ['-NoProfile', '-NonInteractive', '-Command', ACL_QUERY], {
+      system32: win32.join(systemRoot, 'System32'),
       env: { PSModulePath: `${home}\\Modules`, ATOMIC_HOST_STEP_PATH: path },
     })
   )
@@ -230,16 +231,28 @@ const consoleExec = (
 const UNTIL_POLL_MS = 5_000
 
 const nodeIo = (): WindowsHostStepIo => {
-  const systemRoot = (process.env['SystemRoot'] ?? process.env['SYSTEMROOT'] ?? 'C:\\Windows').replace(
-    /[\\/]+$/,
-    ''
-  )
-  const taskkill = `${systemRoot}\\System32\\taskkill.exe`
   return {
-    exec: (command, args, options) =>
-      options?.console === true
-        ? consoleExec(command, args, options.timeoutMs ?? 60_000, taskkill, options.until)
-        : hostExec({ timeoutMs: options?.timeoutMs ?? 60_000 })(command, args, options?.env),
+    exec: async (command, args, options) => {
+      if (options?.system32 !== undefined) {
+        const system32 = options.system32
+        const { stdout, stderr } = await promisify(execFile)(command, args, {
+          cwd: system32,
+          env: { ...systemEnvironment(system32, system32), ...options.env },
+          windowsHide: true,
+          timeout: 60_000,
+        })
+        return { code: 0, stdout, stderr }
+      }
+      if (options?.console === true)
+        return consoleExec(
+          command,
+          args,
+          options.timeoutMs ?? 60_000,
+          win32.join(win32.dirname(command), 'taskkill.exe'),
+          options.until
+        )
+      return hostExec({ timeoutMs: options?.timeoutMs ?? 60_000 })(command, args, options?.env)
+    },
     lstat: (path) => lstat(path),
     readFile: (path) => readFile(path, 'utf8'),
     createExclusive: async (path, text) => {
@@ -265,23 +278,18 @@ const refuse = (message: string): never => {
   throw new AtomicCoreError('MANAGED_HOST_STEP_INVALID', message)
 }
 
-/**
- * The executor's dependencies on a Windows machine. `env` gives `%SystemRoot%`, where the only
- * command it runs — `wsl.exe` — and PowerShell live.
- */
+// Keep the original factory signature for library callers. Privileged path resolution ignores env.
 export function windowsHostStepDeps(
-  env: NodeJS.ProcessEnv,
+  _env: NodeJS.ProcessEnv,
   io: WindowsHostStepIo = nodeIo()
 ): HostStepExecutorDeps {
-  const systemRoot = (env['SystemRoot'] ?? env['SYSTEMROOT'] ?? 'C:\\Windows').replace(/[\\/]+$/, '')
-  const system32 = `${systemRoot}\\System32`
-
+  const systemDirectory = io.systemDirectory ?? windowsSystemDirectory
   const trust = async (path: string, what: string, expect: 'directory' | 'file'): Promise<void> => {
     let acl: WindowsAcl
     try {
       acl = await readWindowsAcl(path, {
         exec: (command, args, options) => io.exec(command, args, options),
-        systemRoot,
+        systemRoot: win32.dirname(await systemDirectory()),
       })
     } catch (error) {
       return refuse(`could not read the owner and permissions of ${what}: ${(error as Error).message}`)
@@ -291,6 +299,7 @@ export function windowsHostStepDeps(
   }
 
   return {
+    installWindowsNpu: (id) => installWindowsNpu(id, windowsNpuIo()),
     readRequest: async (path) => {
       const folder = win32.dirname(path)
       await trust(folder, folder, 'directory')
@@ -318,7 +327,7 @@ export function windowsHostStepDeps(
     exec: async ([command, ...args], options) => {
       if (command !== 'wsl.exe')
         return refuse(`${String(command)} is not a command the Windows executor runs`)
-      return io.exec(`${system32}\\wsl.exe`, args, {
+      return io.exec(win32.join(await systemDirectory(), 'wsl.exe'), args, {
         timeoutMs: options?.longRunning === true ? INSTALL_TIMEOUT_MS : COMMAND_TIMEOUT_MS,
         ...(options?.console === true ? { console: true } : {}),
         ...(options?.console === true && options.until !== undefined ? { until: options.until } : {}),
@@ -326,7 +335,9 @@ export function windowsHostStepDeps(
     },
     fetch: async () => refuse('the Windows executor downloads nothing'),
     rebootPending: async () =>
-      parseRebootPending(await io.exec(`${system32}\\reg.exe`, ['query', REBOOT_PENDING_KEY])),
+      parseRebootPending(
+        await io.exec(win32.join(await systemDirectory(), 'reg.exe'), ['query', REBOOT_PENDING_KEY])
+      ),
     now: () => Date.now(),
     invokingUid: null,
   }

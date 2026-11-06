@@ -71,7 +71,7 @@ if (sub === 'info') {
 if (sub === 'create') {
   // `127.0.0.1:<port>:<container port>`, or `127.0.0.1::<container port>`: Docker picks the port (WSL).
   const [, given] = args[args.indexOf('-p') + 1].split(':')
-  const hostPort = given === '' ? String(30_000 + Math.floor(Math.random() * 20_000)) : given
+  const hostPort = given === '' ? '0' : given
   const model = args.find((a) => a.endsWith(':/atomic/model:ro')) ?? ''
   const gpus = args[args.indexOf('--gpus') + 1]
   // The `--user` the core ran the container as (final review I-1), or null for the image's own.
@@ -150,8 +150,30 @@ if (sub === 'start') {
   const mode = c.slow ? 'slow' : c.nogen ? 'nogen' : 'ready'
   const child = spawn(process.execPath, [engine, String(c.hostPort), mode], {
     detached: true,
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
   })
+  let stderr = ''
+  child.stderr.on('data', (chunk) => (stderr += chunk.toString()))
+  let timeout
+  try {
+    c.hostPort = await new Promise((resolve, reject) => {
+      timeout = setTimeout(() => reject(new Error('fake engine did not bind in 20 seconds')), 20_000)
+      child.once('message', (message) => resolve(message.port))
+      child.once('error', reject)
+      child.once('exit', (code) => reject(new Error(`fake engine exited with code ${code}: ${stderr}`)))
+    })
+  } catch (error) {
+    child.kill('SIGKILL')
+    c.status = 'exited'
+    c.exitCode = 1
+    c.logs.push(stamp(error.message))
+    console.error(error.message)
+    done(1)
+  } finally {
+    clearTimeout(timeout)
+  }
+  child.stderr.destroy()
+  child.disconnect()
   child.unref()
   c.pid = child.pid
   c.status = 'running'

@@ -1,3 +1,8 @@
+import type {
+  WindowsNpuStepParameters,
+  LinuxNpuStepParameters,
+  LinuxMemlockStepParameters,
+} from './fastflowlm.js'
 /**
  * Managed text runtimes on the wire: the container environment the core owns, the per-engine
  * runtime installations inside it, the durable operations that install, update and remove them,
@@ -279,7 +284,13 @@ export interface EnvironmentDistribution {
  * The one privileged thing the core asks the app to do, per host recipe. The webview never chooses
  * a command: it forwards this step, and the trusted helper owns the arguments.
  */
-export const MANAGED_HOST_ACTIONS = ['linux.install-container-runtime', 'windows.enable-wsl'] as const
+export const MANAGED_HOST_ACTIONS = [
+  'linux.install-container-runtime',
+  'windows.enable-wsl',
+  'linux.install-amd-npu',
+  'linux.configure-runtime-memlock',
+  'windows.install-amd-npu',
+] as const
 export type ManagedHostAction = (typeof MANAGED_HOST_ACTIONS)[number]
 
 /**
@@ -315,6 +326,9 @@ export type EnableWslStepParameters = Record<string, never>
  * shape, so a client and the executor tell them apart by the action alone.
  */
 export interface ManagedHostStepParameters {
+  'linux.configure-runtime-memlock': LinuxMemlockStepParameters
+  'linux.install-amd-npu': LinuxNpuStepParameters
+  'windows.install-amd-npu': WindowsNpuStepParameters
   'linux.install-container-runtime': ContainerRuntimeStepParameters
   'windows.enable-wsl': EnableWslStepParameters
 }

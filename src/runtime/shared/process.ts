@@ -50,6 +50,10 @@ export interface SpawnSpec {
 }
 
 export interface ReadyOptions {
+  /** Persist the child identity before the model can be published, including long loads. */
+  /** Bound the retained diagnostic text for a long-lived, verbose child. */
+  outputTailChars?: number
+  onSpawn?: (process: ManagedProcess) => Promise<void>
   timeoutMs: number
   /** Cancel process startup (owner shutdown); the child is terminated before rejection. */
   signal?: AbortSignal
@@ -110,6 +114,7 @@ export interface SpawnHooks {
    */
   onData?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void
   /** `false` keeps nothing: `output()` stays empty. For a verbose process that runs for hours. */
+  outputTailChars?: number
   captureOutput?: boolean
 }
 
@@ -145,8 +150,13 @@ export function spawnManaged(
       const line = raw.replace(/\s+$/, '')
       if (line === '') return
       if (capture) {
-        if (stream === 'stdout') stdoutBuf += line + '\n'
-        else stderrBuf += line + '\n'
+        if (stream === 'stdout') {
+          stdoutBuf += line + '\n'
+          if (hooks.outputTailChars) stdoutBuf = stdoutBuf.slice(-hooks.outputTailChars)
+        } else {
+          stderrBuf += line + '\n'
+          if (hooks.outputTailChars) stderrBuf = stderrBuf.slice(-hooks.outputTailChars)
+        }
       }
       onLine?.(stream, line)
     })
@@ -216,13 +226,17 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
   let resolveFailed: ((error: AtomicCoreError) => void) | undefined
   const failed = new Promise<AtomicCoreError>((r) => (resolveFailed = r))
 
-  const proc = spawnManaged(spec, (stream, line) => {
-    opts.onLine?.(stream, line)
-    const failure = opts.failOnLine?.(stream, line)
-    if (failure) resolveFailed?.(failure)
-    const streamMarkers = opts.streamReadyMarkers ? opts.streamReadyMarkers[stream] : markers
-    if (isReadyLogLine(line.toLowerCase(), streamMarkers)) resolveReady?.('log')
-  })
+  const proc = spawnManaged(
+    spec,
+    (stream, line) => {
+      opts.onLine?.(stream, line)
+      const failure = opts.failOnLine?.(stream, line)
+      if (failure) resolveFailed?.(failure)
+      const streamMarkers = opts.streamReadyMarkers ? opts.streamReadyMarkers[stream] : markers
+      if (isReadyLogLine(line.toLowerCase(), streamMarkers)) resolveReady?.('log')
+    },
+    opts.outputTailChars ? { outputTailChars: opts.outputTailChars } : {}
+  )
 
   let healthTimer: NodeJS.Timeout | undefined
   let healthStopped = false
@@ -260,6 +274,14 @@ export async function spawnAndAwaitReady(spec: SpawnSpec, opts: ReadyOptions): P
   })
 
   try {
+    if (opts.onSpawn && proc.pid > 0) {
+      try {
+        await opts.onSpawn(proc)
+      } catch (error) {
+        await proc.terminate(0)
+        throw error
+      }
+    }
     const outcome = await Promise.race([
       ready.then((via) => ({ kind: 'ready' as const, via })),
       proc.exited.then((exit) => ({ kind: 'exit' as const, exit })),

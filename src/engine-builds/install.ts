@@ -34,6 +34,11 @@ export interface StagedInstall {
   target: string
   /** The build first, companions after; all unpack into the same directory. */
   archives: BuildArchive[]
+  signal?: AbortSignal
+  regularFilesOnly?: boolean
+  /** Hold the runtime load lock across the rename and activation. */
+  commit?: (swap: () => Promise<boolean>) => Promise<boolean>
+  activate?: (replaced: boolean) => Promise<void>
   taskId: string
   proxy?: ProxyConfig | null
   downloader: Pick<Downloader, 'download'>
@@ -76,11 +81,12 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
       model_id: plan.taskId,
       ...(plan.proxy ? { proxy: plan.proxy } : {}),
     }))
+    plan.signal?.throwIfAborted()
     await plan.downloader.download(plan.taskId, items).catch((error: unknown) => {
       throw downloadError(error)
     })
     for (const item of items)
-      await extractArchive(item.save_path, staging).catch((error: unknown) => {
+      await extractArchive(item.save_path, staging, plan.regularFilesOnly).catch((error: unknown) => {
         throw new AtomicCoreError(
           'ENGINE_INSTALL_FAILED',
           'Could not unpack the engine archive.',
@@ -89,12 +95,15 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
         )
       })
     await rm(downloads, { recursive: true, force: true })
+    plan.signal?.throwIfAborted()
     await plan.verify(staging)
     await plan.record(staging)
 
-    return { replaced: await swapInto(staging, plan.target, `${plan.target}.retired-${stamp}`) }
+    const swap = () => swapInto(staging, plan.target, `${plan.target}.retired-${stamp}`, plan.activate)
+    return { replaced: await (plan.commit ? plan.commit(swap) : swap()) }
   } catch (error) {
     await cleanup()
+    plan.signal?.throwIfAborted()
     throw error instanceof AtomicCoreError
       ? error
       : new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not install the engine build.', String(error), {
@@ -108,7 +117,12 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
  * is deleted after, or put back when the new one cannot take its place — the installed build is
  * never lost to a failed swap. `true` when a tree was replaced.
  */
-async function swapInto(staging: string, target: string, retired: string): Promise<boolean> {
+async function swapInto(
+  staging: string,
+  target: string,
+  retired: string,
+  activate?: (replaced: boolean) => Promise<void>
+): Promise<boolean> {
   await mkdir(dirname(target), { recursive: true })
   const existed = await stat(target).then(
     () => true,
@@ -120,6 +134,13 @@ async function swapInto(staging: string, target: string, retired: string): Promi
     await rename(staging, target)
   } catch (error) {
     if (existed) await rename(retired, target).catch(() => {})
+    throw error
+  }
+  try {
+    await activate?.(existed)
+  } catch (error) {
+    await rename(target, staging)
+    if (existed) await rename(retired, target)
     throw error
   }
   // A session may still hold files of the old tree open (Windows refuses the delete); the next

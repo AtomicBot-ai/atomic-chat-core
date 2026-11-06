@@ -9,6 +9,8 @@
  * sent, including the spellings a JavaScript round trip would change.
  */
 
+import { createServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
@@ -158,8 +160,12 @@ describe('contract: the public decision routes pass bytes through', () => {
 describe('contract: a laya checkpoint folder is converted once into the core cache', () => {
   let data: TmpDataFolder
   let service: DecisionService
+  const holder = createServer((socket) => socket.destroy())
+  const conversions: string[] = []
+  let collide = true
 
   beforeAll(async () => {
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve))
     data = await makeTmpDataFolder('atomic-core-decision-checkpoint-')
     await data.writeBackend('llamacpp', 'b10269-1.7.0', 'macos-arm64')
     const folder = join(data.root, 'decision', 'models', 'laya-multilingual')
@@ -175,12 +181,28 @@ describe('contract: a laya checkpoint folder is converted once into the core cac
       instanceId: 'contract',
       emit: () => {},
       log: () => {},
-      overrides: { probe: async () => true, spawn: fakeDecisionSpawn() },
+      overrides: {
+        probe: async () => true,
+        spawn: (spec, onLine) => {
+          // A successful conversion can precede a failed bind; the retry must reuse it.
+          if (collide && spec.args.includes('f32')) {
+            collide = false
+            const args = [...spec.args]
+            args[args.indexOf('--port') + 1] = String((holder.address() as AddressInfo).port)
+            spec = { ...spec, args }
+          }
+          return fakeDecisionSpawn()(spec, (stream, line) => {
+            if (line.startsWith('decision: converted:')) conversions.push(line)
+            onLine(stream, line)
+          })
+        },
+      },
     })
   })
 
   afterAll(async () => {
     await service?.shutdown()
+    await new Promise<void>((resolve) => holder.close(() => resolve()))
     await data?.cleanup()
   })
 
@@ -192,16 +214,21 @@ describe('contract: a laya checkpoint folder is converted once into the core cac
     expect(first).toMatchObject({
       model_id: 'laya-multilingual',
       source: 'checkpoint-dir',
-      checkpoint: { cache_dir: cacheDir(), outtype: 'f16', cache_hit: false },
+      checkpoint: { cache_dir: cacheDir(), outtype: 'f16' },
     })
     expect(first?.cache_path?.startsWith(cacheDir())).toBe(true)
+    expect(conversions).toHaveLength(1)
 
     await service.unload()
     expect((await service.load()).props?.checkpoint).toMatchObject({ cache_hit: true, convert_ms: 0 })
 
+    expect(conversions).toHaveLength(1)
+
     await service.configure({ convert_type: 'f32' })
     const f32 = (await service.load()).props?.checkpoint
-    expect(f32).toMatchObject({ outtype: 'f32', cache_hit: false })
+    expect(f32).toMatchObject({ outtype: 'f32', cache_hit: true })
+    expect(f32?.key).not.toBe(first?.checkpoint?.key)
+    expect(conversions).toHaveLength(2)
     await vi.waitFor(async () => expect(await readdir(cacheDir())).toEqual([f32?.key]))
 
     await service.configure({ model_path: '' })

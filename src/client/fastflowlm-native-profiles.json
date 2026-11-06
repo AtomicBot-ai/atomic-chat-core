@@ -1,0 +1,1245 @@
+{
+  "hy-mt2-flash:1.8b": {
+    "size": 1800000000,
+    "flm_min_version": "1.0.5",
+    "max_prefill_len": 1024,
+    "default_context_length": 1024,
+    "details": {
+      "format": "NPU2",
+      "family": "hunyuan",
+      "think": false,
+      "parameter_size": "1.8B",
+      "quantization_level": "Q4_0"
+    },
+    "label": ["translation", "single-turn"],
+    "vlm": false,
+    "asr": false,
+    "files": [
+      "chat_template.jinja",
+      "config.json",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "nanbeige4.1:3b": {
+    "size": 1000000000,
+    "flm_min_version": "0.9.38",
+    "max_prefill_len": 4096,
+    "default_context_length": 8192,
+    "details": {
+      "family": "nanbeige",
+      "think": false,
+      "parameter_size": "3B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3vl-it:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3vl",
+      "think": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3vl-flash:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 1024,
+    "default_context_length": 1024,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3vl-flash",
+      "think": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision", "single-turn"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "gemma4-it:e2b": {
+    "size": 2000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e",
+      "think": true,
+      "parameter_size": "5B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "swa.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "gemma4-it:e4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e",
+      "think": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "swa.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "gemma4-it:12b": {
+    "size": 12000000000,
+    "flm_min_version": "1.0.4",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4-12b",
+      "think": true,
+      "parameter_size": "12B",
+      "quantization_level": "Q4_0"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn_global.xclbin",
+      "attn_global_image.xclbin",
+      "attn_sliding.xclbin",
+      "audio_image_mm.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "dequant_mm.xclbin",
+      "image_audio_weights.q4nx",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "nemotron3.5-bolt:e4b": {
+    "size": 4000000000,
+    "flm_min_version": "1.0.11",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e",
+      "think": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "tool-calling", "chat-transcription"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "swa.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "gemma4e-flash:e2b": {
+    "size": 2000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 1024,
+    "default_context_length": 1024,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e-flash",
+      "think": true,
+      "parameter_size": "5B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "chat-transcription", "single-turn"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "swa.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "gemma4e-flash:e4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 1024,
+    "default_context_length": 1024,
+    "details": {
+      "format": "NPU2",
+      "family": "gemma4e-flash",
+      "think": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["audio", "vision", "reasoning", "chat-transcription", "single-turn"],
+    "vlm": true,
+    "asr": true,
+    "files": [
+      "attn.xclbin",
+      "audio_conv1d.xclbin",
+      "audio_weight.q4nx",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "fused_prefill.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "swa.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_mm_high_precision.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.5:0.8b": {
+    "size": 800000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "0.8B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.5:2b": {
+    "size": 2000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "2B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.5:4b": {
+    "size": 4000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.5:9b": {
+    "size": 9000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.5",
+      "think": true,
+      "parameter_size": "9B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "minicpm-v-4.7:1b": {
+    "size": 1000000000,
+    "flm_min_version": "1.0.8",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "minicpm-v-4.7",
+      "think": true,
+      "parameter_size": "1B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm_a.xclbin",
+      "vision_mm_b.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.6-moe:35b-a3b": {
+    "size": 35000000000,
+    "flm_min_version": "1.0.3",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.6-moe",
+      "think": true,
+      "parameter_size": "35B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": true,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "dequant_mm.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "qwen3.8-mtp:27b": {
+    "size": 27000000000,
+    "flm_min_version": "1.0.7",
+    "max_prefill_len": 4096,
+    "max_bench_length": 8192,
+    "default_context_length": 4096,
+    "details": {
+      "format": "NPU2",
+      "family": "qwen3.8-mtp",
+      "think": true,
+      "parameter_size": "27B",
+      "quantization_level": "Q4_K"
+    },
+    "label": ["vision", "reasoning", "tool-calling"],
+    "vlm": false,
+    "files": [
+      "GateDeltaNet_prefill.xclbin",
+      "MTP_layer.xclbin",
+      "attention_layer.xclbin",
+      "attention_prefill.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "deltanet_layer.xclbin",
+      "dequant_mm.xclbin",
+      "lm_head.xclbin",
+      "lm_head_8.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm_a.xclbin",
+      "vision_mm_b.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "lfm2:1.2b": {
+    "size": 1200000000,
+    "flm_min_version": "0.9.24",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "1.2B",
+      "quantization_level": "Q4_0"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "lfm2:2.6b": {
+    "size": 2600000000,
+    "flm_min_version": "0.9.24",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "2.6B",
+      "quantization_level": "Q4_0"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "lfm2-trans:2.6b": {
+    "size": 2600000000,
+    "flm_min_version": "0.9.24",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "2.6B",
+      "quantization_level": "Q4_0"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "lfm2.5-it:1.2b": {
+    "size": 1200000000,
+    "flm_min_version": "0.9.25",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "1.2B",
+      "quantization_level": "Q4_0"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "lfm3:1.7b": {
+    "size": 1700000000,
+    "flm_min_version": "1.0.11",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm3",
+      "think": true,
+      "think_toggleable": true,
+      "parameter_size": "1.7B",
+      "quantization_level": "Q4_0"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "lfm2.5-tk:1.2b": {
+    "size": 1200000000,
+    "flm_min_version": "0.9.27",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "format": "NPU2",
+      "family": "lfm2.5-tk",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "1.2B",
+      "quantization_level": "Q4_0"
+    },
+    "label": ["reasoning"],
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "chat_template.jinja",
+      "config.json",
+      "conv.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "phi4-mini-it:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.25",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "phi4",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "vlm": false,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "gemma3:1b": {
+    "size": 1000000000,
+    "flm_min_version": "0.9.20",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "gemma3-text",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "1B",
+      "quantization_level": "Q4_1"
+    },
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "gemma3:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.23",
+    "max_prefill_len": 4096,
+    "default_context_length": 65536,
+    "details": {
+      "family": "gemma3",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "translategemma:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.34",
+    "max_prefill_len": 4096,
+    "default_context_length": 65536,
+    "details": {
+      "family": "gemma3",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "medgemma:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 4096,
+    "default_context_length": 65536,
+    "details": {
+      "family": "gemma3",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "medgemma1.5:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 4096,
+    "default_context_length": 65536,
+    "details": {
+      "family": "gemma3",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attn.xclbin",
+      "vision_mm.xclbin",
+      "vision_weight.q4nx"
+    ]
+  },
+  "llama3.2:1b": {
+    "size": 1000000000,
+    "flm_min_version": "0.9.21",
+    "max_prefill_len": 4096,
+    "default_context_length": 131072,
+    "details": {
+      "family": "llama3",
+      "think": false,
+      "parameter_size": "1B",
+      "quantization_level": "Q4_1"
+    },
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "llama3.2:3b": {
+    "size": 3000000000,
+    "flm_min_version": "0.9.21",
+    "max_prefill_len": 4096,
+    "default_context_length": 65536,
+    "details": {
+      "family": "llama3",
+      "think": false,
+      "parameter_size": "3B",
+      "quantization_level": "Q4_1"
+    },
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "llama3.1:8b": {
+    "size": 8000000000,
+    "flm_min_version": "0.9.21",
+    "max_prefill_len": 4096,
+    "default_context_length": 16384,
+    "details": {
+      "family": "llama3",
+      "think": false,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "deepseek-r1:8b": {
+    "size": 8000000000,
+    "flm_min_version": "0.9.43",
+    "max_prefill_len": 4096,
+    "default_context_length": 16384,
+    "details": {
+      "family": "deepseek-r1",
+      "think": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "deepseek-r1-0528:8b": {
+    "size": 8000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 16384,
+    "details": {
+      "family": "deepseek-r1-0528",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3:0.6b": {
+    "size": 600000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3",
+      "think": false,
+      "think_toggleable": true,
+      "parameter_size": "0.6B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "config.json",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "attn.xclbin",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin"
+    ]
+  },
+  "qwen3:1.7b": {
+    "size": 1700000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3",
+      "think": true,
+      "think_toggleable": true,
+      "parameter_size": "1.7B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3",
+      "think": true,
+      "think_toggleable": true,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning", "tool-calling"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3:8b": {
+    "size": 8000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 16384,
+    "details": {
+      "family": "qwen3",
+      "think": true,
+      "think_toggleable": true,
+      "parameter_size": "8B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning", "tool-calling"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3-tk:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3-tk",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning", "tool-calling"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen3-it:4b": {
+    "size": 4000000000,
+    "flm_min_version": "0.9.22",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen3-it",
+      "think": false,
+      "think_toggleable": false,
+      "parameter_size": "4B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["tool-calling"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "gpt-oss:20b": {
+    "size": 20000000000,
+    "flm_min_version": "0.9.20",
+    "max_prefill_len": 4096,
+    "default_context_length": 8192,
+    "details": {
+      "family": "gpt-oss",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "20B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "dequant_mxfp4.xclbin",
+      "dequant_q4_1.xclbin",
+      "expert.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "short_seq_mm.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "gpt-oss-sg:20b": {
+    "size": 20000000000,
+    "flm_min_version": "0.9.20",
+    "max_prefill_len": 4096,
+    "default_context_length": 8192,
+    "details": {
+      "family": "gpt-oss",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "20B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["reasoning"],
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "dequant_mxfp4.xclbin",
+      "dequant_q4_1.xclbin",
+      "expert.xclbin",
+      "layer.xclbin",
+      "lm_head.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "short_seq_mm.xclbin",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen2.5-it:3b": {
+    "size": 3000000000,
+    "flm_min_version": "0.9.32",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen2",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "3B",
+      "quantization_level": "Q4_0"
+    },
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "qwen2.5vl-it:3b": {
+    "size": 3000000000,
+    "flm_min_version": "0.9.32",
+    "max_prefill_len": 4096,
+    "default_context_length": 32768,
+    "details": {
+      "family": "qwen2vl",
+      "think": true,
+      "think_toggleable": false,
+      "parameter_size": "3B",
+      "quantization_level": "Q4_1"
+    },
+    "label": ["vision"],
+    "vlm": true,
+    "files": [
+      "attn.xclbin",
+      "config.json",
+      "dequant.xclbin",
+      "layer.xclbin",
+      "mm.xclbin",
+      "model.q4nx",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vision_attention.xclbin",
+      "vision_mm.xclbin",
+      "vision_weights.q4nx",
+      "vision_window_attention.xclbin"
+    ]
+  }
+}

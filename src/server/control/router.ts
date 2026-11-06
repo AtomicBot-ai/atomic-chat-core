@@ -25,6 +25,7 @@ import { registerEnvironmentRoutes } from './routes/environments.js'
 import { registerExternalSessionRoutes } from './routes/external-sessions.js'
 import { registerHardwareRoutes } from './routes/hardware.js'
 import { registerLifecycleRoutes, registerShutdownRoute } from './routes/lifecycle.js'
+import { registerFastFlowLmRoutes } from './routes/fastflowlm.js'
 import { registerModelRoutes } from './routes/models.js'
 import { registerModelCompatibilityRoutes } from './routes/model-compatibility.js'
 import { registerPublicServerRoutes } from './routes/public-server.js'
@@ -62,6 +63,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
 
   registerLifecycleRoutes(router, deps, ctx)
   registerClientRoutes(router, deps, ctx)
+  registerFastFlowLmRoutes(router, deps, ctx)
   registerModelRoutes(router, deps, ctx)
   registerModelCompatibilityRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)

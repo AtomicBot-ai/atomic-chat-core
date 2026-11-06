@@ -1,3 +1,4 @@
+import candidate from '../../test/fixtures/fastflowlm/qwen3-candidate.json' with { type: 'json' }
 import { describe, expect, it } from 'vitest'
 import baseline from './model-catalog-baseline.json' with { type: 'json' }
 import {
@@ -46,5 +47,53 @@ describe('unified model catalog', () => {
     const unpinned = structuredClone(baseline)
     Object.values(unpinned.models)[0]!.definition = { repo: 'o/r', revision: 'main' } as never
     expect(() => parseAtomicModelCatalog(unpinned)).toThrow('Missing immutable revision')
+  })
+})
+
+describe('FastFlowLM collection', () => {
+  const name = 'fastflowlm-models'
+  const id = candidate.definition.variant_id
+  const document = (entry = structuredClone(candidate)) => ({
+    ...structuredClone(baseline),
+    models: {
+      ...baseline.models,
+      [id]: entry,
+      future: { kind: 'future', format: 'future', variants: {}, definition: {} },
+    },
+    collections: {
+      ...baseline.collections,
+      [name]: { header: { schema_version: 1 }, entries: [{ model: id, variant: id }] },
+    },
+  })
+  it('treats an older snapshot as an empty FLM collection', () => {
+    expect(projectAtomicModelCollection(parseAtomicModelCatalog(baseline), name)).toEqual({
+      schema_version: 1,
+      models: [],
+    })
+  })
+  it('projects the complete pinned staging plan and ignores an unrelated future kind', () => {
+    expect(() => parseAtomicModelCatalog(document())).toThrow(/candidate/i)
+    const catalog = parseAtomicModelCatalog(document(), { allowCandidates: true })
+    expect(projectAtomicModelCollection(catalog, name, true, { allowCandidates: true })).toEqual({
+      schema_version: 1,
+      models: [candidate.definition],
+    })
+  })
+  it('rejects case-colliding targets and unpinned or unknown file sources', () => {
+    for (const mutate of [
+      (d: typeof candidate.definition) => {
+        d.files[1]!.path = d.files[0]!.path.toUpperCase()
+      },
+      (d: typeof candidate.definition) => {
+        d.sources[0]!.revision = 'main'
+      },
+      (d: typeof candidate.definition) => {
+        d.files[0]!.source = 'unknown'
+      },
+    ]) {
+      const entry = structuredClone(candidate)
+      mutate(entry.definition)
+      expect(() => parseAtomicModelCatalog(document(entry), { allowCandidates: true })).toThrow()
+    }
   })
 })

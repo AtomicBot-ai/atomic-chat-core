@@ -134,6 +134,7 @@ describe('readWindowsAcl', () => {
 const fakeIo = (acls: Record<string, WindowsAcl>, files: Record<string, string> = {}) => {
   const calls: { command: string; args: string[]; env?: Record<string, string> }[] = []
   const io: WindowsHostStepIo = {
+    systemDirectory: async () => String.raw`D:\Win\System32`,
     exec: async (command, args, options) => {
       calls.push({ command, args, ...(options?.env === undefined ? {} : { env: options.env }) })
       if (command.endsWith('powershell.exe')) {
@@ -197,11 +198,11 @@ describe('windowsHostStepDeps', () => {
 
   it('passes the path to PowerShell in the environment, never in the script', async () => {
     const { io, calls } = fakeIo({ [FOLDER]: appFolder(), [REQUEST]: fileAcl }, { [REQUEST]: '{}' })
-    await windowsHostStepDeps({ SystemRoot: 'E:\\Windows' }, io).readRequest(REQUEST)
+    await windowsHostStepDeps({ SystemRoot: 'E:\\Untrusted' }, io).readRequest(REQUEST)
     const query = calls.find((call) => call.command.endsWith('powershell.exe'))
-    expect(query?.command).toBe('E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+    expect(query?.command).toBe('D:\\Win\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
     expect(query?.env).toEqual({
-      PSModulePath: 'E:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules',
+      PSModulePath: 'D:\\Win\\System32\\WindowsPowerShell\\v1.0\\Modules',
       ATOMIC_HOST_STEP_PATH: FOLDER,
     })
     expect(query?.args.join(' ')).not.toContain(FOLDER)

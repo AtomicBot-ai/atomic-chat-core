@@ -13,6 +13,11 @@
  *
  * No imports from `src/`. POSIX only: the fake engines are shell launchers.
  */
+import { execFile } from 'node:child_process'
+import { release as osRelease } from 'node:os'
+import { promisify } from 'node:util'
+import qwen from '../fixtures/fastflowlm/qwen3-candidate.json' with { type: 'json' }
+import { flmRelease } from '../helpers/fastflowlm-manifest.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
@@ -1095,3 +1100,99 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('audio.cpp bui
     expect(await install.json()).toMatchObject({ error: { code: 'UPSTREAM_ERROR' } })
   }, 60_000)
 })
+
+it.skipIf(!existsSync(BIN))(
+  'installs FastFlowLM only on a supported host and only after the archive confirms local-only identity',
+  async () => {
+    const release = flmRelease()
+    const manifest = join(ctx.dataFolder, 'flm.json')
+    const supported =
+      process.arch === 'x64' &&
+      (process.platform === 'linux' ||
+        (process.platform === 'win32' && Number(osRelease().split('.')[2]) >= 22000))
+    const asset = release.assets[process.platform === 'win32' ? 0 : 1]!
+    const id = JSON.stringify({
+      upstream_commit: release.upstream_commit,
+      atomic_revision: 1,
+      local_only_protocol: 1,
+    })
+    if (supported) {
+      let body: Buffer
+      if (process.platform === 'win32') {
+        // The inbox .NET Framework compiler supplies a tiny real PE program on Windows.
+        const source = join(ctx.dataFolder, 'Probe.cs')
+        const exe = join(ctx.dataFolder, 'flm.exe')
+        await writeFile(
+          source,
+          'class Probe { static int Main(string[] a) { if (string.Join(" ", a) != "atomic-capabilities --json") return 3; System.Console.WriteLine(' +
+            JSON.stringify(id) +
+            '); return 0; } }'
+        )
+        await promisify(execFile)(
+          join(process.env.SystemRoot!, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
+          ['/nologo', '/out:' + exe, source]
+        )
+        body = makeZip([{ name: 'flm.exe', data: await readFile(exe) }])
+      } else {
+        body = (
+          await launcherArchive(ctx.dataFolder, 'test-flm.tar.gz', {
+            flm: `[ "$*" = 'atomic-capabilities --json' ] || exit 3\necho '${id}'`,
+          })
+        ).body
+      }
+      asset.sha256 = createHash('sha256').update(body).digest('hex')
+      asset.size = body.length
+      mirror.serve(new URL(asset.url).pathname, body)
+    }
+    await writeFile(manifest, JSON.stringify({ schema_version: 1, releases: [release] }))
+    const { ready } = await core.startDaemon(ctx.dataFolder, ctx.daemons, [], {
+      ATOMIC_FASTFLOWLM_MANIFEST_URL: pathToFileURL(manifest).href,
+      ATOMIC_FASTFLOWLM_ENVIRONMENT_MANIFEST_URL: pathToFileURL(join(ctx.dataFolder, 'missing-env.json'))
+        .href,
+    })
+    const plan = await post(ready, '/runtimes/fastflowlm/probe', {})
+    expect(await json(plan)).toMatchObject({ status: 'blocked', packages: [], changes: [] })
+    expect((await post(ready, '/runtimes/fastflowlm/probe', { runtime_account: 'root' })).status).toBe(400)
+    const facts = await json<{ ready: boolean; blockers: string[]; engine_version: string | null }>(
+      await control(ctx, ready, '/runtimes/fastflowlm/accelerators')
+    )
+    expect(facts).toMatchObject({ ready: false, engine_version: null })
+    expect(facts.blockers.length).toBeGreaterThan(0)
+    if (!supported) expect(facts.blockers).toContain('platform-unsupported')
+    const check = () => post(ready, '/models/fastflowlm/check', { descriptor: qwen.definition })
+    expect(await json(await check())).toMatchObject({
+      verdict:
+        supported && !facts.blockers.includes('xdna2-not-found')
+          ? 'engine-not-installed'
+          : 'platform-unsupported',
+      metadata: null,
+    })
+    expect(
+      await json(await post(ready, '/models/fastflowlm/check', { model_id: qwen.definition.variant_id }))
+    ).toMatchObject({ verdict: 'invalid-installation' })
+    expect(existsSync(join(ctx.dataFolder, 'fastflowlm', 'models', qwen.definition.variant_id))).toBe(false)
+    const catalog = await json<Catalog>(await post(ready, '/engine-builds/fastflowlm/catalog'))
+    expect(catalog.manifest?.tag).toBe(release.version)
+    expect(catalog.host_backend_id).toBe(supported ? asset.platform : null)
+    const response = await post(ready, '/engine-builds/fastflowlm/install', {
+      task_id: 'flm-engine',
+      proxy: mirror.proxy,
+    })
+    if (!supported) {
+      expect(await response.json()).toMatchObject({ error: { code: 'UNSUPPORTED_BACKEND' } })
+      expect(mirror.seen).toEqual([])
+      return
+    }
+    expect(await json(response)).toMatchObject({
+      installed: true,
+      build: { tag: release.version, backend_id: asset.platform },
+    })
+    expect((await json<Catalog>(await post(ready, '/engine-builds/fastflowlm/catalog'))).active?.tag).toBe(
+      release.version
+    )
+    expect(await json(await check())).toMatchObject({
+      verdict: facts.blockers.includes('xdna2-not-found') ? 'platform-unsupported' : 'environment-not-ready',
+    })
+    expect(mirror.seen).toEqual([new URL(asset.url).pathname])
+  }
+)

@@ -6,6 +6,11 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { c as tarCreate } from 'tar'
 import { describe, expect, it, vi } from 'vitest'
+import qwen3Candidate from '../../test/fixtures/fastflowlm/qwen3-candidate.json' with { type: 'json' }
+import { parseFastFlowLmDescriptor } from '../client/index.js'
+import { linuxFastFlowLmPci, writeFlmInstallation } from '../../test/helpers/fastflowlm-installation.js'
+import { flmRelease } from '../../test/helpers/fastflowlm-manifest.js'
+import { launcherArchive } from '../../test/helpers/engine-builds-mirror.js'
 import { cores, createCore, data, useCoreHarness } from '../../test/helpers/core-harness.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {
@@ -298,7 +303,7 @@ describe('taking ownership', () => {
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
         details:
-          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, tensorrt-llm, vllm, sglang',
+          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, fastflowlm, tensorrt-llm, vllm, sglang',
       })
     )
   })
@@ -2603,3 +2608,93 @@ describe.skipIf(process.platform === 'win32')(
     })
   }
 )
+
+it.skipIf(process.platform === 'win32')(
+  'installs the FLM engine through the control API before driver preparation, without fetching model files',
+  async () => {
+    const r = flmRelease()
+    const asset = r.assets[1]!
+    const identity = JSON.stringify({
+      local_only_protocol: 1,
+      atomic_revision: 1,
+      upstream_commit: r.upstream_commit,
+    })
+    const pack = await launcherArchive(data.root, 'flm.tar.gz', {
+      flm: `[ "$*" = 'atomic-capabilities --json' ] || exit 2\necho '${identity}'`,
+    })
+    Object.assign(asset, { sha256: pack.sha256, size: pack.size })
+    const manifest = join(data.root, 'flm.json')
+    await writeFile(manifest, JSON.stringify({ schema_version: 1, releases: [r] }))
+    const downloads: string[] = []
+    const core = await createCore({
+      platform: 'linux',
+      foundryLocalHost: { arch: 'x64', glibcVersion: '2.39' },
+      env: { ATOMIC_FASTFLOWLM_MANIFEST_URL: pathToFileURL(manifest).href },
+      hardware: { fastFlowLm: { fs: linuxFastFlowLmPci() } },
+      fetch: async (input) => {
+        if (String(input) !== asset.url) return new Response(null, { status: 404 })
+        downloads.push(String(input))
+        return new Response(new Uint8Array(pack.body), { headers: { 'Content-Length': String(pack.size) } })
+      },
+    })
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const models = data.layout.provider('fastflowlm').modelsDir
+    await mkdir(models, { recursive: true })
+    await writeFile(join(models, 'client-owned'), 'keep')
+    expect(await client.updateEngine('fastflowlm', { task_id: 'engine-only' })).toMatchObject({
+      updated: true,
+      active: { version: r.version, variant: asset.platform },
+    })
+    expect((await client.engineBuildCatalog('fastflowlm')).active?.tag).toBe(r.version)
+    expect(
+      await client.checkFastFlowLmModel({ descriptor: parseFastFlowLmDescriptor(qwen3Candidate.definition) })
+    ).toMatchObject({ verdict: 'environment-not-ready' })
+    expect(downloads).toEqual([asset.url])
+    expect(await readdir(models)).toEqual(['client-owned'])
+    expect(await readFile(join(models, 'client-owned'), 'utf8')).toBe('keep')
+  }
+)
+
+it('discovers an installer commit immediately and checks it by ID or directory through the authenticated client', async () => {
+  const core = await createCore({
+    platform: 'linux',
+    hardware: { fastFlowLm: { fs: linuxFastFlowLmPci() } },
+    foundryLocalHost: { arch: 'x64', glibcVersion: '2.39' },
+  })
+  const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+  const registry = core.registry('fastflowlm')
+  expect(await registry.list()).toEqual([])
+  const { dir, metadata } = await writeFlmInstallation(data.root)
+  expect((await registry.list()).map((m) => m.id)).toEqual([metadata.variant_id])
+  const caps = await fetch(
+    core.control.url + '/atomic/v1/models/fastflowlm/' + metadata.variant_id + '/capabilities',
+    {
+      headers: { authorization: 'Bearer ' + core.controlToken },
+    }
+  )
+  expect(caps.status).toBe(200)
+  expect(await caps.json()).toEqual({
+    modelId: metadata.variant_id,
+    maxCtxTrain: 32768,
+    mmprojExists: false,
+    isEmbedding: false,
+    isDecision: false,
+    vision: false,
+    audio: false,
+    gemmaMtp: false,
+    dflash: false,
+    dflashDrafts: [],
+  })
+  for (const request of [{ model_id: metadata.variant_id }, { path: dir }]) {
+    expect(await client.checkFastFlowLmModel(request)).toMatchObject({
+      verdict: 'engine-not-installed',
+      metadata,
+    })
+  }
+  await rm(join(dir, 'tokenizer.json'))
+  expect(await client.checkFastFlowLmModel({ model_id: metadata.variant_id })).toMatchObject({
+    verdict: 'invalid-installation',
+    metadata: null,
+  })
+  expect(await registry.list()).toEqual([])
+})

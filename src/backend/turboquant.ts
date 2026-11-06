@@ -15,6 +15,7 @@
  * Windows TurboQuant pack is filtered out as unsupported.
  */
 
+import { gpuMemoryMiB } from '../hardware/index.js'
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import type { DataLayout } from '../config/index.js'
@@ -412,7 +413,7 @@ export function determineBestTurboquantBackend(
   gpus: readonly GpuProbeInfo[]
 ): string {
   if (backends.length === 0) return ''
-  const hasEnough = gpus.some((gpu) => (gpu.total_memory ?? 0) >= TURBOQUANT_GPU_MIN_VRAM_MIB)
+  const hasEnough = gpus.some((gpu) => gpuMemoryMiB(gpu) >= TURBOQUANT_GPU_MIN_VRAM_MIB)
   return prioritizeTurboquantBackends(backends, hasEnough)
 }
 

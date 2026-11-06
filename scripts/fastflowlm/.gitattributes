@@ -1,0 +1,3 @@
+Cargo.lock text eol=lf
+local-only.patch -text -whitespace
+provenance.json text eol=lf

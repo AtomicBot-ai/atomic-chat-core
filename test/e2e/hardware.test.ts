@@ -86,9 +86,10 @@ describe.skipIf(!existsSync(BIN))('the compiled core probes the machine it runs 
     const gpus = [
       {
         vendor: 'AMD',
-        total_memory: 24_576,
+        total_memory: 512,
+        shared_memory: 15_606,
         driver_version: '32.0.12033.1030',
-        vulkan_info: { device_id: 0x744c, device_type: 'DiscreteGpu' },
+        vulkan_info: { device_id: 0x1114, device_type: 'IntegratedGpu' },
       },
     ]
     const put = await control(ready, '/hardware/override', {
@@ -102,10 +103,11 @@ describe.skipIf(!existsSync(BIN))('the compiled core probes the machine it runs 
     expect(overridden.info.gpus).toHaveLength(1)
     expect(overridden.info.gpus[0]).toMatchObject({
       vendor: 'AMD',
-      total_memory: 24_576,
+      total_memory: 512,
+      shared_memory: 15_606,
       driver_version: '32.0.12033.1030',
       nvidia_info: null,
-      vulkan_info: { device_type: 'DiscreteGpu', device_id: 0x744c },
+      vulkan_info: { device_type: 'IntegratedGpu', device_id: 0x1114 },
     })
     // The probe's own CPU and memory are kept under the override.
     expect(overridden.info.cpu.name).toBe(first.info.cpu.name)

@@ -187,3 +187,8 @@ describe('EnginesService.activate', () => {
     })
   })
 })
+
+it('only lists FastFlowLM when the host has registered the provider', () => {
+  expect(hostEngines('win32', [])).not.toContain('fastflowlm')
+  expect(hostEngines('linux', [], { fastflowlm: true })).toContain('fastflowlm')
+})

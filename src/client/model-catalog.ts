@@ -1,3 +1,8 @@
+import {
+  type FastFlowLmCatalogOptions,
+  parseFastFlowLmDefinition,
+  projectFastFlowLmCollection,
+} from './fastflowlm-catalog.js'
 /** Browser-safe contract for the single editable Atomic Chat model catalog. */
 export type AtomicCatalogRecord = Record<string, unknown>
 export interface AtomicCatalogEntry {
@@ -40,7 +45,10 @@ const record = (v: unknown): v is AtomicCatalogRecord =>
   v !== null && typeof v === 'object' && !Array.isArray(v)
 
 /** Reject a document that cannot supply immutable sources or valid model references. */
-export function parseAtomicModelCatalog(value: unknown): AtomicModelCatalog {
+export function parseAtomicModelCatalog(
+  value: unknown,
+  options: FastFlowLmCatalogOptions = {}
+): AtomicModelCatalog {
   if (
     !record(value) ||
     value.schema_version !== 1 ||
@@ -60,6 +68,7 @@ export function parseAtomicModelCatalog(value: unknown): AtomicModelCatalog {
     }
     Object.values(v).forEach(sources)
   }
+  const flmVariants = new Set<string>()
   for (const entry of Object.values(value.models)) {
     if (
       !record(entry) ||
@@ -69,6 +78,11 @@ export function parseAtomicModelCatalog(value: unknown): AtomicModelCatalog {
       !record(entry.definition)
     )
       throw new Error('Invalid catalog model')
+    if (entry.kind === 'fastflowlm') {
+      const { variant_id } = parseFastFlowLmDefinition(entry as unknown as AtomicCatalogEntry, options)
+      if (flmVariants.has(variant_id)) throw new Error('Duplicate FastFlowLM variant')
+      flmVariants.add(variant_id)
+    }
     sources(entry.definition)
     if (entry.kind === 'chat' && (!Array.isArray(entry.files) || entry.files.length === 0))
       throw new Error('Missing catalog file plan')
@@ -87,7 +101,8 @@ export function parseAtomicModelCatalog(value: unknown): AtomicModelCatalog {
       }
   }
   const catalog = value as unknown as AtomicModelCatalog
-  for (const name of ['recommended', ...Object.keys(fields)]) projectAtomicModelCollection(catalog, name)
+  for (const name of ['recommended', 'fastflowlm-models', ...Object.keys(fields)])
+    projectAtomicModelCollection(catalog, name, true, options)
   return catalog
 }
 
@@ -95,8 +110,10 @@ export function parseAtomicModelCatalog(value: unknown): AtomicModelCatalog {
 export function projectAtomicModelCollection(
   catalog: AtomicModelCatalog,
   name: string,
-  pinned = true
+  pinned = true,
+  options: FastFlowLmCatalogOptions = {}
 ): AtomicCatalogRecord {
+  if (name === 'fastflowlm-models') return projectFastFlowLmCollection(catalog, options)
   const collection = catalog.collections[name]
   if (!collection || !record(collection.header) || collection.header.schema_version !== 1)
     throw new Error(`Missing or unsupported model collection ${name}`)

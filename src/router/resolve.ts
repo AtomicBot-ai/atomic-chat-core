@@ -32,6 +32,7 @@ export type LocalProvider =
   | 'foundry-local'
   | 'litert-lm'
   | 'geniex'
+  | 'fastflowlm'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
@@ -57,6 +58,7 @@ export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'foundry-local',
   'litert-lm',
   'geniex',
+  'fastflowlm',
 ]
 
 /**

@@ -476,3 +476,23 @@ describe('model logs route', () => {
     expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
   })
 })
+
+it('refuses caller-supplied FastFlowLM preparation facts before probing the host', async () => {
+  const owner = await start({
+    fastFlowLmPreparation: async () => {
+      throw Error('unexpected probe')
+    },
+  })
+  try {
+    for (const body of [null, [], { runtime_account: 'root' }]) {
+      const response = await owner.get('/atomic/v1/runtimes/fastflowlm/probe', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } })
+    }
+  } finally {
+    await owner.server.close()
+  }
+})

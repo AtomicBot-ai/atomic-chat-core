@@ -17,12 +17,24 @@ import { probeLinux } from './probe-linux.js'
 import { probeWindows } from './probe-windows.js'
 
 /** `execFile` with the probe's rules: hidden window, a deadline, a bounded buffer, exit code as data. */
-export function runTool(file: string, args: string[], timeoutMs: number): Promise<ToolResult> {
+export function runTool(
+  file: string,
+  args: string[],
+  timeoutMs: number,
+  options?: { env: NodeJS.ProcessEnv; cwd: string }
+): Promise<ToolResult> {
   return new Promise((resolve, reject) => {
     execFile(
       file,
       args,
-      { timeout: timeoutMs, windowsHide: true, maxBuffer: PROBE_MAX_OUTPUT_BYTES, encoding: 'utf8' },
+      {
+        ...options,
+        timeout: timeoutMs,
+        killSignal: 'SIGKILL',
+        windowsHide: true,
+        maxBuffer: PROBE_MAX_OUTPUT_BYTES,
+        encoding: 'utf8',
+      },
       (error, stdout, stderr) => {
         if (!error) return resolve({ stdout, stderr, code: 0 })
         const failure = error as Error & { code?: string | number; killed?: boolean; signal?: string | null }

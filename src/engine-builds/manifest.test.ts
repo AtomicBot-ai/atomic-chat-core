@@ -1,3 +1,5 @@
+import { flmRelease } from '../../test/helpers/fastflowlm-manifest.js'
+import type { FastFlowLmManifest } from './fastflowlm-manifest.js'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -693,7 +695,7 @@ afterEach(() => data.cleanup())
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
 function source<T>(
-  kind: 'sd-cpp' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
+  kind: 'sd-cpp' | 'fastflowlm' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
   respond: (url: string) => Response | Promise<Response>,
   opts: { env?: Record<string, string>; clock?: { now: number } } = {}
 ) {
@@ -904,4 +906,35 @@ describe('EngineManifestSource', () => {
     expect((await src.cached())?.tag_name).toBe('master-883-137f740-a36f1b1a')
     expect(urls).toHaveLength(1)
   })
+})
+
+it('reloads the last FLM release offline and isolates a development manifest from the production cache', async () => {
+  const r = flmRelease()
+  const file = join(data.root, 'flm.json')
+  const env = { ATOMIC_FASTFLOWLM_MANIFEST_URL: pathToFileURL(file).href }
+  await writeFile(file, JSON.stringify({ schema_version: 1, releases: [r] }))
+  const offline = () => {
+    throw new Error('offline')
+  }
+  const load = () => source<FastFlowLmManifest>('fastflowlm', offline, { env }).src.read()
+  expect((await load()).manifest?.releases[0]).toEqual(r)
+  await writeFile(file, 'invalid JSON')
+  expect(await load()).toMatchObject({ source: 'cache', manifest: { releases: [r] } })
+  expect(await source<FastFlowLmManifest>('fastflowlm', offline).src.read()).toMatchObject({
+    source: null,
+    manifest: null,
+  })
+})
+
+it('refuses to cache a changed archive for an already published FLM build ID', async () => {
+  const release = flmRelease()
+  const { src } = source<FastFlowLmManifest>('fastflowlm', () =>
+    json({ schema_version: 1, releases: [release] })
+  )
+  expect((await src.read()).source).toBe('remote')
+  release.assets[0]!.sha256 = '0'.repeat(64)
+  const read = await src.read({ force: true })
+  expect(read.source).toBe('cache')
+  expect(read.error).toContain('Immutable')
+  expect(read.manifest?.releases[0]?.assets[0]?.sha256).toBe('a'.repeat(64))
 })

@@ -9,6 +9,7 @@
  * Pure: the script text, its arguments, and the parse of what comes back. `probe-windows.ts` runs it.
  */
 
+import { WINDOWS_DXGI_PROBE, windowsDxgiMemory } from './windows-dxgi.js'
 import { icdVendorOf } from './vulkan.js'
 
 const DISPLAY_CLASS_KEY =
@@ -31,8 +32,9 @@ export const WINDOWS_PROBE_SCRIPT: string = [
   "$vulkan = @{ dll = [bool](Test-Path (Join-Path $env:SystemRoot 'System32\\vulkan-1.dll')); drivers = $drivers }",
   '$pf = $null',
   "try { Add-Type -Namespace AtomicProbe -Name Native -MemberDefinition ('[DllImport(' + [char]34 + 'kernel32.dll' + [char]34 + ')] public static extern bool IsProcessorFeaturePresent(int f);'); $pf = @{}; foreach ($f in 3,6,10,13,36,37,38,39,40,41) { $pf[[string]$f] = [bool][AtomicProbe.Native]::IsProcessorFeaturePresent($f) } } catch { $pf = $null }",
+  WINDOWS_DXGI_PROBE,
   '$build = [Environment]::OSVersion.Version.Build',
-  '[pscustomobject]@{ video = $video; classKeys = $classKeys; cpu = $cpu; os = $os; vulkan = $vulkan; pf = $pf; build = $build } | ConvertTo-Json -Depth 5 -Compress',
+  '[pscustomobject]@{ video = $video; dxgi = $dxgi; classKeys = $classKeys; cpu = $cpu; os = $os; vulkan = $vulkan; pf = $pf; build = $build } | ConvertTo-Json -Depth 5 -Compress',
 ].join('; ')
 
 export function windowsProbeArgs(): string[] {
@@ -61,6 +63,8 @@ export interface WindowsDisplayClassKey {
 }
 
 export interface WindowsProbe {
+  /** Optional DXGI / D3D12 facts; missing when the OS probe is blocked. */
+  dxgi?: unknown
   video: WindowsVideoController[]
   classKeys: WindowsDisplayClassKey[]
   cpu: Array<{ Name?: string; NumberOfCores?: number }>
@@ -153,7 +157,16 @@ export function parseWindowsProbe(json: string): WindowsProbe {
   const pfObject = asObject(root['pf'])
   const pf = pfObject ? Object.fromEntries(Object.entries(pfObject).map(([k, v]) => [k, v === true])) : null
   const build = asNumber(root['build']) ?? asNumber(os?.BuildNumber) ?? 0
-  return { video, classKeys, cpu, os, vulkan, pf, build }
+  return {
+    video,
+    classKeys,
+    cpu,
+    os,
+    vulkan,
+    pf,
+    build,
+    ...(root['dxgi'] !== undefined ? { dxgi: root['dxgi'] } : {}),
+  }
 }
 
 /** Drop the `undefined` entries, so an absent field is absent (`exactOptionalPropertyTypes`). */
@@ -203,6 +216,8 @@ export interface WindowsAdapter {
   driverVersion: string
   /** MiB; absent when neither the class key nor `AdapterRAM` had a figure. */
   vramTotalMiB?: number
+  sharedMemoryMiB?: number
+  integrated?: boolean
   /** The display class key registered a Vulkan ICD for this adapter. */
   vulkanDriver: boolean
 }
@@ -251,6 +266,7 @@ export function windowsGpus(probe: WindowsProbe): {
       pnpDeviceId: pnp,
       driverVersion: controller.DriverVersion ?? '',
       ...(vramTotalMiB !== undefined ? { vramTotalMiB } : {}),
+      ...windowsDxgiMemory(probe.dxgi, pnp),
       vulkanDriver: matching.some((key) => key.VulkanDriverName.length > 0),
     })
   }

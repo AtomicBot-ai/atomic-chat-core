@@ -5,6 +5,7 @@
  */
 export * from './manifest.js'
 export * from './order.js'
+export { fastFlowLmHostPlatform } from './fastflowlm.js'
 export * from './select.js'
 export * from './builds.js'
 export * from './install.js'

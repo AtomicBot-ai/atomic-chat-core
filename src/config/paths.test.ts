@@ -272,3 +272,10 @@ describe('managed runtime paths', () => {
     expect(dir).toHaveLength(1)
   })
 })
+
+it('isolates FastFlowLM model files, cache and engine builds under the provider root', () => {
+  const paths = layout.provider('fastflowlm')
+  expect(paths.modelsDir).toBe(native('/data/fastflowlm/models'))
+  expect(paths.backendsDir).toBe(native('/data/fastflowlm/backends'))
+  expect(paths.cacheDir).toBe(native('/data/fastflowlm/cache'))
+})

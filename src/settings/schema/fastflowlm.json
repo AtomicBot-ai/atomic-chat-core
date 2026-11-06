@@ -1,0 +1,28 @@
+[
+  {
+    "key": "ctx_len",
+    "title": "Context Length",
+    "description": "Maximum prompt plus reply length in tokens. 0 takes the model's own length; a larger value is cut to what the model file allows. Applies from the next model load.",
+    "controllerType": "input",
+    "controllerProps": {
+      "value": 0,
+      "placeholder": "0",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "textAlign": "right"
+    }
+  },
+  {
+    "key": "timeout",
+    "title": "FastFlowLM load timeout",
+    "description": "Maximum time in seconds to load the selected checkpoint on the NPU.",
+    "controllerType": "input",
+    "controllerProps": {
+      "value": 600,
+      "placeholder": "e.g 600",
+      "type": "number",
+      "textAlign": "right"
+    }
+  }
+]
