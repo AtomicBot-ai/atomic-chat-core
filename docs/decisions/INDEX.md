@@ -186,3 +186,4 @@ add a new one that says which record it supersedes.
 - [Give mlx-server the llama.cpp answer cap](2026-11-05-give-mlx-the-llama-answer-cap.md)
 - [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)
 - [Tag sd.cpp install probe failures with finite diagnostic codes](2026-11-05-tag-sdcpp-install-probe-failures.md)
+- [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
