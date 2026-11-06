@@ -7,9 +7,11 @@
  */
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const FAKE = fileURLToPath(new URL('../helpers/fake-model-docker.mjs', import.meta.url))
@@ -19,14 +21,16 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true })
 })
 
-const docker = (state: string, ...args: string[]) =>
+const dockerWithEnv = (state: string, env: NodeJS.ProcessEnv, ...args: string[]) =>
   new Promise<number | null>((resolve) => {
     const child = spawn(process.execPath, [FAKE, ...args], {
-      env: { ...process.env, FAKE_DOCKER_STATE: state },
+      env: { ...process.env, ...env, FAKE_DOCKER_STATE: state },
       stdio: 'ignore',
     })
     child.on('exit', resolve)
   })
+
+const docker = (state: string, ...args: string[]) => dockerWithEnv(state, {}, ...args)
 
 describe('the fake docker state file', () => {
   it('stays readable JSON while many calls write it at once', async () => {
@@ -71,4 +75,36 @@ describe('a fake engine', () => {
     while (alive(pid) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
     expect(alive(pid)).toBe(false)
   }, 20_000)
+})
+
+describe('Docker-assigned host ports', () => {
+  it.each([['trtllm-serve'], ['vllm', 'serve'], ['python3', '-m', 'sglang.launch_server']])(
+    'binds an available port instead of guessing one for %s',
+    async (...command) => {
+      dir = await mkdtemp(join(tmpdir(), 'atomic-core-fake-docker-'))
+      const holder = createServer((socket) => socket.destroy())
+      await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve))
+      const taken = (holder.address() as AddressInfo).port
+      const state = join(dir, 'docker.json')
+      const preload = join(dir, 'fixed-random.mjs')
+      // Reproduce the old fake's collision deterministically, regardless of other CI workers.
+      await writeFile(preload, `Math.random = () => (${taken} - 30000 + 0.5) / 20000`)
+      const env = { NODE_OPTIONS: `--import=${pathToFileURL(preload).href}` }
+      const call = (...args: string[]) => dockerWithEnv(state, env, ...args)
+      const id = 'fakectr00000001'
+      try {
+        expect(await call('create', '-p', '127.0.0.1::8000', '--gpus', 'all', 'image', ...command)).toBe(0)
+        expect(await call('start', id)).toBe(0)
+        const db = JSON.parse(await readFile(state, 'utf8')) as {
+          containers: Record<string, { hostPort: number }>
+        }
+        const port = db.containers[id]!.hostPort
+        expect(port).not.toBe(taken)
+        expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200)
+      } finally {
+        await call('stop', id)
+        await new Promise<void>((resolve) => holder.close(() => resolve()))
+      }
+    }
+  )
 })
