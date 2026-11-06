@@ -4,6 +4,7 @@ import {
   supportedLinuxNpuRecipe,
   type LinuxNpuRecipe,
 } from '../../runtime/fastflowlm/environment/index.js'
+import type { LinuxRuntimeProcess, LinuxMemlockStepParameters } from '../../contracts/index.js'
 import { CORE_VERSION } from '../../version.js'
 import type { HostStepRequest } from './request-file.js'
 
@@ -16,7 +17,10 @@ export function linuxNpuTarget(request: HostStepRequest) {
       mode = p.runtime_mode,
       device = p.device_instance_id
     if (
-      Object.keys(p).sort().join(',') !==
+      Object.keys(p)
+        .filter((k) => k !== 'runtime_process')
+        .sort()
+        .join(',') !==
       'device_access,device_instance_id,environment_manifest,manifest_digest,manifest_id,memlock,package_names,recipe_revision,runtime_account,runtime_mode,runtime_service'
     )
       return null
@@ -37,6 +41,18 @@ export function linuxNpuTarget(request: HostStepRequest) {
       typeof p.memlock !== 'boolean' ||
       typeof p.device_access !== 'boolean' ||
       !Array.isArray(p.package_names)
+    )
+      return null
+    const owner = p.runtime_process as LinuxRuntimeProcess | undefined
+    if (
+      owner &&
+      (Object.keys(owner).sort().join(',') !== 'boot_id,pid,start_ticks' ||
+        !Number.isSafeInteger(owner.pid) ||
+        owner.pid <= 1 ||
+        typeof owner.start_ticks !== 'string' ||
+        !/^\d+$/.test(owner.start_ticks) ||
+        typeof owner.boot_id !== 'string' ||
+        !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(owner.boot_id))
     )
       return null
     const manifest = parseEnvironment(p.environment_manifest, 'linux')
@@ -68,9 +84,10 @@ export function linuxNpuTarget(request: HostStepRequest) {
     )
       return null
     return {
+      ...(owner ? { runtimeProcess: owner } : {}),
       recipe: r,
       account,
-      mode,
+      mode: mode as LinuxMemlockStepParameters['runtime_mode'],
       unit: p.runtime_service as string | null,
       device,
       packages,

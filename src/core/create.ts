@@ -812,8 +812,9 @@ export async function createAtomicCore(
       },
       async (op) => {
         const path = join(flmModels.modelsDir, op.model_id)
+        // Only a first installation can roll back to absence; replacement of an existing model stays guarded.
         if (
-          op.kind === 'remove' &&
+          (op.kind === 'remove' || op.initially_absent === true) &&
           !(await lstat(path).catch((e: NodeJS.ErrnoException) => {
             if (e.code === 'ENOENT') return null
             throw e
@@ -822,7 +823,12 @@ export async function createAtomicCore(
           return
         await flmModels.get(op.model_id)
       },
-      layout.root
+      layout.root,
+      async (id) =>
+        !(await lstat(join(flmModels.modelsDir, id)).catch((e: NodeJS.ErrnoException) => {
+          if (e.code === 'ENOENT') return null
+          throw e
+        }))
     )
     const flmRuntime: FastFlowLmRuntime | undefined = flmHost.platform
       ? new FastFlowLmRuntime({
@@ -922,6 +928,7 @@ export async function createAtomicCore(
     const flmPreparation = async (pinned?: FlmManifest, pinnedBuild?: string | null) => {
       const facts = await flmProbe()
       const plan = await probePreparation(facts, platform, foundryLocalArch, {
+        pinned: pinned !== undefined,
         host: () => preparationHost(flmDeps, nativeHostFacts.osRelease),
         manifest: () => (pinned ? Promise.resolve(pinned) : flmEnvironment.latest()),
         selectedBuild: async () => {

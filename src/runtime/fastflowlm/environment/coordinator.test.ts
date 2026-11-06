@@ -168,3 +168,50 @@ it('cancels before dispatch and lets only one launcher claim a later authorizati
   const results = await Promise.allSettled([claim(), claim()])
   expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected'])
 })
+
+it('prepares memory without fetching a driver manifest and verifies the live unprivileged owner', async () => {
+  let facts = flmFacts(['memlock-too-low'])
+  facts.memlock_bytes = '8388608'
+  facts.devices[0]!.accessible = true
+  const owner = { pid: 4207, start_ticks: '123', boot_id: '11111111-1111-1111-1111-111111111111' }
+  const core = new PreparationCoordinator({
+    dir,
+    inspect: async () => ({
+      facts,
+      plan: preparationPlan(
+        facts,
+        {
+          os: 'linux',
+          arch: 'x64',
+          distribution: 'arch',
+          version: null,
+          kernel_release: '7.2',
+          mutable: true,
+          process: owner,
+        },
+        null
+      ),
+    }),
+    pinned: async () => {
+      throw Error('Memory preparation must not fetch a manifest')
+    },
+    facts: async () => facts,
+    boot: async () => owner.boot_id,
+    emit: () => {},
+  })
+  const offered = await core.begin({ request_id: 'memory' })
+  expect(offered.state).toBe('awaiting-consent')
+  const approved = await core.consent(offered.operation_id, {
+    expected_revision: offered.revision,
+    approved_plan_digest: offered.plan.plan_digest,
+  })
+  const claimed = await core.claim(approved.operation_id, { expected_revision: approved.revision })
+  expect(claimed.pending_host_step).toMatchObject({
+    action: 'linux.configure-runtime-memlock',
+    parameters: { runtime_process: owner },
+  })
+  facts = flmFacts([])
+  expect(await core.receipt(claimed.operation_id, receipt(claimed.pending_host_step!))).toMatchObject({
+    state: 'ready',
+  })
+})

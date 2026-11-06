@@ -13,3 +13,5 @@ export {
 export { PreparationCoordinator } from './coordinator.js'
 export { preparationBoot } from './boot.js'
 export type { FlmManifest } from './manifest.js'
+
+export { RUNTIME_MEMLOCK, RUNTIME_MEMLOCK_DIGEST, runtimeProcess } from './memlock.js'

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, readdir, realpath } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve } from 'node:path'
@@ -78,22 +77,16 @@ async function openRegular(path: string) {
   }
 }
 
-async function verifyFile(dir: string, expected: ModelYmlFastFlowLm['files'][number]) {
+/** Hashes are checked by the installer after download; never reread payload bytes for discovery or load. */
+async function inspectFile(dir: string, expected: ModelYmlFastFlowLm['files'][number]) {
   const file = await openRegular(join(dir, expected.path))
   try {
     if ((await file.stat()).size !== expected.size) invalid('Wrong size: ' + expected.path)
-    const digest = createHash('sha256')
-    let config: string | undefined
     if (expected.path === 'config.json') {
       if (expected.size > 16 * 1024 * 1024) invalid('Oversized config.json.')
-      const bytes = await file.readFile()
-      digest.update(bytes)
-      config = bytes.toString('utf8')
-    } else {
-      for await (const chunk of file.createReadStream({ autoClose: false })) digest.update(chunk)
+      return await file.readFile('utf8')
     }
-    if (digest.digest('hex') !== expected.sha256) invalid('Wrong SHA-256: ' + expected.path)
-    return config
+    return undefined
   } finally {
     await file.close()
   }
@@ -146,7 +139,7 @@ function checkConfig(config: Record<string, unknown>, metadata: ModelYmlFastFlow
   return version.split('.').map(Number).join('.')
 }
 
-/** Read-only registry. Both lookup for launch and check use the same on-disk proof. */
+/** Read-only structural checks for installed models. Content integrity is verified during download. */
 export class FastFlowLmRegistry {
   readonly modelsDir: string
   constructor(private readonly layout: DataLayout) {
@@ -209,7 +202,7 @@ export class FastFlowLmRegistry {
     ])
     let config: string | undefined
     for (const file of metadata.files) {
-      const content = await verifyFile(dir, file)
+      const content = await inspectFile(dir, file)
       if (content !== undefined) config = content
     }
     if (config === undefined) return invalid('Missing config.json.')

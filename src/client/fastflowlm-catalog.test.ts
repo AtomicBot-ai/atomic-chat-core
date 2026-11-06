@@ -57,3 +57,22 @@ it('rejects variant IDs that cannot name a Windows installation directory', () =
     expect(() => parseFastFlowLmDefinition(entry, { allowCandidates: true })).toThrow('model identity')
   }
 })
+
+it('accepts upstream catalog provenance without claiming hardware qualification', () => {
+  const entry = {
+    ...structuredClone(candidate),
+    definition: {
+      ...structuredClone(candidate.definition),
+      qualification: { status: 'upstream', evidence: [] as string[] },
+    },
+  }
+  entry.definition.qualification = {
+    status: 'upstream',
+    evidence: ['https://github.com/ROCm/FastFlowLM/blob/pinned/src/model_list.json'],
+  }
+  expect(parseFastFlowLmDefinition(entry).qualification.status).toBe('upstream')
+  entry.definition.qualification.evidence = []
+  expect(() => parseFastFlowLmDefinition(entry)).toThrow('qualification')
+  entry.definition.qualification = { status: 'candidate', evidence: [] }
+  expect(() => parseFastFlowLmDefinition(entry)).toThrow('unqualified candidate')
+})

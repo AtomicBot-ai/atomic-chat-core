@@ -9,8 +9,11 @@ import { supportedWindowsDriver } from './windows-driver.js'
 import { CORE_VERSION } from '../../../version.js'
 import { canonicalDigest } from '../../environment/index.js'
 import type { FlmManifest, FlmRecipe } from './manifest.js'
+import { memoryPlan } from './memlock.js'
+import type { LinuxRuntimeProcess } from '../../../contracts/index.js'
 
 export interface PreparationHost {
+  process?: LinuxRuntimeProcess
   os: string
   arch: string
   distribution: string | null
@@ -151,6 +154,8 @@ export function preparationPlan(
   manifest: FlmManifest | null,
   build = facts.engine_version
 ): FastFlowLmProbePlan {
+  const memory = memoryPlan(facts, host, build)
+  if (memory) return memory
   let recipe: FlmRecipe | null = null
   let work: Actions | null = null
   const targets = facts.devices.filter((d) => d.generation === 'xdna2')
@@ -197,6 +202,7 @@ export function preparationPlan(
   }
   const result = {
     status: facts.ready ? ('ready' as const) : work ? ('action-required' as const) : ('blocked' as const),
+    ...(host.process ? { runtime_process: host.process } : {}),
     runtime_account: facts.runtime_account,
     runtime_mode: facts.runtime_mode,
     runtime_service: facts.runtime_service,

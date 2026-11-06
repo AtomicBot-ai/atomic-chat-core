@@ -202,3 +202,13 @@ add a new one that says which record it supersedes.
 - [Serialize FastFlowLM model changes and generation](2026-11-05-serialize-fastflowlm-model-changes-and-generation.md)
 - [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)
 - [Tag sd.cpp install probe failures with finite diagnostic codes](2026-11-05-tag-sdcpp-install-probe-failures.md)
+
+- [2026-11-06 — Release FLM maintenance after rollback to absence](2026-11-06-release-flm-maintenance-after-absent-rollback.md)
+
+- [2026-11-06 — Separate runtime memory preparation from driver recipes](2026-11-06-separate-runtime-memlock.md)
+
+- [Manual FastFlowLM driver setup](2026-11-06-manual-npu-driver-setup.md) — display-only vendor/distro guidance; automatic runtime memlock retained.
+
+- [Import the shipped FastFlowLM chat catalog with editorial recommendations](2026-11-06-import-upstream-flm-catalog.md)
+
+- [Verify FLM content only during download](2026-11-06-verify-flm-content-only-on-download.md) — Keep payload SHA-256 in the installer and remove full-file reads from registry lookups and load preparation.

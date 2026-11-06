@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process'
 import { constants, existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { invokingUidFrom, nodeHostFs, nodeHostStepDeps } from './executor-io.js'
 import type { HostFs } from './executor-io.js'
 import { INSTALL_CONTAINER_RUNTIME_RECIPE } from './install-container-runtime.js'
@@ -470,4 +470,21 @@ describe('who asked for elevation', () => {
     expect(invokingUidFrom(env)).toBe(uid)
     expect(nodeHostStepDeps(env).invokingUid).toBe(uid)
   })
+})
+
+it('the real memory executor refuses a foreign operator before reading or changing runtime files', async () => {
+  const readFile = vi.fn<HostFs['readFile']>()
+  const write = vi.fn<HostFs['open']>()
+  // An impossible UID differs from every actual Linux UID, including root in container CI.
+  const native = nodeHostStepDeps({ SUDO_UID: '4294967296' }, { ...nodeHostFs, readFile, open: write })
+  await expect(
+    native.configureRuntimeMemlock!({
+      runtime_account: userInfo().username,
+      runtime_mode: 'interactive',
+      runtime_service: null,
+      runtime_process: { pid: 4207, start_ticks: '123', boot_id: '11111111-1111-1111-1111-111111111111' },
+    })
+  ).rejects.toThrow()
+  expect(readFile).not.toHaveBeenCalled()
+  expect(write).not.toHaveBeenCalled()
 })

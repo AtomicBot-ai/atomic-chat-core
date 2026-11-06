@@ -37,7 +37,8 @@ export interface FastFlowLmDefinition extends FastFlowLmModelDescriptor {
   license: string
   gated: boolean
   components: Record<'weights' | 'tokenizer' | 'config' | 'chat_template' | 'kernels' | 'metadata', string[]>
-  qualification: { status: 'candidate' | 'qualified'; evidence: string[] }
+  recommended?: boolean
+  qualification: { status: 'candidate' | 'upstream' | 'qualified'; evidence: string[] }
 }
 
 export interface ModelYmlFastFlowLm extends FastFlowLmModelDescriptor {
@@ -94,6 +95,17 @@ export interface FastFlowLmAccelerators {
   automatic_repair_available: boolean
 }
 
+export interface LinuxRuntimeProcess {
+  pid: number
+  start_ticks: string
+  boot_id: string
+}
+export interface LinuxMemlockStepParameters {
+  runtime_account: string
+  runtime_mode: NonNullable<FastFlowLmAccelerators['runtime_mode']>
+  runtime_service: string | null
+  runtime_process: LinuxRuntimeProcess
+}
 export interface FastFlowLmPreparationPlan {
   plan_digest: Sha256Digest
   /** A plan can lack a manifest on a ready host, or lack a matching recipe in a known manifest. */
@@ -109,10 +121,20 @@ export interface FastFlowLmPreparationPlan {
   changes: ManagedSystemChange[]
 }
 
+/** Display-only guidance for the server host; clients never execute these commands. */
+export interface FastFlowLmDriverSetup {
+  title: string
+  steps: string[]
+  commands: string[]
+  links: { label: string; url: string }[]
+}
+
 export interface FastFlowLmProbePlan extends Omit<
   FastFlowLmPreparationPlan,
   'runtime_account' | 'runtime_mode'
 > {
+  driver_setup?: FastFlowLmDriverSetup
+  runtime_process?: LinuxRuntimeProcess
   status: 'ready' | 'blocked' | 'action-required'
   runtime_account: FastFlowLmAccelerators['runtime_account']
   runtime_mode: FastFlowLmAccelerators['runtime_mode']
@@ -147,13 +169,15 @@ export type WindowsNpuStepParameters = FlmHostParameters & {
   environment_manifest: unknown
 }
 export type LinuxNpuStepParameters = WindowsNpuStepParameters & {
+  driver_setup?: FastFlowLmDriverSetup
+  runtime_process?: LinuxRuntimeProcess
   package_names: string[]
   device_access: boolean
   memlock: boolean
 }
 export type FastFlowLmHostStep = Extract<
   ManagedHostStep,
-  { action: 'linux.install-amd-npu' | 'windows.install-amd-npu' }
+  { action: 'linux.install-amd-npu' | 'windows.install-amd-npu' | 'linux.configure-runtime-memlock' }
 >
 export interface FastFlowLmOperation {
   operation_id: string

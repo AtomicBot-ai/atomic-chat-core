@@ -10,7 +10,9 @@ function stepOf(op: FastFlowLmOperation) {
   if (op.state !== 'preparing-host' || !op.pending_host_step) return invalid()
   const step = op.pending_host_step
   if (
-    !['windows.install-amd-npu', 'linux.install-amd-npu'].includes(step.action) ||
+    !['windows.install-amd-npu', 'linux.install-amd-npu', 'linux.configure-runtime-memlock'].includes(
+      step.action
+    ) ||
     !/^[-a-zA-Z0-9_]{1,128}$/.test(step.step_id)
   )
     return invalid()

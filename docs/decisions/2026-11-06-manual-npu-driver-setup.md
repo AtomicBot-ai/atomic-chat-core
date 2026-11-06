@@ -1,0 +1,10 @@
+# Manual FastFlowLM driver setup
+
+- **Status:** Accepted, operator decision on 2026-11-06; supersedes automatic driver qualification as a release requirement for this change.
+- **Context:** The operator chose AMD's installer on Windows and distro instructions on Linux. Automatic runtime memlock preparation remains required.
+- **Decision:** New preparation probes do not obtain driver manifests or offer privileged driver transactions. They return optional, browser-safe `driver_setup` guidance selected from server facts, with fixed display-only commands and official links. Only pinned legacy operations retain recipe inspection. Existing executors and receipts are retained for compatibility; a new caller cannot opt into that path through the API.
+- **Scope:** Windows 11 x64 with detected XDNA2 gets the AMD download page. Mutable Ubuntu 24.04/25.10 gets the documented PPA/DKMS commands, Ubuntu 26.04 gets distribution firmware/module commands, and Arch gets firmware/system-update commands with an explicit update warning. Unknown/immutable hosts get diagnostics and the Linux guide. Commands are not shell input to any helper, and no host strings are interpolated into commands. Users handle custom kernels, reboot and Secure Boot enrollment through the linked instructions.
+- **Memory:** The independent `linux.runtime-memlock` plan wins when appropriate. It remains automatic and does not depend on driver manifests. Bundled XRT is not installed again as a system package.
+- **Readiness:** Guidance never sets ready, changes packages or invents a successful installation. Clients re-probe the actual unprivileged server account after manual setup.
+- **Validation:** Unit tests cover OS, mutable/unknown host, relevant blockers and command selection. Public API tests verify manual guidance even when a recipe is available, and no privileged step for new driver preparation. Existing memory/legacy recovery tests remain applicable. This does not claim live driver installation or Windows CI.
+- **Sources:** https://lemonade-server.ai/driver_install.html and https://lemonade-server.ai/flm_npu_linux.html, checked 2026-11-06.

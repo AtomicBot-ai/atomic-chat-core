@@ -7,6 +7,7 @@ import {
 } from '../../contracts/index.js'
 import type { AsyncMutex } from '../../diffusion/index.js'
 import { FlmJournal } from './journal.js'
+type MaintenanceRecord = FastFlowLmMaintenance & { initially_absent?: boolean }
 const conflict = (why: string): never => {
   throw new AtomicCoreError('MANAGED_OPERATION_CONFLICT', why)
 }
@@ -19,13 +20,14 @@ export class FlmMaintenance {
   private assertOpen() {
     if (this.closed) throw new AtomicCoreError('CORE_NOT_RUNNING', 'The FastFlowLM owner has stopped.')
   }
-  private readonly journal: FlmJournal<FastFlowLmMaintenance>
+  private readonly journal: FlmJournal<MaintenanceRecord>
   constructor(
     dir: string,
     private readonly lock: AsyncMutex,
     private readonly stop: (id: string) => Promise<void>,
-    private readonly scan: (op: FastFlowLmMaintenance) => Promise<void>,
-    dataRoot?: string
+    private readonly scan: (op: MaintenanceRecord) => Promise<void>,
+    dataRoot?: string,
+    private readonly initiallyAbsent: (id: string) => Promise<boolean> = async () => false
   ) {
     this.journal = new FlmJournal(dir, (r) => r.operation_id, dataRoot)
   }
@@ -58,7 +60,13 @@ export class FlmMaintenance {
         return conflict('The request ID already describes another maintenance operation.')
       if (!op) {
         await this.assertLoadable(req.model_id)
-        op = { ...req, operation_id: randomUUID(), state: 'stopping', ready_to_mutate: false }
+        op = {
+          ...req,
+          operation_id: randomUUID(),
+          state: 'stopping',
+          ready_to_mutate: false,
+          ...((await this.initiallyAbsent(req.model_id)) ? { initially_absent: true } : {}),
+        }
         await this.journal.write(op)
       }
       if (op.state === 'stopping') {

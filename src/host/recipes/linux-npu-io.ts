@@ -1,3 +1,4 @@
+import { configureRuntimeMemlock } from './linux-memlock-io.js'
 import { execFile } from 'node:child_process'
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { release } from 'node:os'
@@ -91,7 +92,7 @@ export async function installLinuxNpu(t: LinuxNpuTarget, deps: Deps, io = native
     ])
   let limitFile = '',
     limitText = ''
-  if (t.memlock) {
+  if (t.memlock && !t.runtimeProcess) {
     if (t.mode === 'user-service') {
       if (
         (await asUser('/usr/bin/systemctl', '--user', 'show', unit, '--property=LoadState', '--value')) !==
@@ -228,10 +229,21 @@ export async function installLinuxNpu(t: LinuxNpuTarget, deps: Deps, io = native
       if (t.mode === 'user-service') await asUser('/usr/bin/systemctl', '--user', 'daemon-reload')
       if (t.mode === 'system-service') await run('/usr/bin/systemctl', ['daemon-reload'])
     }
+    if (t.memlock && t.runtimeProcess)
+      await configureRuntimeMemlock(
+        {
+          runtime_account: t.account,
+          runtime_mode: t.mode,
+          runtime_service: t.unit,
+          runtime_process: t.runtimeProcess,
+        },
+        deps,
+        { run }
+      )
     if (driver && (files.length || (await read(pci + '/fw_version')) !== t.recipe.firmware_version))
       return 'reboot-required' as const
-    if (t.memlock && t.unit) return 'service-restart-required' as const
-    if (t.memlock) return 'relogin-required' as const
+    if (t.memlock && !t.runtimeProcess && t.unit) return 'service-restart-required' as const
+    if (t.memlock && !t.runtimeProcess) return 'relogin-required' as const
     return 'completed' as const
   } finally {
     await io
