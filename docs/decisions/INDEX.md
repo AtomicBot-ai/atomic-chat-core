@@ -226,3 +226,6 @@ add a new one that says which record it supersedes.
 - **2026-11-07** — [Deliver the Windows ROCm runtime with upstream llama.cpp](2026-11-07-deliver-windows-rocm-runtime.md)
 
 - [2026-11-07 — Reuse the public API after host key rotation](2026-11-07-reuse-public-api-with-host-keyring.md)
+- [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
+- [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
+- [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)

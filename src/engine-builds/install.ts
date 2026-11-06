@@ -90,7 +90,8 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
         throw new AtomicCoreError(
           'ENGINE_INSTALL_FAILED',
           'Could not unpack the engine archive.',
-          String(error)
+          String(error),
+          { cause: error }
         )
       })
     await rm(downloads, { recursive: true, force: true })
@@ -105,7 +106,9 @@ export async function installStaged(plan: StagedInstall): Promise<{ replaced: bo
     plan.signal?.throwIfAborted()
     throw error instanceof AtomicCoreError
       ? error
-      : new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not install the engine build.', String(error))
+      : new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not install the engine build.', String(error), {
+          cause: error,
+        })
   }
 }
 
@@ -151,12 +154,17 @@ function downloadError(error: unknown): AtomicCoreError {
   if (error instanceof AtomicCoreError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (message === DOWNLOAD_CANCELLED || message === VALIDATION_CANCELLED_MESSAGE)
-    return new AtomicCoreError('CANCELLED', 'The engine install was cancelled.')
+    return new AtomicCoreError('CANCELLED', 'The engine install was cancelled.', undefined, {
+      cause: error,
+    })
   if (message === HASH_MISMATCH_MESSAGE || message.startsWith('Size verification failed'))
     return new AtomicCoreError(
       'ENGINE_INSTALL_FAILED',
       'The downloaded engine archive does not match the manifest.',
-      message
+      message,
+      { cause: error }
     )
-  return new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not download the engine.', message)
+  return new AtomicCoreError('ENGINE_INSTALL_FAILED', 'Could not download the engine.', message, {
+    cause: error,
+  })
 }
