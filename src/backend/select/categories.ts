@@ -8,6 +8,7 @@
  * are parameters.
  */
 
+import { gpuMemoryMiB } from '../../hardware/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import { mapOldBackendToNew } from '../catalog/index.js'
 import type { BackendVersion, BestBackendResult, GpuProbeInfo, UpdateCheckResult } from '../types.js'
@@ -178,7 +179,7 @@ export function checkBackendForUpdates(
 export const GPU_BACKEND_MIN_VRAM_MIB = 2 * 1024
 
 export function hasEnoughGpuMemory(gpus: readonly GpuProbeInfo[]): boolean {
-  return gpus.some((g) => (g.total_memory ?? 0) >= GPU_BACKEND_MIN_VRAM_MIB)
+  return gpus.some((g) => gpuMemoryMiB(g) >= GPU_BACKEND_MIN_VRAM_MIB)
 }
 
 /** `prioritizeBackends` under the VRAM gate; `''` for an empty catalog (app `determineBestBackend`). */

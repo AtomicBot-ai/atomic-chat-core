@@ -3,6 +3,8 @@
  * Pure over numbers; reading the file size and the hardware facts is the caller's job.
  */
 
+import { hasSharedGpuMemory } from '../../hardware/index.js'
+import type { GpuProbeInfo } from '../../contracts/index.js'
 import { saturatingSub } from '../../util/index.js'
 
 export type ModelSupportStatus = 'RED' | 'YELLOW' | 'GREEN'
@@ -59,7 +61,7 @@ export function modelSupportStatus(requiredBytes: number, budget: MemoryBudget):
 export interface SystemMemoryFacts {
   /** MiB, as the hardware probe reports it. */
   total_memory: number
-  gpus: Array<{ total_memory: number; vulkan_info?: { device_type?: string } | null }>
+  gpus: Array<GpuProbeInfo & { total_memory: number }>
 }
 
 /** `is_model_supported` after the file size and KV estimate are known. */
@@ -69,8 +71,9 @@ export function isModelSupported(
   system: SystemMemoryFacts
 ): ModelSupportStatus {
   const gpus = system.gpus.map((g) => ({
+    // GTT proves shared capacity, not that the chosen runtime allocates this entire pool on GPU.
     total_bytes: g.total_memory * 1024 * 1024,
-    integrated: isIntegratedGpu(g),
+    integrated: hasSharedGpuMemory(g) || isIntegratedGpu(g),
   }))
   return modelSupportStatus(
     modelSizeBytes + kvCacheBytes,

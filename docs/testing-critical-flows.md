@@ -151,3 +151,9 @@ Linux built-in runtime memory preparation has focused policy/coordinator/executo
 ### FastFlowLM manual driver guidance (2026-11-06)
 
 **Partial:** policy tests cover Windows vendor links, Ubuntu/Arch commands, unknown/immutable fallback, unsupported hardware and memory-only exclusions. The authenticated core API verifies new preparation cannot select a driver recipe even when supplied by conf. Atc contracts/UI cover display and recheck without elevation; compiled CLI covers the actual host probe. Manual vendor/package installation is outside automation acceptance; real driver mutation and Windows CI are not claimed by these tests. Automatic memlock evidence remains unchanged.
+
+### Linux AMD APU shared memory and stock backend selection (2026-11-06)
+
+**Partial:** sysfs parser and Linux probe tests cover documented APU GC versions, GTT measurement, the physical-RAM cap, discrete-GPU exclusion and malformed facts. Selector tests require both an available stock ROCm archive and HIP runtime; absent prerequisites fall through to Vulkan. Model-fit regression tests prevent counting shared RAM twice or promising full GPU residency from GTT alone. The compiled core hardware e2e carries `shared_memory` through the control API.
+
+On physical Radeon 860M / gfx1152 under Arch, the compiled atc embedding this core reported 512 MiB reserved VRAM and 15,606 MiB shared memory. Its real terminal onboarding offered uninstalled FastFlowLM and stock llama.cpp b12019 / linux-vulkan-x64; the preview remained without engines or models. No HIP runtime or published Linux ROCm mirror asset was present, so native ROCm inference and from-zero ROCm installation remain unverified.

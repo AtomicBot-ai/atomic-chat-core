@@ -26,7 +26,8 @@ import type {
 import { stripBom } from '../version.js'
 import { prismTagBuild } from '../catalog/index.js'
 import { getSupportedFeatures, isAmdGpu, normalizeFeatures } from './features.js'
-import { integratedGpuOnly } from './tiers.js'
+import { gpuMemoryMiB, hasSharedGpuMemory } from '../../hardware/index.js'
+import { hasUsableVulkanGpu } from './tiers.js'
 
 /** Below this much VRAM a Vulkan or ROCm offload is not worth it; CUDA is always preferred. */
 export const PRISM_GPU_MIN_VRAM_MIB = 2 * 1024
@@ -152,8 +153,11 @@ export function determineBestPrismBackend(
   gpus: readonly GpuProbeInfo[]
 ): string {
   if (backends.length === 0) return ''
-  const enough =
-    gpus.some((gpu) => (gpu.total_memory ?? 0) >= PRISM_GPU_MIN_VRAM_MIB) && !integratedGpuOnly(gpus)
+  const enough = gpus.some(
+    (gpu) =>
+      gpuMemoryMiB(gpu) >= PRISM_GPU_MIN_VRAM_MIB &&
+      (gpu.vulkan_info?.device_type !== 'IntegratedGpu' || hasSharedGpuMemory(gpu))
+  )
   for (const category of enough ? PRIORITY_ENOUGH_VRAM : PRIORITY_LOW_VRAM) {
     const best = backends
       .filter((b) => getPrismBackendCategory(b.backend) === category)
@@ -219,8 +223,11 @@ export async function detectIdealPrismBackendType(input: {
     const catalog = await input.listAvailableBackends()
     const ids = new Set(catalog.map((b) => stripBom(b.backend)))
     const pick = (...candidates: string[]) => candidates.find((id) => ids.has(id)) ?? null
-    const worthIt =
-      gpus.some((gpu) => (gpu.total_memory ?? 0) >= PRISM_GPU_MIN_VRAM_MIB) && !integratedGpuOnly(gpus)
+    const worthIt = gpus.some(
+      (gpu) =>
+        gpuMemoryMiB(gpu) >= PRISM_GPU_MIN_VRAM_MIB &&
+        (gpu.vulkan_info?.device_type !== 'IntegratedGpu' || hasSharedGpuMemory(gpu))
+    )
     const prefix = osType === 'windows' ? 'win' : 'linux'
     const cuda13 = pick(`${prefix}-cuda-13.3-x64`)
     const cuda12 =
@@ -231,7 +238,8 @@ export async function detectIdealPrismBackendType(input: {
     if (features.cuda13 && cuda13) return { kind: 'gpu', backend: cuda13 }
     if (features.cuda12 && cuda12) return { kind: 'gpu', backend: cuda12 }
     if (features.rocm && worthIt && amd) return { kind: 'gpu', backend: amd }
-    if (features.vulkan && worthIt && vulkan) return { kind: 'gpu', backend: vulkan }
+    if (features.vulkan && hasUsableVulkanGpu(gpus, PRISM_GPU_MIN_VRAM_MIB) && vulkan)
+      return { kind: 'gpu', backend: vulkan }
     return { kind: 'cpu-optimal' }
   } catch (err) {
     input.onWarn?.(`detectIdealPrismBackendType: ${err instanceof Error ? err.message : String(err)}`)

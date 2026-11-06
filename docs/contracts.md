@@ -312,3 +312,7 @@ After an owner crash, the process journal binds each recorded FLM PID to its OS 
 ### FastFlowLM manual driver guidance
 
 `POST /runtimes/fastflowlm/probe` may return `driver_setup: { title, steps, commands, links: [{ label, url }] }`. This is optional display-only guidance selected from the server OS and hardware, not the client platform. Commands are never host-step parameters and must not be executed automatically. New driver preparation remains blocked and does not fetch or select driver recipes; memory-only preparation still returns `action-required`. An already pinned legacy operation retains its recovery protocol. After manual setup, clients call probe again and use its measured readiness.
+
+### Linux AMD APU shared memory
+
+GPU records may include `shared_memory` in MiB: the measured amdgpu GTT capacity for a confirmed APU GC IP, capped by physical system RAM. `total_memory` keeps its dedicated/reserved VRAM meaning. Shared memory is part of system RAM and must not be added to RAM as another physical pool. Omission means unmeasured, not zero; this is capacity rather than current free memory. Stock llama.cpp uses this fact for its memory threshold while preserving the independent ROCm runtime, architecture, archive and native-probe gates.
