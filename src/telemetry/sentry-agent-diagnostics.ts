@@ -1,6 +1,12 @@
-// SENTRY_AGENT_DIAGNOSTIC_CONFIG {"rules":[{"source":"src/runtime/geniex/runtime.ts","message":"The GenieX library does not load on this computer.","code":"GENIEX_HOST_LIBRARY_LOAD_FAILED"},{"source":"src/runtime/geniex/runtime.ts","message":"The GenieX host stopped before the model was ready.","code":"GENIEX_HOST_STOPPED_BEFORE_READY"}],"include_cause_codes":true}
+// SENTRY_AGENT_DIAGNOSTIC_CONFIG {"rules":[{"source":"src/diffusion/install.ts","message":"The image engine could not load a library it needs.","code":"SDCPP_PROBE_LIBRARY_LOAD_FAILED"},{"source":"src/diffusion/install.ts","message":"The image engine exited without printing anything.","code":"SDCPP_PROBE_SILENT_EXIT"},{"source":"src/diffusion/install.ts","message":"The downloaded binary is not stable-diffusion.cpp.","code":"SDCPP_PROBE_UNEXPECTED_OUTPUT"},{"source":"src/diffusion/install.ts","message":"The image engine did not respond to --help.","code":"SDCPP_PROBE_HELP_TIMEOUT"},{"source":"src/diffusion/install.ts","message":"The image engine could not be started.","code":"SDCPP_PROBE_START_FAILED"},{"source":"src/diffusion/install.ts","message":"The archive did not contain sd-server.","code":"SDCPP_ARCHIVE_MISSING_SERVER"},{"source":"src/runtime/geniex/runtime.ts","message":"The GenieX library does not load on this computer.","code":"GENIEX_HOST_LIBRARY_LOAD_FAILED"},{"source":"src/runtime/geniex/runtime.ts","message":"The GenieX host stopped before the model was ready.","code":"GENIEX_HOST_STOPPED_BEFORE_READY"}],"include_cause_codes":true}
 // This generated observer only enriches an existing error event. It never sends or logs.
 const SENTRY_AGENT_MESSAGES = new Map<string, string>([
+  ['The image engine could not load a library it needs.', 'SDCPP_PROBE_LIBRARY_LOAD_FAILED'],
+  ['The image engine exited without printing anything.', 'SDCPP_PROBE_SILENT_EXIT'],
+  ['The downloaded binary is not stable-diffusion.cpp.', 'SDCPP_PROBE_UNEXPECTED_OUTPUT'],
+  ['The image engine did not respond to --help.', 'SDCPP_PROBE_HELP_TIMEOUT'],
+  ['The image engine could not be started.', 'SDCPP_PROBE_START_FAILED'],
+  ['The archive did not contain sd-server.', 'SDCPP_ARCHIVE_MISSING_SERVER'],
   ['The GenieX library does not load on this computer.', 'GENIEX_HOST_LIBRARY_LOAD_FAILED'],
   ['The GenieX host stopped before the model was ready.', 'GENIEX_HOST_STOPPED_BEFORE_READY'],
 ])
