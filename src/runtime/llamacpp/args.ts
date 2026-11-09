@@ -223,6 +223,26 @@ export function parseExtraArgs(value: string): string[] {
   return args
 }
 
+/**
+ * `extra` without its tensor split-mode pairs, read the way llama.cpp's parser reads a flag
+ * (`common/arg.cpp`): a `--` name may spell `-` as `_`, the value is the next token and must be
+ * exactly `tensor`. `--split-mode=tensor` and a comma list are no split mode there — the launch fails
+ * with "invalid argument" / "invalid value" — so they pass through like every other argument.
+ */
+function withoutTensorSplit(extra: readonly string[]): { kept: string[]; dropped: string[] } {
+  const kept: string[] = []
+  const dropped: string[] = []
+  for (let i = 0; i < extra.length; i++) {
+    const arg = extra[i] as string
+    const name = arg.startsWith('--') ? arg.replaceAll('_', '-') : arg
+    if ((name === '-sm' || name === '--split-mode') && extra[i + 1] === 'tensor') {
+      dropped.push(`${arg} tensor`)
+      i++
+    } else kept.push(arg)
+  }
+  return { kept, dropped }
+}
+
 /** Build the plan (argv + warnings). Throws `INVALID_ARGUMENT` for a malformed `version_backend`. */
 export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): LlamaArgsPlan {
   const { version, backend } = parseVersionBackend(config.version_backend)
@@ -257,6 +277,14 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     cfg.dflash = false
     cfg.split_mode = ''
     cfg.main_gpu = 0
+  }
+  // Tensor split (ggml's meta backend) aborts on an embedding model's graph (Atomic-Chat#405:
+  // "unsupported mul_mat split states"), and a model that small gains nothing from it.
+  if (input.isEmbedding && cfg.split_mode === 'tensor') {
+    warnings.push(
+      "Tensor split mode is not supported for embedding models; using llama.cpp's default layer split"
+    )
+    cfg.split_mode = ''
   }
   if (input.provider !== 'llamacpp' && backend.includes('vulkan') && cfg.flash_attn === 'auto') {
     warnings.push(`Vulkan backend (${backend}): overriding flash_attn auto→off for stability (ATO-244)`)
@@ -478,7 +506,17 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   }
 
   try {
-    push(...parseExtraArgs(cfg.extra_args))
+    const extra = parseExtraArgs(cfg.extra_args)
+    if (input.isEmbedding) {
+      // Appended last, a user's tensor split would override the setting above (llama.cpp keeps the
+      // last value of a repeated flag) and abort the load the same way.
+      const { kept, dropped } = withoutTensorSplit(extra)
+      if (dropped.length > 0)
+        warnings.push(
+          `Tensor split mode is not supported for embedding models; ignoring ${dropped.map((d) => `"${d}"`).join(', ')} from the extra llama-server arguments`
+        )
+      push(...kept)
+    } else push(...extra)
   } catch (error) {
     warnings.push(`Ignoring invalid extra llama-server arguments: ${(error as Error).message}`)
   }
