@@ -111,8 +111,8 @@ export async function tierEnumeratesDevices(
   } catch (err) {
     probeError = err instanceof Error ? err.message : String(err)
   }
-  // An installed Linux HIP build can silently enumerate no GPU with an incompatible userspace.
-  if (backendType === LINUX_ROCM_BACKEND) {
+  // An installed HIP build can silently enumerate no GPU when a runtime DLL or driver is incompatible.
+  if (backendType === LINUX_ROCM_BACKEND || /^win-rocm-(?:\d+\.\d+-)?x64$/.test(backendType)) {
     return devices?.some((device) => /^ROCm\d+$/i.test(device.id)) ? 'works' : 'broken'
   }
   const corroborated = hasCorroboratingGpu(backendType, gpus)

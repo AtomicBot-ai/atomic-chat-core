@@ -83,6 +83,7 @@ export interface PublicServerLifecycleDeps {
 /** Owns the public listener and serializes its start/stop transitions. */
 export class PublicServerLifecycle {
   private publicServer: PublicServer | undefined
+  private publicKeyring: PublicServerDeps['apiKeys']
   private lastPublicState: LocalApiServerState = stoppedState()
   private publicConfig: NormalizedPublicServerOptions | undefined
   private publicTransition: Promise<void> = Promise.resolve()
@@ -114,7 +115,14 @@ export class PublicServerLifecycle {
       this.deps.assertRunning()
       const requested = normalizePublicOptions(options)
       if (this.publicServer && this.publicConfig) {
-        if (publicOptionsCompatible(this.publicConfig, requested, options.port))
+        if (
+          publicOptionsCompatible(
+            this.publicConfig,
+            requested,
+            options.port,
+            this.publicKeyring?.() !== undefined
+          )
+        )
           return this.publicServer.state()
         throw new AtomicCoreError(
           'CORE_ALREADY_RUNNING',
@@ -122,7 +130,8 @@ export class PublicServerLifecycle {
           `${this.publicServer.host}:${this.publicServer.port}${this.publicServer.prefix}`
         )
       }
-      const server = await PublicServer.start(this.deps.serverDeps(), options).catch((e: unknown) => {
+      const serverDeps = this.deps.serverDeps()
+      const server = await PublicServer.start(serverDeps, options).catch((e: unknown) => {
         const error = e as AtomicCoreError
         this.deps.events.emit('server:bind-failed', { port: options.port ?? 0, error: error.message })
         throw error
@@ -130,6 +139,7 @@ export class PublicServerLifecycle {
       // A tunnel that survived until here pointed at the previous listener's port.
       await this.deps.remoteAccess?.stop().catch(() => {})
       this.publicServer = server
+      this.publicKeyring = serverDeps.apiKeys
       this.publicConfig = { ...requested, port: server.port, requestedPort: requested.port }
       this.deps.liveTrustedHosts?.splice(0, this.deps.liveTrustedHosts.length, ...requested.trustedHosts)
       this.lastPublicState = server.state()
@@ -171,6 +181,7 @@ export class PublicServerLifecycle {
       this.stopping = false
     }
     this.publicServer = undefined
+    this.publicKeyring = undefined
     this.publicConfig = undefined
     this.deps.liveTrustedHosts?.splice(0, this.deps.liveTrustedHosts.length)
     await this.publishServerState(this.lastPublicState)
@@ -218,7 +229,8 @@ function normalizePublicOptions(options: PublicServerStartOptions): NormalizedPu
 function publicOptionsCompatible(
   current: NormalizedPublicServerOptions,
   requested: NormalizedPublicServerOptions,
-  requestedPort: number | undefined
+  requestedPort: number | undefined,
+  hostKeyringActive: boolean
 ): boolean {
   // A server that fell back to a free port still answers a repeat of the request that put it there.
   const portMatches =
@@ -227,7 +239,8 @@ function publicOptionsCompatible(
     portMatches &&
     current.host === requested.host &&
     current.prefix === requested.prefix &&
-    current.apiKey === requested.apiKey &&
+    // A defined host keyring is authoritative, including an empty list that denies all clients.
+    (hostKeyringActive || current.apiKey === requested.apiKey) &&
     current.proxyTimeoutSecs === requested.proxyTimeoutSecs &&
     current.writeStateFile === requested.writeStateFile &&
     current.trustedHosts.length === requested.trustedHosts.length &&

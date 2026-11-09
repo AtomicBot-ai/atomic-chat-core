@@ -95,3 +95,23 @@ it.each([[[apu]], [[apu, card]]])('uses UMA capacity for Prism on Windows: %j', 
     })
   ).toEqual({ kind: 'gpu', backend: 'win-vulkan-x64' })
 })
+
+it.each([
+  ['available', 'unverified', 'win-rocm-10.0-x64'],
+  ['working', 'works', 'win-rocm-10.0-x64'],
+  ['broken', 'broken', 'win-vulkan-x64'],
+] as const)('prefers Radeon 860M ROCm when %s, retaining Vulkan fallback', async (_name, health, backend) => {
+  expect(
+    await detectIdealBackendType({
+      osType: 'windows',
+      arch: 'x86_64',
+      cpuExtensions: [],
+      gpus: [apu],
+      listAvailableBackends: async () => [
+        { version: 'b12019', backend: 'win-rocm-10.0-x64' },
+        { version: 'b12019', backend: 'win-vulkan-x64' },
+      ],
+      probeTier: async (tier) => (tier.includes('rocm') ? health : 'works'),
+    })
+  ).toEqual({ kind: 'gpu', backend })
+})

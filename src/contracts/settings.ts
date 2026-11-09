@@ -213,6 +213,11 @@ export interface SglangProviderConfig {
 }
 
 export interface FastFlowLmConfig {
+  pmode: 'powersaver' | 'balanced' | 'performance' | 'turbo'
+  prefill_chunk_len: number
+  prefix_cache_mb: number
+  prefix_slots: number
+  prefix_min_gain: number
   ctx_len: number
   timeout: number
 }

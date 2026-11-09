@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-07 — Expose typed FastFlowLM launch settings through the core](2026-11-07-expose-flm-launch-settings.md)
+
 - [2026-11-06 — Wait for FLM cancellation within one deadline](2026-11-06-wait-for-flm-cancellation-within-one-deadline.md)
 
 - [2026-11-05 — Limit Ubuntu NPU installation to the approved transaction](2026-11-05-limit-ubuntu-npu-installation-to-the-approved-transaction.md)
@@ -207,15 +209,23 @@ add a new one that says which record it supersedes.
 
 - [2026-11-06 — Separate runtime memory preparation from driver recipes](2026-11-06-separate-runtime-memlock.md)
 
+- [2026-11-06 — Measure AMD APU shared memory separately from VRAM](2026-11-06-measure-amd-apu-shared-memory.md)
+
 - [Manual FastFlowLM driver setup](2026-11-06-manual-npu-driver-setup.md) — display-only vendor/distro guidance; automatic runtime memlock retained.
 
 - [Import the shipped FastFlowLM chat catalog with editorial recommendations](2026-11-06-import-upstream-flm-catalog.md)
 
 - [Verify FLM content only during download](2026-11-06-verify-flm-content-only-on-download.md) — Keep payload SHA-256 in the installer and remove full-file reads from registry lookups and load preparation.
+
+- [Measure Windows AMD UMA per adapter](2026-11-06-measure-windows-amd-uma.md)
+
+- **2026-11-07** — [Share in-flight FastFlowLM hardware probes](2026-11-07-share-in-flight-fastflowlm-probes.md)
+
+- **2026-11-07** — [Cover the Radeon architectures shipped by Windows llama.cpp](2026-11-07-cover-shipped-windows-rocm-architectures.md)
+
+- **2026-11-07** — [Deliver the Windows ROCm runtime with upstream llama.cpp](2026-11-07-deliver-windows-rocm-runtime.md)
+
+- [2026-11-07 — Reuse the public API after host key rotation](2026-11-07-reuse-public-api-with-host-keyring.md)
 - [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
 - [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
 - [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)
-
-- [2026-11-06 — Measure AMD APU shared memory separately from VRAM](2026-11-06-measure-amd-apu-shared-memory.md)
-
-- [Measure Windows AMD UMA per adapter](2026-11-06-measure-windows-amd-uma.md)

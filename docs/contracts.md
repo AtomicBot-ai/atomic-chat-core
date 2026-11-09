@@ -309,10 +309,11 @@ After an owner crash, the process journal binds each recorded FLM PID to its OS 
 
 `FastFlowLmHostStep` also admits `linux.configure-runtime-memlock`. It uses the built-in `linux.runtime-memlock` policy (2 GiB minimum), not a driver manifest. `FastFlowLmProbePlan.runtime_process`, when present, identifies the core owner by PID, process start ticks and boot ID; this identity is included in the approved plan digest and host-step parameters. The same optional process identity accompanies new combined Linux driver steps. `completed` means the live process limit was applied and persistence written; core then probes readiness again as the runtime account. No restart receipt is emitted for this action. A daemon without an interactive authorization agent leaves the request for an attached terminal client, using the same exclusive claim/launch protocol.
 
-### FastFlowLM manual driver guidance
-
-`POST /runtimes/fastflowlm/probe` may return `driver_setup: { title, steps, commands, links: [{ label, url }] }`. This is optional display-only guidance selected from the server OS and hardware, not the client platform. Commands are never host-step parameters and must not be executed automatically. New driver preparation remains blocked and does not fetch or select driver recipes; memory-only preparation still returns `action-required`. An already pinned legacy operation retains its recovery protocol. After manual setup, clients call probe again and use its measured readiness.
-
 ### Linux AMD APU shared memory
 
 GPU records may include `shared_memory` in MiB: the measured amdgpu GTT capacity for a confirmed APU GC IP, capped by physical system RAM. `total_memory` keeps its dedicated/reserved VRAM meaning. Shared memory is part of system RAM and must not be added to RAM as another physical pool. Omission means unmeasured, not zero; this is capacity rather than current free memory. Stock llama.cpp uses this fact for its memory threshold while preserving the independent ROCm runtime, architecture, archive and native-probe gates.
+
+
+### FastFlowLM manual driver guidance
+
+`POST /runtimes/fastflowlm/probe` may return `driver_setup: { title, steps, commands, links: [{ label, url }] }`. This is optional display-only guidance selected from the server OS and hardware, not the client platform. Commands are never host-step parameters and must not be executed automatically. New driver preparation remains blocked and does not fetch or select driver recipes; memory-only preparation still returns `action-required`. An already pinned legacy operation retains its recovery protocol. After manual setup, clients call probe again and use its measured readiness.

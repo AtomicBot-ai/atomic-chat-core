@@ -1,6 +1,7 @@
 import { expect, it } from 'vitest'
 import { parseWindowsProbe, windowsGpus } from './windows-video.js'
 import { mergeGpus } from './merge.js'
+import { windowsDxgiMemory } from './windows-dxgi.js'
 
 const mib = 2 ** 20
 const apu = {
@@ -58,4 +59,8 @@ it.each([
 })
 it('accepts the PowerShell single-adapter object', () => {
   expect(read(apu, [apu])[0]).toMatchObject({ shared_memory: 15945 })
+})
+
+it.each(['', 'PCI\\VEN_1002&DEV_1114', 'not-a-pci-device'])('ignores incomplete PCI identity (%s)', (pnp) => {
+  expect(windowsDxgiMemory(apu, pnp)).toEqual({})
 })

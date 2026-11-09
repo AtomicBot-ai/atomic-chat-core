@@ -273,7 +273,15 @@ export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<stri
   'sglang': SGLANG_VALUE_TYPES,
   'foundry-local': FOUNDRY_LOCAL_VALUE_TYPES,
   'litert-lm': LITERT_LM_VALUE_TYPES,
-  'fastflowlm': { ctx_len: 'number', timeout: 'number' },
+  'fastflowlm': {
+    ctx_len: 'number',
+    timeout: 'number',
+    pmode: 'string',
+    prefill_chunk_len: 'number',
+    prefix_cache_mb: 'number',
+    prefix_slots: 'number',
+    prefix_min_gain: 'number',
+  },
   'geniex': GENIEX_VALUE_TYPES,
 }
 
