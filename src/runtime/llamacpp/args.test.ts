@@ -524,6 +524,87 @@ describe('PrismML provider', () => {
   })
 })
 
+/**
+ * Atomic-Chat#405: on two CUDA cards an embedding model loaded with `-sm tensor` from the extra
+ * arguments aborts in ggml's meta backend ("unsupported mul_mat split states"), so attachments never
+ * index while chat models load fine.
+ */
+describe('tensor split on an embedding load', () => {
+  const at = (cfg: Partial<LlamacppConfig>, isEmbedding = true) =>
+    planLlamaArgs(
+      { ...base(), version_backend: 'b12019/win-cuda-13.4-x64', ...cfg },
+      { ...input, isEmbedding }
+    )
+  /** What follows `--fit <on|off>`, the last flag core emits itself. */
+  const extraTail = (argv: string[]) => argv.slice(argv.indexOf('--fit') + 2)
+  const splitWarnings = (warnings: string[]) => warnings.filter((w) => w.includes('Tensor split mode'))
+
+  it('loads the reported case without the user’s tensor split, keeping the setting’s none', () => {
+    const plan = at({ split_mode: 'none', extra_args: '-sm tensor' })
+    expect(plan.argv.join(' ')).toContain('--split-mode none')
+    expect(plan.argv).not.toContain('tensor')
+    expect(plan.argv.slice(-2)).toEqual(['--fit', 'off'])
+    expect(splitWarnings(plan.warnings)).toEqual([
+      'Tensor split mode is not supported for embedding models; ignoring "-sm tensor" from the extra llama-server arguments',
+    ])
+  })
+
+  it.each([
+    ['-sm tensor', [], ['-sm tensor']],
+    ['--split-mode tensor', [], ['--split-mode tensor']],
+    // llama.cpp reads a `--` name with `_` as `-`.
+    ['--split_mode tensor', [], ['--split_mode tensor']],
+    ['--no-warmup -sm tensor --seed 7', ['--no-warmup', '--seed', '7'], ['-sm tensor']],
+    ['-sm tensor -ub 512 --split-mode tensor', ['-ub', '512'], ['-sm tensor', '--split-mode tensor']],
+    ['-sm row', ['-sm', 'row'], []],
+    ['--split-mode none --seed 7', ['--split-mode', 'none', '--seed', '7'], []],
+    ['-sm layer', ['-sm', 'layer'], []],
+    // Not a split mode to llama.cpp ("invalid argument" / "invalid value"), so not core's to fix.
+    ['--split-mode=tensor', ['--split-mode=tensor'], []],
+    ['-sm=tensor', ['-sm=tensor'], []],
+    ['-sm tensor,layer', ['-sm', 'tensor,layer'], []],
+    ['-sm TENSOR', ['-sm', 'TENSOR'], []],
+    ['--seed tensor', ['--seed', 'tensor'], []],
+    ['-sm', ['-sm'], []],
+  ])('extra %j → %j, ignoring %j', (extra_args, kept, dropped) => {
+    const plan = at({ extra_args })
+    expect(extraTail(plan.argv)).toEqual(kept)
+    const warnings = splitWarnings(plan.warnings)
+    if (dropped.length === 0) expect(warnings).toEqual([])
+    else {
+      expect(warnings).toHaveLength(1)
+      for (const d of dropped) expect(warnings[0]).toContain(`"${d}"`)
+    }
+  })
+
+  it('does not send a tensor split mode setting, leaving llama.cpp’s default layer split', () => {
+    const plan = at({ split_mode: 'tensor' })
+    expect(plan.argv).not.toContain('--split-mode')
+    expect(splitWarnings(plan.warnings)).toEqual([
+      "Tensor split mode is not supported for embedding models; using llama.cpp's default layer split",
+    ])
+    // Both at once: neither reaches the engine, each says so.
+    const both = at({ split_mode: 'tensor', extra_args: '-sm tensor' })
+    expect(both.argv).not.toContain('tensor')
+    expect(splitWarnings(both.warnings)).toHaveLength(2)
+    // Every other setting value is sent as before.
+    expect(at({ split_mode: 'row' }).argv.join(' ')).toContain('--split-mode row')
+  })
+
+  it('leaves a chat load exactly as it was: setting and extra arguments both reach the engine', () => {
+    const plan = at({ split_mode: 'tensor', extra_args: '-sm tensor --split-mode tensor' }, false)
+    expect(plan.argv.join(' ')).toContain('--split-mode tensor')
+    expect(extraTail(plan.argv)).toEqual(['-sm', 'tensor', '--split-mode', 'tensor'])
+    expect(plan.warnings).toEqual([])
+  })
+
+  it('still drops the whole extra string on an unterminated quote', () => {
+    const plan = at({ extra_args: '-sm tensor "x' })
+    expect(extraTail(plan.argv)).toEqual([])
+    expect(plan.warnings.at(-1)).toContain('unterminated')
+  })
+})
+
 describe('resolveFitCtx / fitCtxText', () => {
   it.each([
     ['the model window wins over the provider', '8192', '16384', '16384'],
