@@ -56,3 +56,10 @@ describe('modelSupportStatus / isModelSupported', () => {
     expect(isModelSupported(40 * GB, 0, { total_memory: 16 * 1024, gpus: [] })).toBe('RED')
   })
 })
+
+it('does not promise full GPU residency from GTT or count shared RAM twice', () => {
+  const apu = { vendor: 'AMD', total_memory: 512, shared_memory: 15606 }
+  const system = { total_memory: 32 * 1024, gpus: [apu] }
+  expect(isModelSupported(8 * 2 ** 30, 0, system)).toBe('YELLOW')
+  expect(isModelSupported(40 * 2 ** 30, 0, system)).toBe('RED')
+})

@@ -18,14 +18,39 @@ import { retryTransientFs } from './fs-retry.js'
 
 export const UNSUPPORTED_ARCHIVE_MESSAGE = 'Unsupported file format. Only .tar.gz and .zip are supported.'
 
-export async function extractArchive(archivePath: string, outputDir: string): Promise<void> {
+export async function extractArchive(
+  archivePath: string,
+  outputDir: string,
+  regularFilesOnly = false
+): Promise<void> {
   await mkdir(outputDir, { recursive: true })
   if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
-    await tarExtract({ file: archivePath, cwd: outputDir })
+    let invalid: string | undefined
+    await tarExtract({
+      file: archivePath,
+      cwd: outputDir,
+      ...(regularFilesOnly
+        ? {
+            strict: true,
+            filter: (name, entry) => {
+              if (
+                !('type' in entry) ||
+                (entry.type !== 'File' && entry.type !== 'Directory') ||
+                !safeEngineMember(name)
+              ) {
+                invalid = name
+                return false
+              }
+              return true
+            },
+          }
+        : {}),
+    })
+    if (invalid !== undefined) throw new Error('Unsafe engine archive entry: ' + invalid)
     return
   }
   if (archivePath.endsWith('.zip') || archivePath.endsWith('.whl')) {
-    await extractZip(archivePath, outputDir)
+    await extractZip(archivePath, outputDir, regularFilesOnly)
     return
   }
   throw new Error(UNSUPPORTED_ARCHIVE_MESSAGE)
@@ -37,7 +62,18 @@ function enclosedName(entryName: string): string | undefined {
   return normalized
 }
 
-function extractZip(archivePath: string, outputDir: string): Promise<void> {
+// FLM packs contain portable regular files, including their own DLLs and shared libraries.
+function safeEngineMember(name: string): boolean {
+  const parts = name.replace(/\/$/, '').split('/')
+  return parts.every(
+    (part) =>
+      /^[A-Za-z0-9_.+-]+$/.test(part) &&
+      !part.endsWith('.') &&
+      !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)
+  )
+}
+
+function extractZip(archivePath: string, outputDir: string, regularFilesOnly: boolean): Promise<void> {
   return new Promise((resolveDone, reject) => {
     yauzl.open(archivePath, { lazyEntries: true }, (err, zip) => {
       if (err || !zip) return reject(err ?? new Error('failed to open zip'))
@@ -47,6 +83,10 @@ function extractZip(archivePath: string, outputDir: string): Promise<void> {
       )
       zip.on('end', resolveDone)
       zip.on('entry', (entry) => {
+        if (regularFilesOnly && !safeEngineMember(entry.fileName)) {
+          zip.close()
+          return reject(new Error('Unsafe engine archive entry: ' + entry.fileName))
+        }
         const rel = enclosedName(entry.fileName)
         if (rel === undefined) return reject(new Error('Invalid zip entry path'))
         const outPath = join(outputDir, rel)

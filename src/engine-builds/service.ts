@@ -24,14 +24,14 @@
  * installed under the same task id; only the last build's failure reaches the client.
  */
 
-import { readdir, rm } from 'node:fs/promises'
+import { lstat, readdir, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError, ENGINE_BUILD_IDS } from '../contracts/index.js'
 import type {
+  EngineBuildId,
   CoreEvents,
   EngineBuildCatalog,
   EngineBuildCatalogRequest,
-  EngineBuildId,
   EngineBuildInstallRequest,
   EngineBuildInstallResult,
   EngineBuildManifestInfo,
@@ -45,10 +45,12 @@ import { samePath } from '../diffusion/containment.js'
 import type { Downloader } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'
+import { assertFastFlowLmPath } from './fastflowlm.js'
 import { ENGINE_DESCRIPTORS } from './engines.js'
 import type {
   ArchiveRef,
   Build,
+  BuildRelease,
   EngineContext,
   EngineDescriptor,
   EngineHostPlatform,
@@ -88,6 +90,7 @@ export const IDLE_ENGINE_HOST: EngineHost = {
 }
 
 export interface EngineBuildsDeps {
+  env?: NodeJS.ProcessEnv | undefined
   dataFolder: string
   /** Each engine's `<data>/…/backends` (`<data>/diffusion/backends`, `<data>/audio/backends`, …). */
   roots: Record<EngineBuildId, string>
@@ -151,6 +154,7 @@ const ENGINE_LABELS: Record<EngineBuildId, string> = {
   'mlx': 'MLX',
   'foundry-local': 'Foundry Local',
   'litert-lm': 'LiteRT-LM',
+  'fastflowlm': 'FastFlowLM',
   'geniex': 'GenieX',
   'audio-cpp': 'audio.cpp',
 }
@@ -164,10 +168,19 @@ export function parseEngineBuildId(raw: string): EngineBuildId {
 
 export class EngineBuildsService {
   private readonly installing = new Set<EngineBuildId>()
+  private readonly pendingFlmInstalls = new Map<string, AbortController>()
   private readonly now: () => number
 
   constructor(private readonly deps: EngineBuildsDeps) {
     this.now = deps.now ?? Date.now
+  }
+
+  /** Keep an FLM install cancellable after its archive transfer, up to the locked swap. */
+  cancelInstall(taskId: string): boolean {
+    const controller = this.pendingFlmInstalls.get(taskId)
+    if (!controller) return false
+    controller.abort(new AtomicCoreError('CANCELLED', 'The engine install was cancelled.'))
+    return true
   }
 
   // --- reading ---------------------------------------------------------------------------------
@@ -179,7 +192,7 @@ export class EngineBuildsService {
     const active = this.activeOf(engine, builds)
     const inUse = await this.deps.hosts[engine].inUse()
     const installed: InstalledEngineBuild[] = []
-    for (const build of builds) installed.push(await this.describe(build, active, inUse))
+    for (const build of builds) installed.push(await this.describe(engine, build, active, inUse))
     const release = read.manifest ? this.engine(engine).release(read.manifest) : null
     const archives =
       read.manifest && choice.backend_id ? this.engine(engine).archives(read.manifest, choice.backend_id) : []
@@ -216,7 +229,8 @@ export class EngineBuildsService {
     if (!active || !read.manifest || !choice.backend_id)
       return { update_needed: false, current, target: null }
     const candidate = this.engine(engine).release(read.manifest)
-    if (compareBuilds(engine, candidate, active) <= 0) return { update_needed: false, current, target: null }
+    if (!candidate || compareBuilds(engine, candidate, active) <= 0)
+      return { update_needed: false, current, target: null }
     const archives = this.engine(engine).archives(read.manifest, choice.backend_id)
     return {
       update_needed: true,
@@ -242,10 +256,12 @@ export class EngineBuildsService {
         `The ${engine} engine is already being installed; wait for that install to finish.`
       )
     this.installing.add(engine)
+    if (engine === 'fastflowlm') this.pendingFlmInstalls.set(request.task_id, new AbortController())
     try {
       return await this.installLocked(engine, request)
     } finally {
       this.installing.delete(engine)
+      if (engine === 'fastflowlm') this.pendingFlmInstalls.delete(request.task_id)
     }
   }
 
@@ -254,6 +270,7 @@ export class EngineBuildsService {
     request: EngineBuildInstallRequest
   ): Promise<EngineBuildInstallResult> {
     const read = await this.readManifest(engine, { proxy: request.proxy ?? null })
+    if (engine === 'fastflowlm') this.pendingFlmInstalls.get(request.task_id)?.signal.throwIfAborted()
     const manifest = read.manifest
     if (!manifest)
       throw new AtomicCoreError(
@@ -268,6 +285,7 @@ export class EngineBuildsService {
         choice.reason ?? 'No build of this engine fits this computer.'
       )
     const target = this.engine(engine).release(manifest)
+    if (!target) throw new AtomicCoreError('UNSUPPORTED_BACKEND', 'No compatible engine release.')
     const tag = target.tag
     const top: EngineBuildRef = { tag, backend_id: choice.backend_id, origin: 'downloaded' }
 
@@ -280,6 +298,15 @@ export class EngineBuildsService {
     const present = builds.find(
       (build) => build.tag === tag && build.backend_id === choice.backend_id && build.origin === 'downloaded'
     )
+    if (
+      present?.immutable_sha256 &&
+      this.engine(engine).archives(manifest, choice.backend_id)[0]?.sha256 !== present.immutable_sha256
+    )
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'The archive digest changed for an installed immutable build.',
+        tag
+      )
     // A bundled MLX build of the manifest's tag, or one as recent, is that build already: on a tie the
     // installer's build runs, so a copy would never be started (and startup cleanup would delete it).
     const bundledSame = builds.some(
@@ -301,7 +328,7 @@ export class EngineBuildsService {
       const last = index === choice.ladder.length - 1
       let probeFailed = false
       try {
-        const outcome = await this.installOne(engine, manifest, backendId, request, (e) => {
+        const outcome = await this.installOne(engine, manifest, target, backendId, request, (e) => {
           probeFailed = true
           throw e
         })
@@ -323,12 +350,13 @@ export class EngineBuildsService {
   private async installOne(
     engine: EngineBuildId,
     manifest: AnyManifest,
+    release: BuildRelease,
     backendId: string,
     request: EngineBuildInstallRequest,
     onProbeFailure: (error: unknown) => never
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
     const descriptor = this.engine(engine)
-    const { tag, published_at: publishedAt, c_api_version: cApiVersion, abi } = descriptor.release(manifest)
+    const { tag, published_at: publishedAt, c_api_version: cApiVersion, abi } = release
     const archives = descriptor.archives(manifest, backendId)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
@@ -338,12 +366,30 @@ export class EngineBuildsService {
         `${tag}/${unpinned.name}`
       )
     const dir = join(this.deps.roots[engine], tag, backendId)
+    if (engine === 'fastflowlm') await assertFastFlowLmPath(this.deps.dataFolder, dir, true)
     const sha256 = archives[0]?.sha256 ?? null
     const context = this.context(engine)
+    const controller = engine === 'fastflowlm' ? this.pendingFlmInstalls.get(request.task_id) : undefined
     const probe: (staging: string) => Promise<EngineProbeFacts | void> =
-      this.deps.probe?.[engine] ?? ((staging) => descriptor.probe(staging, context, backendId))
+      this.deps.probe?.[engine] ??
+      ((staging) => descriptor.probe(staging, context, backendId, release, controller?.signal))
     let facts: EngineProbeFacts | null = null
+    const host = this.deps.hosts[engine]
     const { replaced } = await installStaged({
+      ...(controller
+        ? {
+            signal: controller.signal,
+            regularFilesOnly: true,
+            commit: (swap: () => Promise<boolean>) =>
+              host.exclusive(async () => {
+                await assertFastFlowLmPath(this.deps.dataFolder, dir, true)
+                controller.signal.throwIfAborted()
+                this.pendingFlmInstalls.delete(request.task_id)
+                return swap()
+              }),
+            activate: (replaced: boolean) => host.activate(dir, replaced),
+          }
+        : {}),
       dataFolder: this.deps.dataFolder,
       target: dir,
       archives: archives as BuildArchive[],
@@ -366,11 +412,11 @@ export class EngineBuildsService {
           cApiVersion: cApiVersion ?? null,
           abi: abi ?? null,
           probe: facts,
+          ...(release.flmIdentity ? { flmIdentity: release.flmIdentity } : {}),
         }),
     })
     const build: EngineBuildRef = { tag, backend_id: backendId, origin: 'downloaded' }
-    const host = this.deps.hosts[engine]
-    await host.exclusive(() => host.activate(dir, replaced))
+    if (!controller) await host.exclusive(() => host.activate(dir, replaced))
     this.changed(engine, 'install')
     return { installed: true, build, retired: [], kept_in_use: [] }
   }
@@ -406,7 +452,12 @@ export class EngineBuildsService {
           'bundled'
         )
       const active = this.activeOf(engine, builds)
-      if (options.refuseActive && active && active.tag === tag && active.backend_id === backendId)
+      if (
+        (options.refuseActive || engine === 'fastflowlm') &&
+        active &&
+        active.tag === tag &&
+        active.backend_id === backendId
+      )
         throw new AtomicCoreError('INVALID_REQUEST', 'The active build cannot be removed.', 'active')
       const dir = join(this.deps.roots[engine], tag, backendId)
       const build = builds.find((candidate) => candidate.tag === tag && candidate.backend_id === backendId)
@@ -415,6 +466,7 @@ export class EngineBuildsService {
           'BACKEND_IN_USE',
           'Unload the model running from this build before removing it.'
         )
+      if (engine === 'fastflowlm') await assertFastFlowLmPath(this.deps.dataFolder, dir)
       return removeOwnedBuild(this.deps.roots[engine], dir, this.deps.platform)
     })
     if (removed) {
@@ -443,10 +495,23 @@ export class EngineBuildsService {
   /** `<root>/<tag>/<backend>.incoming-<n>[.download]` and `.retired-<n>`: only ever this module's. */
   private async removeLeftovers(engine: EngineBuildId): Promise<void> {
     const root = this.deps.roots[engine]
-    for (const tag of await readdir(root).catch(() => [] as string[]))
-      for (const name of await readdir(join(root, tag)).catch(() => [] as string[]))
-        if (/\.(incoming|retired)-\d+(\.download)?$/.test(name))
-          await rm(join(root, tag, name), { recursive: true, force: true }).catch(() => {})
+    if (engine === 'fastflowlm') await assertFastFlowLmPath(this.deps.dataFolder, root)
+    for (const tag of await readdir(root, { withFileTypes: true }).catch(() => [])) {
+      if (!tag.isDirectory()) continue
+      for (const name of await readdir(join(root, tag.name)).catch(() => [] as string[]))
+        if (/\.(incoming|retired)-\d+(\.download)?$/.test(name)) {
+          const leftover = join(root, tag.name, name)
+          if (engine === 'fastflowlm' && /^(win|linux)-x64-npu\.retired-\d+$/.test(name)) {
+            const target = leftover.slice(0, leftover.lastIndexOf('.retired-'))
+            // A crash can fall between parking the previous tree and publishing its replacement.
+            if (!(await lstat(target).catch(() => null))) {
+              await rename(leftover, target)
+              continue
+            }
+          }
+          await rm(leftover, { recursive: true, force: true }).catch(() => {})
+        }
+    }
   }
 
   // --- what is on disk -------------------------------------------------------------------------
@@ -482,6 +547,7 @@ export class EngineBuildsService {
 
   private context(engine: EngineBuildId): EngineContext {
     return {
+      env: this.deps.env,
       root: this.deps.roots[engine],
       failedBackendsFile: this.deps.failedBackendsFiles[engine],
       resourcesDir: this.deps.resourcesDir,
@@ -502,19 +568,22 @@ export class EngineBuildsService {
   }
 
   private async describe(
+    engine: EngineBuildId,
     build: Build,
     active: Build | undefined,
     inUse: string[]
   ): Promise<InstalledEngineBuild> {
+    const used = await this.isUsed(build, inUse)
+    const isActive = active !== undefined && sameRef(ref(build), ref(active))
     return {
       ...ref(build),
       installed_at_ms: build.installed_at_ms,
       ...(build.origin === 'bundled' || build.published_at !== null
         ? { published_at: build.published_at }
         : {}),
-      removable: build.origin === 'downloaded',
-      in_use: await this.isUsed(build, inUse),
-      active: active !== undefined && sameRef(ref(build), ref(active)),
+      removable: build.origin === 'downloaded' && (engine !== 'fastflowlm' || (!isActive && !used)),
+      in_use: used,
+      active: isActive,
     }
   }
 

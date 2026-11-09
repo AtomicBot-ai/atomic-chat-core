@@ -1,3 +1,5 @@
+import { flmRelease } from '../../test/helpers/fastflowlm-manifest.js'
+import { parseFastFlowLmManifest, type FastFlowLmManifest } from './fastflowlm-manifest.js'
 import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, readdir, readFile, readlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -7,7 +9,7 @@ import { FixtureHttpServer } from '../../test/helpers/fixture-http-server.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { AtomicCoreError } from '../contracts/index.js'
-import type { CoreEvents, EngineBuildId } from '../contracts/index.js'
+import type { EngineBuildId, CoreEvents } from '../contracts/index.js'
 import { Downloader } from '../downloads/index.js'
 import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
@@ -179,6 +181,7 @@ function harness(
     'mlx': ManifestRead<MlxManifest>
     'foundry-local': ManifestRead<FoundryLocalManifest>
     'litert-lm': ManifestRead<LiteRtLmManifest>
+    'fastflowlm': ManifestRead<FastFlowLmManifest>
     'geniex': ManifestRead<GeniexManifest>
     'audio-cpp': ManifestRead<AudiocppManifest>
   } = {
@@ -186,6 +189,7 @@ function harness(
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'fastflowlm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'geniex': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'audio-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
   }
@@ -194,6 +198,7 @@ function harness(
   const engineChanged: Array<CoreEvents['engine:changed']> = []
   const rewrite: typeof fetch = (input, init) => {
     const url = String(input)
+      .replace('https://github.com/AtomicBot-ai/atomic-chat-core/releases/download', server.url('/releases'))
       .replace(MIRROR, server.url('/releases'))
       .replace('https://github.com/AtomicBot-ai/mlx-vlm/releases/download', server.url('/releases'))
       .replace('https://github.com/microsoft/foundry-local/releases/download', server.url('/releases'))
@@ -218,6 +223,7 @@ function harness(
     'mlx': new FakeHost(),
     'foundry-local': new FakeHost(),
     'litert-lm': new FakeHost(),
+    'fastflowlm': new FakeHost(),
     'geniex': new FakeHost(),
     'audio-cpp': new FakeHost(),
   }
@@ -229,6 +235,7 @@ function harness(
       'mlx': data.layout.provider('mlx').backendsDir,
       'foundry-local': FOUNDRY_ROOT(),
       'litert-lm': LITERT_ROOT(),
+      'fastflowlm': data.layout.provider('fastflowlm').backendsDir,
       'geniex': GENIEX_ROOT(),
       'audio-cpp': data.layout.audio.backendsDir,
     },
@@ -244,12 +251,14 @@ function harness(
       'mlx': { read: async () => manifests.mlx },
       'foundry-local': { read: async () => manifests['foundry-local'] },
       'litert-lm': { read: async () => manifests['litert-lm'] },
+      'fastflowlm': { read: async () => manifests.fastflowlm },
       'geniex': { read: async () => manifests.geniex },
       'audio-cpp': { read: async () => manifests['audio-cpp'] },
     },
     hostPlatforms: {
       'foundry-local': opts.foundryLocalHost ?? { platform: 'linux-x64' },
       'litert-lm': opts.liteRtLmHost ?? { platform: 'linux-x64' },
+      'fastflowlm': { platform: 'linux-x64-npu' },
       'geniex': opts.geniexHost ?? { platform: 'win-arm64', chip: 'x-elite' },
     },
     hostProbes: {
@@ -2026,4 +2035,146 @@ describe('the audio-cpp row of ENGINE_DESCRIPTORS', () => {
     expect(row.active([build('v0.9.4', 2), build('v0.9.3', 1)])?.tag).toBe('v0.9.4')
     expect(row.active([])).toBeUndefined()
   })
+})
+
+describe.skipIf(!POSIX)('FastFlowLM archive installation', () => {
+  const platform = 'linux-x64-npu'
+  async function publish(
+    h: ReturnType<typeof harness>,
+    rev: number,
+    opts: {
+      sha256?: string
+      identity?: Record<string, unknown>
+      delayMs?: number
+      script?: string
+    } = {}
+  ) {
+    const r = flmRelease(rev)
+    const id = {
+      upstream_commit: r.upstream_commit,
+      atomic_revision: rev,
+      local_only_protocol: 1,
+      ...opts.identity,
+    }
+    const body = await archive(r.version, {
+      flm:
+        opts.script ??
+        `[ "$*" = 'atomic-capabilities --json' ] || exit 9\nprintf '%s' '${JSON.stringify(id)}'`,
+    })
+    const a = r.assets.find((a) => a.platform === platform)!
+    a.sha256 = opts.sha256 ?? sha(body)
+    a.size = body.length
+    server.files.set('/releases/' + r.version + '/' + a.url.split('/').at(-1), {
+      body,
+      delayMs: opts.delayMs ?? 0,
+    })
+    h.manifests.fastflowlm = {
+      source: 'remote',
+      fetched_at: 1,
+      error: null,
+      manifest: parseFastFlowLmManifest({ schema_version: 1, releases: [r] }),
+    }
+    return r.version
+  }
+  const install = (h: ReturnType<typeof harness>) => h.service.install('fastflowlm', { task_id: 'flm' })
+  it('swaps to the newer verified build, keeps the old one and protects active and busy builds', async () => {
+    const h = harness()
+    const old = await publish(h, 2)
+    await install(h)
+    const oldDir = (await h.service.activeDir('fastflowlm'))!
+    const tag = await publish(h, 10)
+    expect(await h.service.checkUpdates('fastflowlm')).toMatchObject({ update_needed: true, target: { tag } })
+    await install(h)
+    expect(await h.service.catalog('fastflowlm')).toMatchObject({
+      active: { tag },
+      installed: expect.arrayContaining([
+        {
+          tag: old,
+          backend_id: platform,
+          active: false,
+          removable: true,
+          origin: 'downloaded',
+          in_use: false,
+          published_at: expect.any(String),
+          installed_at_ms: expect.any(Number),
+        },
+      ]),
+    })
+    expect(h.changed).toEqual(Array(2).fill({ engine: 'fastflowlm', reason: 'install' }))
+    await expect(h.service.remove('fastflowlm', tag, platform, { refuseActive: true })).rejects.toMatchObject(
+      { code: 'INVALID_REQUEST' }
+    )
+    expect((await h.service.catalog('fastflowlm')).active?.removable).toBe(false)
+    h.hosts.fastflowlm.used = [oldDir]
+    await expect(h.service.remove('fastflowlm', old, platform)).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+    })
+    h.hosts.fastflowlm.used = []
+    expect(await h.service.remove('fastflowlm', old, platform)).toEqual({ removed: true })
+    expect(archiveRequests().every((r) => r.path.endsWith('.tar.gz'))).toBe(true)
+  })
+  it.each([
+    [{ sha256: '0'.repeat(64) }, 'ENGINE_INSTALL_FAILED'],
+    [{ identity: { local_only_protocol: 2 } }, 'FASTFLOWLM_LOCAL_ONLY_MISMATCH'],
+    [{ identity: { atomic_revision: 1 } }, 'FASTFLOWLM_LOCAL_ONLY_MISMATCH'],
+    [{ identity: { upstream_commit: '0'.repeat(40) } }, 'FASTFLOWLM_LOCAL_ONLY_MISMATCH'],
+    [{ script: 'echo stock-flm' }, 'FASTFLOWLM_LOCAL_ONLY_MISMATCH'],
+  ] as const)('keeps the previous installation on a rejected archive %j', async (bad, code) => {
+    const h = harness()
+    const old = await publish(h, 1)
+    await install(h)
+    const next = await publish(h, 2, bad)
+    await expect(install(h)).rejects.toMatchObject({ code })
+    expect((await h.service.catalog('fastflowlm')).active?.tag).toBe(old)
+    expect(await ls(join(data.layout.provider('fastflowlm').backendsDir, next))).toEqual([])
+    expect(h.changed).toHaveLength(1)
+  })
+  it('cancels during download, without publishing the new revision', async () => {
+    const h = harness()
+    const old = await publish(h, 1)
+    await install(h)
+    const next = await publish(h, 2, { delayMs: 2000 })
+    const pending = install(h).catch((e: unknown) => e)
+    await waitFor(() => archiveRequests().some((r) => r.path.includes(next)))
+    expect(h.downloader.cancel('flm')).toBe(true)
+    expect(await pending).toMatchObject({ code: 'CANCELLED' })
+    expect((await h.service.catalog('fastflowlm')).active?.tag).toBe(old)
+  })
+})
+
+it.skipIf(!POSIX)(
+  'honours cancellation after SHA verification while the FLM capability probe runs',
+  async () => {
+    const h = harness()
+    const r = flmRelease()
+    const flag = join(data.root, 'probe-started')
+    const body = await archive('cancel-probe', { flm: `touch "${flag}"\nexec sleep 10` })
+    const asset = r.assets[1]!
+    asset.sha256 = sha(body)
+    asset.size = body.length
+    server.files.set('/releases/' + r.version + '/' + asset.url.split('/').at(-1), { body })
+    h.manifests.fastflowlm = {
+      source: 'remote',
+      fetched_at: 1,
+      error: null,
+      manifest: parseFastFlowLmManifest({ schema_version: 1, releases: [r] }),
+    }
+    const pending = h.service.install('fastflowlm', { task_id: 'late-cancel' }).catch((e: unknown) => e)
+    await vi.waitFor(async () => expect((await lstat(flag)).isFile()).toBe(true), { timeout: 5000 })
+    expect(h.service.cancelInstall('late-cancel')).toBe(true)
+    expect(await pending).toMatchObject({ code: 'CANCELLED' })
+    expect(await h.service.activeDir('fastflowlm')).toBeUndefined()
+    expect(h.changed).toEqual([])
+  }
+)
+
+it('recovers the parked FLM build after a crash between the two renames', async () => {
+  const h = harness()
+  const dir = join(data.layout.provider('fastflowlm').backendsDir, 'flm-1.0.11-r1', 'linux-x64-npu')
+  await mkdir(dir + '.retired-100', { recursive: true })
+  await writeFile(join(dir + '.retired-100', 'old'), 'working')
+  await mkdir(dir + '.incoming-100')
+  await h.service.startupCleanup()
+  expect(await readFile(join(dir, 'old'), 'utf8')).toBe('working')
+  expect(await ls(join(dir, '..'))).toEqual(['linux-x64-npu'])
 })

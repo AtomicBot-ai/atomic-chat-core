@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { c as tarCreate } from 'tar'
@@ -122,4 +122,35 @@ describe('normalizeBackendLayout', () => {
       }
     }
   )
+})
+
+it.skipIf(process.platform === 'win32')('refuses tar links before executing an FLM archive', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atomic-flm-archive-'))
+  try {
+    await symlink('/bin/sh', join(dir, 'flm'))
+    const archive = join(dir, 'flm.tar.gz')
+    await tarCreate({ cwd: dir, file: archive, gzip: true }, ['flm'])
+    await expect(extractArchive(archive, join(dir, 'out'), true)).rejects.toThrow(
+      'Unsafe engine archive entry'
+    )
+    expect(await exists(join(dir, 'out', 'flm'))).toBe(false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+it('rejects a Windows device path in engine zips and extracts ordinary library names', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'atomic-flm-zip-'))
+  try {
+    const archive = join(dir, 'build.zip')
+    await writeFile(archive, makeZip([{ name: 'lib/qwen3_npu.dll', data: Buffer.from('lib') }]))
+    await extractArchive(archive, join(dir, 'out'), true)
+    expect(await readFile(join(dir, 'out/lib/qwen3_npu.dll'), 'utf8')).toBe('lib')
+    await writeFile(archive, makeZip([{ name: 'lib/con.dll', data: Buffer.from('bad') }]))
+    await expect(extractArchive(archive, join(dir, 'out'), true)).rejects.toThrow(
+      'Unsafe engine archive entry'
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

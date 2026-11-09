@@ -21,3 +21,10 @@ export function exitWithTheTest() {
   }
   setTimeout(() => process.exit(0), MAX_LIFETIME_MS).unref()
 }
+
+/** Bind before publishing the port, just as Docker reserves an automatically assigned host port. */
+export function listenForDocker(server, port) {
+  server.listen(Number(port), '127.0.0.1', () => {
+    process.send?.({ port: server.address().port })
+  })
+}

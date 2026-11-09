@@ -101,6 +101,21 @@ describe('tier probing', () => {
       })
     ).toBe(expected)
   })
+  it.each(['ROCm0', 'Vulkan0', 'empty', 'error'])(
+    'requires a HIP device on installed Windows ROCm packs: %s',
+    async (id) => {
+      const backend = 'win-rocm-10.0-x64'
+      expect(
+        await tierEnumeratesDevices(backend, [amd()], {
+          listInstalled: async () => [b('b12019', backend)],
+          listDevices: async () => {
+            if (id === 'error') throw new Error('HIP runtime unavailable')
+            return id === 'empty' ? [] : [{ ...device, id }]
+          },
+        })
+      ).toBe(id === 'ROCm0' ? 'works' : 'broken')
+    }
+  )
   it('tierEnumeratesDevices walks the decision with injected probes', async () => {
     const installed = [b('b10809', 'win-cuda-13.3-x64', 7)]
     const log: string[] = []
@@ -174,7 +189,7 @@ describe('tier probing', () => {
       b('b10809', 'win-vulkan-x64'),
     ]
     const all = features({ cuda12: true, cuda13: true, rocm: true, vulkan: true })
-    expect(windowsGpuTiers(all, catalog, 'x64', [amd(), { total_memory: 8192 }])).toEqual([
+    expect(windowsGpuTiers(all, catalog, 'x64', [{ ...amd(), total_memory: 8192 }])).toEqual([
       'win-cuda-13.3-x64',
       'win-cuda-12.4-x64',
       'win-rocm-10.0-x64',

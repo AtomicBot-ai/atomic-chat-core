@@ -104,6 +104,7 @@ describe('LOCAL_SEARCH_ORDER', () => {
       'foundry-local',
       'litert-lm',
       'geniex',
+      'fastflowlm',
     ])
   })
 })

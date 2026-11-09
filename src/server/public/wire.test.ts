@@ -1,9 +1,39 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { relayedHeaders, sendUpstream, withIdleTimeout } from './wire.js'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { PassThrough } from 'node:stream'
+import type { ServerResponse } from 'node:http'
+import { pipeBody, relayedHeaders, sendUpstream, withIdleTimeout } from './wire.js'
 import type { UpstreamResponse } from './wire.js'
 import { closeAll, closedPort, startUpstream } from '../../../test/helpers/public-server.js'
 
 afterEach(closeAll)
+
+describe('pipeBody under backpressure', () => {
+  it.each(['drain', 'disconnect'] as const)('releases the pending write on %s', async (outcome) => {
+    const destination = new PassThrough({ highWaterMark: 1 })
+    const onClose = vi.fn()
+    async function* source() {
+      yield 'first'
+      yield 'second'
+    }
+    const pending = pipeBody(destination as unknown as ServerResponse, source(), onClose)
+    try {
+      await vi.waitFor(() => expect(destination.writableNeedDrain).toBe(true))
+      const chunks: string[] = []
+      if (outcome === 'drain') destination.on('data', (chunk: Buffer) => chunks.push(chunk.toString()))
+      else destination.destroy()
+      await pending
+      expect(destination.listenerCount('drain')).toBe(0)
+      expect(destination.listenerCount('close')).toBe(0)
+      if (outcome === 'drain') {
+        expect(chunks.join('')).toBe('firstsecond')
+        await vi.waitFor(() => expect(destination.writableFinished).toBe(true))
+        expect(onClose).not.toHaveBeenCalled()
+      } else expect(onClose).toHaveBeenCalledOnce()
+    } finally {
+      destination.destroy()
+    }
+  })
+})
 
 describe('withIdleTimeout', () => {
   it('gives up on a source that stays silent past the timeout', async () => {

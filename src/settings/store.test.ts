@@ -157,6 +157,7 @@ describe('SettingsStore.open', () => {
           'foundry-local': EMPTY_PROVIDER_STATE,
           'litert-lm': EMPTY_PROVIDER_STATE,
           'geniex': EMPTY_PROVIDER_STATE,
+          'fastflowlm': EMPTY_PROVIDER_STATE,
         },
         migrations: {},
       },
@@ -173,6 +174,7 @@ describe('SettingsStore.open', () => {
       'foundry-local': canonicalProviderDefaults('foundry-local'),
       'litert-lm': canonicalProviderDefaults('litert-lm'),
       'geniex': canonicalProviderDefaults('geniex'),
+      'fastflowlm': canonicalProviderDefaults('fastflowlm'),
     })
     // canonical, not raw: the schema ships timeout "1800" and fit_ctx 4096
     expect(store.get('llamacpp-upstream')).toMatchObject({
@@ -588,5 +590,33 @@ describe('embedding section', () => {
     expect(fixed.embedding).toEqual(DEFAULT_EMBEDDING_SETTINGS)
     await fixed.updateEmbedding({ enabled: true })
     expect(onDisk(broken)['embedding']).toEqual({ ...DEFAULT_EMBEDDING_SETTINGS, enabled: true })
+  })
+})
+
+it('persists FastFlowLM launch settings and canonicalizes their numeric input', async () => {
+  const { fs, store } = await openFresh()
+  expect(store.get('fastflowlm')).toMatchObject({
+    pmode: 'performance',
+    prefill_chunk_len: 0,
+    prefix_cache_mb: 4096,
+    prefix_slots: 8,
+    prefix_min_gain: 128,
+  })
+  await store.update('fastflowlm', {
+    pmode: 'turbo',
+    ctx_len: '8192',
+    prefill_chunk_len: '2048',
+    prefix_cache_mb: '1024',
+    prefix_slots: '0',
+    prefix_min_gain: '0',
+  })
+  const reopened = await SettingsStore.open(PATH, { fs })
+  expect(reopened.get('fastflowlm')).toMatchObject({
+    pmode: 'turbo',
+    ctx_len: 8192,
+    prefill_chunk_len: 2048,
+    prefix_cache_mb: 1024,
+    prefix_slots: 0,
+    prefix_min_gain: 0,
   })
 })

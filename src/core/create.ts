@@ -4,6 +4,13 @@
  * previous owner left running and only then publish the endpoint.
  */
 
+import { lstat } from 'node:fs/promises'
+import {
+  FastFlowLmRuntime,
+  FlmMaintenance,
+  ownedFlmPath,
+  createFlmProbe,
+} from '../runtime/fastflowlm/index.js'
 import { randomUUID } from 'node:crypto'
 import { homedir, release as osRelease, totalmem } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -18,7 +25,13 @@ import type {
 import { dataLayout, nodeDataFolderEnv, resolveCliDataFolder, resolveDataFolder } from '../config/index.js'
 import { CoreEmitter } from '../events/index.js'
 import { InstanceLock, ProcessJournal, writeControlToken } from '../lock/index.js'
-import { EmbedService, ModelCapabilityService, ModelRegistry } from '../models/index.js'
+import {
+  checkFastFlowLmModel,
+  FastFlowLmRegistry,
+  EmbedService,
+  ModelCapabilityService,
+  ModelRegistry,
+} from '../models/index.js'
 import { LlamacppRuntime, processPackDirs } from '../runtime/llamacpp/index.js'
 import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
@@ -60,6 +73,7 @@ import type { ChatGptBackend } from '../cloud/index.js'
 import {
   HardwareService,
   nodeProbeDeps,
+  probeFastFlowLm,
   probeNpu,
   probeSystemInfo,
   probeUnifiedMemory,
@@ -89,11 +103,12 @@ import {
 import type { EngineHandle } from '../engines/index.js'
 import { DEFAULT_ENVIRONMENT_ID } from '../runtime/environment/index.js'
 import { noticeEmbeddingEngineInstall, wireEmbedding } from '../embedding/index.js'
-import { wireDiffusion } from '../diffusion/index.js'
+import { AsyncMutex, wireDiffusion } from '../diffusion/index.js'
 import { wireAudio } from '../audio/index.js'
 import { MEDIA_ADAPTERS, MediaCatalogService, MediaService } from '../media/index.js'
 import {
   EngineBuildsService,
+  fastFlowLmHostPlatform,
   EngineManifestSource,
   IDLE_ENGINE_HOST,
   manifestKinds,
@@ -113,6 +128,14 @@ import {
   processFailureReport,
   reportCoreEvents,
 } from '../telemetry/index.js'
+import {
+  EnvironmentManifestStore,
+  PreparationCoordinator,
+  preparationBoot,
+  type FlmManifest,
+  preparationHost,
+  probePreparation,
+} from '../runtime/fastflowlm/environment/index.js'
 import { CORE_VERSION } from '../version.js'
 import type { AtomicCore, AtomicCoreParts } from './atomic-core.js'
 import { wireManagedEnvironment } from './managed-environment.js'
@@ -252,7 +275,7 @@ export async function createAtomicCore(
       fetch: options.fetch ?? fetch,
       emit: (name, payload) => emitter.emit(name, payload),
     })
-    const registries = new Map<LocalProviderId, ModelRegistry | ManagedModelRegistry>([
+    const registries = new Map<LocalProviderId, ModelRegistry | ManagedModelRegistry | FastFlowLmRegistry>([
       [LOCAL_PROVIDER, new ModelRegistry(layout, LOCAL_PROVIDER)],
       ['llamacpp', new ModelRegistry(layout, 'llamacpp')],
       ['atomic-prism', new ModelRegistry(layout, 'atomic-prism')],
@@ -272,8 +295,8 @@ export async function createAtomicCore(
         emit: (name, payload) => emitter.emit(name, payload),
         readSettings: () =>
           readRuntimeSettings(settings, provider, layout, cudaGuard.facts(provider, hardware)),
-        ensureBackendReady: (backend, version) =>
-          cudaGuard.ensureBackend(
+        ensureBackendReady: async (backend, version) => {
+          const ready = await cudaGuard.ensureBackend(
             layout,
             provider,
             backend,
@@ -284,7 +307,10 @@ export async function createAtomicCore(
             // runtime; a rejection is what makes the guard pick another pack.
             (repairBackend, repairVersion) =>
               backendService(provider).repairCudaRuntime(repairVersion, repairBackend)
-          ),
+          )
+          await backendService(provider).repairRocmRuntime(ready.version, ready.backend)
+          return ready
+        },
         // A GPU build this card or driver cannot run (CUDA 13 on Turing before R616, a pack Windows
         // cannot load) is remembered and the load is retried once on the next installed build.
         backendFallback: (failed, reason) =>
@@ -391,6 +417,9 @@ export async function createAtomicCore(
           : undefined),
     }
     const foundryLocalHost = foundryLocalHostPlatform(nativeHostFacts)
+    const flmHost = fastFlowLmHostPlatform(nativeHostFacts)
+    const flmModels = new FastFlowLmRegistry(layout)
+    if (flmHost.platform) registries.set('fastflowlm', flmModels)
     const liteRtLmHost = liteRtLmHostPlatform(nativeHostFacts)
     const liteRtHost = liteRtHostCommand(env)
     // GenieX (change `add-geniex-runtime`, design D3): Windows arm64 whose processor is a Snapdragon X
@@ -666,6 +695,7 @@ export async function createAtomicCore(
       const existing = backendServices.get(provider)
       if (existing) return existing
       const created = new BackendService({
+        readGpus: async () => (await hardware.facts()).gpus,
         onFailure,
         layout,
         provider,
@@ -763,13 +793,80 @@ export async function createAtomicCore(
     // lend it their load locks and their sessions.
     const engineManifestKinds = manifestKinds(layout)
     const mlxRuntime = runtimes.get('mlx')
+    const flmBuildLock = new AsyncMutex()
+    const flmDeps = nodeProbeDeps({ platform, arch: foundryLocalArch, env, ...options.hardware?.fastFlowLm })
+    const inspectNpu = async () => {
+      const build = await engineBuilds.activeBuild('fastflowlm')
+      if (build)
+        await ownedFlmPath(layout.root, join(build.dir, platform === 'win32' ? 'flm.exe' : 'flm-real'))
+      return probeFastFlowLm(flmDeps, {
+        supported: flmHost.platform !== null,
+        build: build ?? null,
+        desktop: options.ownerScope === 'app',
+      })
+    }
+    const flmProbe = createFlmProbe(flmBuildLock, inspectNpu)
+    const flmPaths = layout.provider('fastflowlm')
+    const fastFlowLmMaintenance: FlmMaintenance = new FlmMaintenance(
+      join(flmPaths.runtimeDir!, 'maintenance'),
+      flmBuildLock,
+      async (id) => {
+        const result = await flmRuntime?.unload(id)
+        if (result && !result.success)
+          throw new AtomicCoreError(
+            'FASTFLOWLM_DEVICE_BUSY',
+            'FastFlowLM is still using the installation.',
+            result.error
+          )
+      },
+      async (op) => {
+        const path = join(flmModels.modelsDir, op.model_id)
+        // Only a first installation can roll back to absence; replacement of an existing model stays guarded.
+        if (
+          (op.kind === 'remove' || op.initially_absent === true) &&
+          !(await lstat(path).catch((e: NodeJS.ErrnoException) => {
+            if (e.code === 'ENOENT') return null
+            throw e
+          }))
+        )
+          return
+        await flmModels.get(op.model_id)
+      },
+      layout.root,
+      async (id) =>
+        !(await lstat(join(flmModels.modelsDir, id)).catch((e: NodeJS.ErrnoException) => {
+          if (e.code === 'ENOENT') return null
+          throw e
+        }))
+    )
+    const flmRuntime: FastFlowLmRuntime | undefined = flmHost.platform
+      ? new FastFlowLmRuntime({
+          registry: flmModels,
+          cache: flmPaths.cacheDir!,
+          dataRoot: layout.root,
+          instanceId: lock.instanceId,
+          journal,
+          platform,
+          env,
+          emit: (name, payload) => emitter.emit(name, payload),
+          trustedHosts: managedTrustedHosts,
+          settings: async () => settings.get('fastflowlm'),
+          resolveBuild: () => engineBuilds.activeBuild('fastflowlm'),
+          probe: inspectNpu,
+          assertLoadable: (id) => fastFlowLmMaintenance.assertLoadable(id),
+          lock: flmBuildLock,
+        })
+      : undefined
+    if (flmRuntime) runtimes.set('fastflowlm', flmRuntime)
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
+      env,
       dataFolder: layout.root,
       roots: {
         'sd-cpp': layout.diffusion.backendsDir,
         'mlx': layout.provider('mlx').backendsDir,
         'foundry-local': foundryLocalPaths.backendsDir,
         'litert-lm': layout.provider('litert-lm').backendsDir,
+        'fastflowlm': layout.provider('fastflowlm').backendsDir,
         'geniex': layout.provider('geniex').backendsDir,
         'audio-cpp': layout.audio.backendsDir,
       },
@@ -789,10 +886,16 @@ export async function createAtomicCore(
           log,
         }),
         'litert-lm': liteRtManifest,
+        'fastflowlm': new EngineManifestSource(engineManifestKinds.fastflowlm, { env, fetchFor, log }),
         'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
         'audio-cpp': new EngineManifestSource(engineManifestKinds['audio-cpp'], { env, fetchFor, log }),
       },
-      hostPlatforms: { 'foundry-local': foundryLocalHost, 'litert-lm': liteRtLmHost, 'geniex': geniexHost },
+      hostPlatforms: {
+        'fastflowlm': flmHost,
+        'foundry-local': foundryLocalHost,
+        'litert-lm': liteRtLmHost,
+        'geniex': geniexHost,
+      },
       hostProbes: {
         'foundry-local': async (libDir) => {
           await runFoundryHostProbe(
@@ -816,12 +919,44 @@ export async function createAtomicCore(
         // Where the provider is not registered nothing runs from a build.
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
+        'fastflowlm': flmRuntime?.engineHost() ?? IDLE_ENGINE_HOST,
         'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
         'audio-cpp': audio.engineHost(),
       },
       availableSpace: defaultAvailableSpace,
       emit: (name, payload) => emitter.emit(name, payload),
       log,
+    })
+
+    const flmEnvironment = new EnvironmentManifestStore({
+      platform: platform === 'win32' ? 'windows' : 'linux',
+      cache: layout.provider('fastflowlm').cacheDir!,
+      env,
+      fetch: fetchFor(),
+    })
+    const flmPreparation = async (pinned?: FlmManifest, pinnedBuild?: string | null) => {
+      const facts = await flmProbe()
+      const plan = await probePreparation(facts, platform, foundryLocalArch, {
+        pinned: pinned !== undefined,
+        host: () => preparationHost(flmDeps, nativeHostFacts.osRelease),
+        manifest: () => (pinned ? Promise.resolve(pinned) : flmEnvironment.latest()),
+        selectedBuild: async () => {
+          if (pinnedBuild !== undefined) return pinnedBuild
+          const catalog = await engineBuilds.catalog('fastflowlm').catch(() => null)
+          return catalog?.host_backend_id ? (catalog.manifest?.tag ?? null) : null
+        },
+      })
+      return { facts: { ...facts, automatic_repair_available: plan.status === 'action-required' }, plan }
+    }
+
+    const fastFlowLmOperations = new PreparationCoordinator({
+      dir: join(layout.provider('fastflowlm').runtimeDir!, 'operations'),
+      dataRoot: layout.root,
+      inspect: flmPreparation,
+      facts: flmProbe,
+      pinned: (d) => flmEnvironment.pinned(d),
+      boot: () => preparationBoot(flmDeps),
+      emit: (op) => emitter.emit('fastflowlm:operation', op),
     })
 
     const liteRtLmCheck =
@@ -1016,6 +1151,7 @@ export async function createAtomicCore(
     for (const engine of hostEngines(platform, [...managedRuntimes.keys()], {
       foundryLocal: foundryLocalHost.platform !== null,
       liteRtLm: liteRtLmHost.platform !== null,
+      fastflowlm: flmHost.platform !== null,
       geniex: geniexHost.platform !== null,
     })) {
       const kind = ENGINE_KINDS[engine]
@@ -1093,7 +1229,12 @@ export async function createAtomicCore(
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
         hardware,
+        fastFlowLmAccelerators: async () => (await flmPreparation()).facts,
+        fastFlowLmMaintenance,
+        fastFlowLmOperations,
+        fastFlowLmPreparation: async () => (await flmPreparation()).plan,
         nativeModelChecks: {
+          fastflowlm: (body) => checkFastFlowLmModel(body, flmModels, flmProbe),
           ...(foundryLocalAccelerators
             ? {
                 // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
@@ -1153,10 +1294,27 @@ export async function createAtomicCore(
             : Promise.resolve('unavailable')
         },
         models: {
-          capabilities: async (provider, modelId) =>
-            managedEngines.has(provider)
+          capabilities: async (provider, modelId) => {
+            if (provider === 'fastflowlm') {
+              if (!flmHost.platform) throw unknownProvider(provider, registries.keys())
+              const installed = await flmModels.get(modelId)
+              return {
+                modelId,
+                maxCtxTrain: installed.yml.fastflowlm.context_length,
+                mmprojExists: false,
+                isEmbedding: false,
+                isDecision: false,
+                vision: false,
+                audio: false,
+                gemmaMtp: false,
+                dflash: false,
+                dflashDrafts: [],
+              }
+            }
+            return managedEngines.has(provider)
               ? managedOr(provider).capabilities(modelId)
-              : capabilities.capabilities(provider as LocalProviderId, modelId),
+              : capabilities.capabilities(provider as LocalProviderId, modelId)
+          },
           logs: async (provider, modelId) => {
             if (managedEngines.has(provider)) return managedOr(provider).logs(modelId)
             if (!runtimes.has(provider as LocalProviderId)) throw unknownProvider(provider, runtimes.keys())
@@ -1214,7 +1372,10 @@ export async function createAtomicCore(
             backendService(provider as LocalProviderId).remove(version, backend, () =>
               String(settings.get(provider as LocalProviderId)['version_backend'] ?? '')
             ),
-          cancel: (taskId) => downloader.cancel(taskId),
+          cancel: (taskId) => {
+            const transfer = downloader.cancel(taskId)
+            return engineBuilds.cancelInstall(taskId) || transfer
+          },
           getOptimal: (provider) => backendService(provider as LocalProviderId).getOptimalCache(),
           setOptimal: (provider, record, expectedRevision) =>
             backendService(provider as LocalProviderId).setOptimalCache(record, expectedRevision),
@@ -1370,6 +1531,8 @@ export async function createAtomicCore(
       events: emitter,
       settings,
       clients,
+      fastFlowLmMaintenance,
+      fastFlowLmOperations,
       lock,
       runtimes,
       registries,
@@ -1413,6 +1576,9 @@ export async function createAtomicCore(
       .catch((e: unknown) => warn(`managed runtime container reconcile: ${String(e)}`))
     // A setup the previous core was in the middle of is reconciled against the machine before the
     // endpoint is published, so the first snapshot a client sees already describes it.
+    await fastFlowLmOperations
+      .recover()
+      .catch((e: unknown) => warn('FastFlowLM preparation recovery: ' + String(e)))
     await managed.recover().catch((e: unknown) => warn(`managed runtime recovery: ${String(e)}`))
     // Before the first load (design D5): downloaded engine builds no newer than the installer's, the
     // ones a session kept on the last install, the leftovers of an interrupted install.

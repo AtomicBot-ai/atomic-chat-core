@@ -70,6 +70,20 @@ describe('host-step exec', () => {
     expect(io.out.join('')).toContain('step-7: completed')
   })
 
+  it('checks a launch digest before dispatch even when the replacement is a valid legacy recipe', async () => {
+    const fake = fakeDeps(request()),
+      io = recordingIo()
+    expect(
+      await hostStepCommand(
+        ['exec', '/x/step-7.request.json', '--request-sha256', '0'.repeat(64)],
+        io,
+        fake.deps
+      )
+    ).toBe(1)
+    expect(fake.commands).toEqual([])
+    expect(io.out.join('')).toContain('launch digest')
+  })
+
   it('exit 1 and the reason when the request is refused', async () => {
     const io = recordingIo()
     const fake = fakeDeps(request({ recipe_digest: `sha256:${'f'.repeat(64)}` }))

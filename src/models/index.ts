@@ -14,3 +14,8 @@ export * from './embed.js'
 export * from './registry.js'
 export * from './hf.js'
 export * from './compatibility/index.js'
+
+export * from './catalog-source.js'
+
+export * from './fastflowlm.js'
+export * from './fastflowlm-check.js'

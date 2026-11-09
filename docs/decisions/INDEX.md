@@ -11,6 +11,12 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-07 — Expose typed FastFlowLM launch settings through the core](2026-11-07-expose-flm-launch-settings.md)
+
+- [2026-11-06 — Wait for FLM cancellation within one deadline](2026-11-06-wait-for-flm-cancellation-within-one-deadline.md)
+
+- [2026-11-05 — Limit Ubuntu NPU installation to the approved transaction](2026-11-05-limit-ubuntu-npu-installation-to-the-approved-transaction.md)
+
 - [2026-11-05 — Offer the upstream Linux x64 ROCm build](2026-11-05-offer-upstream-linux-rocm.md)
 
 - [2026-11-04 — Run only GPU builds the card can run, and retry a failed GPU load once on the next build](2026-11-04-run-only-gpu-builds-the-card-can-run-and-retry-once.md)
@@ -184,8 +190,42 @@ add a new one that says which record it supersedes.
 - [Tile the image VAE from above 768² on Vulkan](2026-11-05-tile-the-image-vae-earlier-on-vulkan.md)
 - [List llama.cpp devices from the pack a load runs on](2026-11-05-list-devices-from-the-pack-a-load-runs-on.md)
 - [Give mlx-server the llama.cpp answer cap](2026-11-05-give-mlx-the-llama-answer-cap.md)
+- [Pin FastFlowLM build inputs before changing the server](2026-11-05-pin-fastflowlm-build-inputs.md)
+- [Validate FastFlowLM installer plans before projection](2026-11-05-validate-fastflowlm-catalog-plans-in-clients.md)
+- [Verify the local-only FLM executable before publishing an engine build](2026-11-05-probe-fastflowlm-before-engine-swap.md)
+
+- [Build and verify the same local FastFlowLM model configuration](2026-11-05-build-local-flm-model-config.md)
+- [Publish FastFlowLM compatibility and operation recovery on control protocol 2](2026-11-05-fastflowlm-control-wire.md)
+- [Probe the selected FastFlowLM build as the runtime owner](2026-11-05-probe-fastflowlm-as-runtime-owner.md)
+
+- [Pin FastFlowLM preparation to the measured owner and qualified recipe](2026-11-05-pin-fastflowlm-preparation.md)
+
+- [Bind the Windows NPU driver to one device instance](2026-11-05-bind-the-windows-npu-driver-to-one-device.md)
+- [Serialize FastFlowLM model changes and generation](2026-11-05-serialize-fastflowlm-model-changes-and-generation.md)
 - [Reclaim dead-owner takeover mutexes immediately](2026-11-05-reclaim-dead-owner-takeover-mutex.md)
 - [Tag sd.cpp install probe failures with finite diagnostic codes](2026-11-05-tag-sdcpp-install-probe-failures.md)
+
+- [2026-11-06 — Release FLM maintenance after rollback to absence](2026-11-06-release-flm-maintenance-after-absent-rollback.md)
+
+- [2026-11-06 — Separate runtime memory preparation from driver recipes](2026-11-06-separate-runtime-memlock.md)
+
+- [2026-11-06 — Measure AMD APU shared memory separately from VRAM](2026-11-06-measure-amd-apu-shared-memory.md)
+
+- [Manual FastFlowLM driver setup](2026-11-06-manual-npu-driver-setup.md) — display-only vendor/distro guidance; automatic runtime memlock retained.
+
+- [Import the shipped FastFlowLM chat catalog with editorial recommendations](2026-11-06-import-upstream-flm-catalog.md)
+
+- [Verify FLM content only during download](2026-11-06-verify-flm-content-only-on-download.md) — Keep payload SHA-256 in the installer and remove full-file reads from registry lookups and load preparation.
+
+- [Measure Windows AMD UMA per adapter](2026-11-06-measure-windows-amd-uma.md)
+
+- **2026-11-07** — [Share in-flight FastFlowLM hardware probes](2026-11-07-share-in-flight-fastflowlm-probes.md)
+
+- **2026-11-07** — [Cover the Radeon architectures shipped by Windows llama.cpp](2026-11-07-cover-shipped-windows-rocm-architectures.md)
+
+- **2026-11-07** — [Deliver the Windows ROCm runtime with upstream llama.cpp](2026-11-07-deliver-windows-rocm-runtime.md)
+
+- [2026-11-07 — Reuse the public API after host key rotation](2026-11-07-reuse-public-api-with-host-keyring.md)
 - [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
 - [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
 - [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)

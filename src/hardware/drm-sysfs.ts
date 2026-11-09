@@ -41,6 +41,8 @@ export interface SysfsGpu {
   driver?: string
   /** `mem_info_vram_total` in MiB; only `amdgpu` exposes it. */
   vramTotalMiB?: number
+  /** Confirmed APU GTT capacity, capped by physical system RAM, in MiB. */
+  sharedMemoryMiB?: number
   /** The GPU the firmware booted with, when the kernel says. */
   bootVga?: boolean
 }
@@ -53,6 +55,10 @@ export interface SysfsGpuFiles {
   device: string
   /** Contents of `device/mem_info_vram_total`, bytes. */
   vramTotal?: string
+  gttTotal?: string
+  /** GC IP major.minor.revision from the kernel IP discovery tree. */
+  graphicsVersion?: string
+  systemMemoryMiB?: number
   /** Contents of `device/boot_vga`, `0` or `1`. */
   bootVga?: string
   /** Target of the `device` symlink (`../../../0000:01:00.0`). */
@@ -60,6 +66,24 @@ export interface SysfsGpuFiles {
   /** Target of the `device/driver` symlink (`../../../../bus/pci/drivers/amdgpu`). */
   driverLink?: string
 }
+
+// Linux Documentation/gpu/amdgpu/apu-asic-info-table.csv. An ordinary discrete GPU also has
+// GTT; only these APU GC IP versions establish that it is a shared physical memory pool.
+const APU_GC_VERSIONS = new Set([
+  '9.1.0',
+  '9.2.2',
+  '9.3.0',
+  '10.3.1',
+  '10.3.3',
+  '10.3.6',
+  '10.3.7',
+  '11.0.1',
+  '11.0.4',
+  '11.5.0',
+  '11.5.1',
+  '11.5.2',
+  '11.5.3',
+])
 
 const PCI_BUS_ID = /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$/i
 
@@ -76,6 +100,18 @@ export function sysfsGpuFromFiles(files: SysfsGpuFiles): SysfsGpu | undefined {
   if (files.vramTotal !== undefined) {
     const bytes = Number(files.vramTotal.trim())
     if (Number.isFinite(bytes) && bytes > 0) gpu.vramTotalMiB = Math.floor(bytes / 2 ** 20)
+  }
+  if (
+    vendorId === PCI_VENDOR.AMD &&
+    driver === 'amdgpu' &&
+    APU_GC_VERSIONS.has(files.graphicsVersion ?? '')
+  ) {
+    const bytes = Number(files.gttTotal?.trim())
+    const ram = files.systemMemoryMiB
+    if (Number.isSafeInteger(bytes) && bytes > 0 && ram !== undefined && Number.isFinite(ram) && ram > 0) {
+      const shared = Math.floor(Math.min(bytes / 2 ** 20, ram))
+      if (shared > 0) gpu.sharedMemoryMiB = shared
+    }
   }
   if (files.bootVga !== undefined) {
     const value = files.bootVga.trim()

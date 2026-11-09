@@ -7,3 +7,8 @@ export { CONTROL_API_PREFIX, CONTROL_PROTOCOL_VERSION } from '../contracts/index
 export * from './control-client.js'
 
 export * from './model-catalog.js'
+export { projectFastFlowLmCollection, type FastFlowLmCatalogOptions } from './fastflowlm-catalog.js'
+export * from './catalog-sources.js'
+
+export * from './fastflowlm-installation.js'
+export { fastFlowLmHostRequest, fastFlowLmHostReceipt } from './fastflowlm-host-step.js'

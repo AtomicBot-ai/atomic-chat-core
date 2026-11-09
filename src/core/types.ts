@@ -5,7 +5,7 @@ import type { WireDecisionOptions } from '../decision/index.js'
 import type { WireEmbeddingOptions } from '../embedding/index.js'
 import type { WireDiffusionOptions } from '../diffusion/index.js'
 import type { WireAudioOptions } from '../audio/index.js'
-import type { HardwareProbeResult } from '../hardware/index.js'
+import type { HardwareProbeResult, ProbeDeps } from '../hardware/index.js'
 import type { Prober, TunnelSpawner, TunnelTimings } from '../remote-access/index.js'
 import type { TelemetryControl } from '../telemetry/index.js'
 
@@ -36,7 +36,10 @@ export interface AtomicCoreOptions {
   /** Test seams of the embedding module (a fake engine, installed packs). */
   embedding?: WireEmbeddingOptions['overrides']
   /** Test seam of the hardware probe: a canned answer instead of the shell tools and sysfs. */
-  hardware?: { probe?: () => Promise<HardwareProbeResult> }
+  hardware?: {
+    probe?: () => Promise<HardwareProbeResult>
+    fastFlowLm?: Partial<Pick<ProbeDeps, 'fs' | 'run'>>
+  }
   /** The platform runtimes are offered for (macOS-only engines are not registered elsewhere). Test seam. */
   platform?: NodeJS.Platform
   /**

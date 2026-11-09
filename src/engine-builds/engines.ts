@@ -5,6 +5,7 @@
  * The service only orders the steps; a new engine is a new row here, not another branch there.
  */
 
+import { fastFlowLmDescriptor, type FastFlowLmIdentity } from './fastflowlm.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { EngineBuildId, EngineBuildRef } from '../contracts/index.js'
 import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/install.js'
@@ -61,6 +62,7 @@ import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
   /** For a bundled MLX build, `resources-dir`; otherwise the build's own directory. */
+  immutable_sha256?: string
   dir: string
   installed_at_ms: number | null
   published_at: string | null
@@ -95,6 +97,7 @@ export type EngineHostPlatform =
 /** What a row may read from the service's dependencies. */
 export interface EngineContext {
   /** This engine's `<data>/…/backends`. */
+  env?: NodeJS.ProcessEnv | undefined
   root: string
   /** Where this engine remembers the rungs of its ladder that failed here; absent, it remembers none. */
   failedBackendsFile: string | undefined
@@ -124,6 +127,7 @@ export interface HostChoice {
 export type ArchiveRef = Omit<BuildArchive, 'sha256' | 'size'> & { sha256?: string; size?: number }
 
 export interface BuildRecordInfo {
+  flmIdentity?: FastFlowLmIdentity
   tag: string
   backendId: string
   sha256: string | null
@@ -137,9 +141,17 @@ export interface BuildRecordInfo {
   probe: EngineProbeFacts | null
 }
 
+export interface BuildRelease {
+  tag: string
+  published_at: string | null
+  c_api_version?: number
+  abi?: number
+  flmIdentity?: FastFlowLmIdentity
+}
+
 export interface EngineDescriptor<M> {
   /** The release an install takes from the manifest, and the order key it carries. */
-  release(manifest: M): { tag: string; published_at: string | null; c_api_version?: number; abi?: number }
+  release(manifest: M): BuildRelease | null
   hostChoice(ctx: EngineContext, manifest: M | null): Promise<HostChoice>
   /** The build's archive first, companions after; all unpack into one directory. */
   archives(manifest: M, backendId: string): ArchiveRef[]
@@ -150,7 +162,13 @@ export interface EngineDescriptor<M> {
    * answers (if anything) reaches `record` as `info.probe`. `backendId` is the build being installed
    * (audio.cpp checks the build carries that backend and, for a GPU build, sees a device).
    */
-  probe(staging: string, ctx: EngineContext, backendId: string): Promise<EngineProbeFacts | void>
+  probe(
+    staging: string,
+    ctx: EngineContext,
+    backendId: string,
+    release?: BuildRelease,
+    signal?: AbortSignal
+  ): Promise<EngineProbeFacts | void>
   /** The ownership marker and `install.json`. */
   record(staging: string, info: BuildRecordInfo): Promise<void>
   builds(ctx: EngineContext): Promise<Build[]>
@@ -473,6 +491,7 @@ export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<Manife
   'mlx': mlx,
   'foundry-local': foundryLocal,
   'litert-lm': liteRtLm,
+  'fastflowlm': fastFlowLmDescriptor,
   'geniex': geniex,
   'audio-cpp': audiocpp,
 }

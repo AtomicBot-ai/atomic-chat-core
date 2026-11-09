@@ -23,6 +23,7 @@ describe('engine lifecycle contracts', () => {
       'foundry-local',
       'litert-lm',
       'geniex',
+      'fastflowlm',
       'tensorrt-llm',
       'vllm',
       'sglang',
@@ -43,6 +44,7 @@ describe('engine lifecycle contracts', () => {
       'foundry-local',
       'litert-lm',
       'geniex',
+      'fastflowlm',
     ])
   })
 

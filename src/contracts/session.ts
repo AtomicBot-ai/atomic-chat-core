@@ -34,6 +34,7 @@ export type LocalProviderId =
   | 'foundry-local'
   | 'litert-lm'
   | 'geniex'
+  | 'fastflowlm'
   | ManagedProviderId
 
 /**

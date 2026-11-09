@@ -156,6 +156,7 @@ async function engineBuilds(h: Harness, tag: string) {
       'mlx': layout.provider('mlx').backendsDir,
       'foundry-local': join(dataFolder, 'foundry-local', 'backends'),
       'litert-lm': join(dataFolder, 'litert-lm', 'backends'),
+      'fastflowlm': layout.provider('fastflowlm').backendsDir,
       'geniex': join(dataFolder, 'geniex', 'backends'),
       'audio-cpp': layout.audio.backendsDir,
     },
@@ -178,6 +179,7 @@ async function engineBuilds(h: Harness, tag: string) {
       'litert-lm': {
         read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
       },
+      'fastflowlm': { read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }) },
       'geniex': {
         read: async () => ({ manifest: null, source: null, fetched_at: null, error: 'none' }),
       },
@@ -191,6 +193,7 @@ async function engineBuilds(h: Harness, tag: string) {
       'mlx': h.service.engineHost(),
       'foundry-local': IDLE_ENGINE_HOST,
       'litert-lm': IDLE_ENGINE_HOST,
+      'fastflowlm': IDLE_ENGINE_HOST,
       'geniex': IDLE_ENGINE_HOST,
       'audio-cpp': IDLE_ENGINE_HOST,
     },

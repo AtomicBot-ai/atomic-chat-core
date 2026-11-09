@@ -19,6 +19,7 @@ import type {
   TierHealth,
   TierProbeDeps,
 } from '../types.js'
+import { gpuMemoryMiB, hasSharedGpuMemory } from '../../hardware/index.js'
 import { hasEnoughGpuMemory } from './categories.js'
 import { getSupportedFeatures, isAdrenoGpu, normalizeFeatures } from './features.js'
 
@@ -39,6 +40,16 @@ export function integratedGpuOnly(gpus: readonly GpuProbeInfo[]): boolean {
     !hasDiscreteGpu(gpus) &&
     gpus.length > 0 &&
     gpus.every((g) => g.vulkan_info?.device_type === 'IntegratedGpu')
+  )
+}
+
+/** A Vulkan adapter must carry its own sufficient capacity; another card cannot supply it. */
+export function hasUsableVulkanGpu(gpus: readonly GpuProbeInfo[], minimumMiB = 2048): boolean {
+  return gpus.some(
+    (gpu) =>
+      gpu.vulkan_info &&
+      gpuMemoryMiB(gpu) >= minimumMiB &&
+      (gpu.vulkan_info.device_type !== 'IntegratedGpu' || hasSharedGpuMemory(gpu))
   )
 }
 
@@ -100,8 +111,8 @@ export async function tierEnumeratesDevices(
   } catch (err) {
     probeError = err instanceof Error ? err.message : String(err)
   }
-  // An installed Linux HIP build can silently enumerate no GPU with an incompatible userspace.
-  if (backendType === LINUX_ROCM_BACKEND) {
+  // An installed HIP build can silently enumerate no GPU when a runtime DLL or driver is incompatible.
+  if (backendType === LINUX_ROCM_BACKEND || /^win-rocm-(?:\d+\.\d+-)?x64$/.test(backendType)) {
     return devices?.some((device) => /^ROCm\d+$/i.test(device.id)) ? 'works' : 'broken'
   }
   const corroborated = hasCorroboratingGpu(backendType, gpus)
@@ -143,7 +154,7 @@ export function isGpuBackendId(backend: string): boolean {
 /**
  * Windows GPU tiers in preference order: CUDA 13, CUDA 12, OpenCL (Adreno; not VRAM-gated, the GPU
  * shares system RAM), ROCm (VRAM-gated; `features.rocm` is already PCI-gated), Vulkan (VRAM-gated,
- * never on integrated-only hosts). Each tier is the first catalog entry matching its pattern — the
+ * including AMD UMA adapters with measured shared capacity). Each tier is the first catalog entry matching its pattern — the
  * catalog is sorted newest first, so that is the newest tag.
  */
 export function windowsGpuTiers(
@@ -165,7 +176,7 @@ export function windowsGpuTiers(
   if (features.cuda12 && cuda12) tiers.push(cuda12)
   if (features.opencl && opencl) tiers.push(opencl)
   if (features.rocm && enoughVram && rocm) tiers.push(rocm)
-  if (features.vulkan && enoughVram && vulkan && !integratedGpuOnly(gpus)) tiers.push(vulkan)
+  if (features.vulkan && hasUsableVulkanGpu(gpus) && vulkan) tiers.push(vulkan)
   return tiers
 }
 
@@ -218,7 +229,6 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
     const { osType, gpus } = input
     const features = normalizeFeatures(getSupportedFeatures(osType, input.cpuExtensions, gpus, input.rocm))
     const enoughVram = hasEnoughGpuMemory(gpus)
-    const integratedOnly = integratedGpuOnly(gpus)
     const archSuffix: ArchSuffix =
       input.arch.includes('aarch64') || input.arch.includes('arm64') ? 'arm64' : 'x64'
 
@@ -233,7 +243,7 @@ export async function detectIdealBackendType(input: DetectIdealBackendInput): Pr
         features.cuda12 ||
         features.opencl ||
         (features.rocm && enoughVram) ||
-        (features.vulkan && enoughVram && !integratedOnly)
+        (features.vulkan && hasUsableVulkanGpu(gpus))
       const anyGpuBackendAvailable = available.some((b) => isGpuBackendId(b.backend))
       if (gpuCapable && !anyGpuBackendAvailable) {
         warn(

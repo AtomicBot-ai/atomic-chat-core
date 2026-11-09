@@ -52,12 +52,13 @@ export interface EngineRemoveOptions {
 export function hostEngines(
   platform: NodeJS.Platform,
   managed: readonly string[],
-  host: { foundryLocal?: boolean; liteRtLm?: boolean; geniex?: boolean } = {}
+  host: { foundryLocal?: boolean; liteRtLm?: boolean; geniex?: boolean; fastflowlm?: boolean } = {}
 ): EngineId[] {
   return ENGINE_IDS.filter((engine) => {
     if (engine === 'mlx') return platform === 'darwin'
     if (engine === 'foundry-local') return host.foundryLocal === true
     if (engine === 'litert-lm') return host.liteRtLm === true
+    if (engine === 'fastflowlm') return host.fastflowlm === true
     if (engine === 'geniex') return host.geniex === true
     if (ENGINE_KINDS[engine] === 'managed') return managed.includes(engine)
     return true

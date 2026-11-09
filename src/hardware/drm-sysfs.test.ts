@@ -97,3 +97,32 @@ describe('sysfsGpuFromFiles', () => {
     })
   })
 })
+
+it.each([
+  ['0x1002', 'amdgpu', '11.5.2', '16364404736', 32768, 15606],
+  ['0x1002', 'amdgpu', '11.5.1', '68719476736', 32768, 32768],
+  ['0x10de', 'amdgpu', '11.5.2', '16364404736', 32768, undefined],
+  ['0x1002', 'other', '11.5.2', '16364404736', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.0.0', '16364404736', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '0', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '0.5', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '512', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', 'invalid', 32768, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '16364404736', undefined, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '16364404736', 0, undefined],
+  ['0x1002', 'amdgpu', '11.5.2', '16364404736', NaN, undefined],
+])(
+  'bounds shared APU memory using confirmed hardware and valid kernel facts: %s %s %s %s %s',
+  (vendor, driver, graphicsVersion, gttTotal, systemMemoryMiB, shared) => {
+    const gpu = sysfsGpuFromFiles({
+      card: 'card1',
+      vendor,
+      device: '0x1114',
+      driverLink: '/drivers/' + driver,
+      graphicsVersion,
+      gttTotal,
+      ...(systemMemoryMiB === undefined ? {} : { systemMemoryMiB }),
+    })
+    expect(gpu?.sharedMemoryMiB).toBe(shared)
+  }
+)

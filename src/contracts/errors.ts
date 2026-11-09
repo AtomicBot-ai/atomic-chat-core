@@ -58,6 +58,13 @@ const RUNTIME_CODES = [
   'LITERT_LM_MODEL_REQUIRES_NEWER_ENGINE',
   /** GenieX (change `add-geniex-runtime`): the host process failed, or the library inside it did; the message is the library's. */
   'GENIEX_HOST_ERROR',
+  'FASTFLOWLM_ENGINE_NOT_INSTALLED',
+  'FASTFLOWLM_LOCAL_ONLY_MISMATCH',
+  'FASTFLOWLM_INVALID_INSTALLATION',
+  'FASTFLOWLM_ENVIRONMENT_NOT_READY',
+  'FASTFLOWLM_DEVICE_BUSY',
+  'FASTFLOWLM_TIMEOUT',
+  'FASTFLOWLM_PROCESS_CRASH',
   /** GenieX: the bundle is for another chip, the device is not for this plugin, or the library found no such device. */
   'GENIEX_VARIANT_UNSUPPORTED',
   /** GenieX: the bundle needs a newer GenieX than the active build; `details` names the version. */

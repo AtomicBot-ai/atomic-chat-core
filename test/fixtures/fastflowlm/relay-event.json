@@ -1,0 +1,139 @@
+{
+  "data": {
+    "operation_id": "operation-1",
+    "pending_host_step": {
+      "action": "linux.install-amd-npu",
+      "expected_operation_revision": 3,
+      "nonce": "nonce-1",
+      "parameters": {
+        "device_access": false,
+        "device_instance_id": "0000:c4:00.1",
+        "environment_manifest": {
+          "engine": "fastflowlm",
+          "manifest_id": "fastflowlm-linux-r1",
+          "platform": "linux",
+          "recipes": [
+            {
+              "action": "linux.install-amd-npu",
+              "firmware_version": "1.1.2.64",
+              "hardware": {
+                "npu_generation": "xdna2",
+                "pci_device_ids": [
+                  "1022:17f0"
+                ]
+              },
+              "memlock_bytes": 2147483648,
+              "min_core_version": "0.20.0",
+              "packages": [
+                {
+                  "architecture": "amd64",
+                  "name": "amdxdna-dkms",
+                  "path": "pool/main/a/amdxdna-dkms/amdxdna-dkms_7.0.0-rc1+git20260310.6b13cb8f4-noble1_amd64.deb",
+                  "sha256": "ea9f07d227d91878f3c660dc82b6abe4e4454b0c25d4ffd383920e6bed083893",
+                  "size": 315696,
+                  "source": "amd",
+                  "version": "7.0.0-rc1+git20260310.6b13cb8f4-noble1"
+                }
+              ],
+              "platforms": [
+                {
+                  "arch": "x64",
+                  "distribution": "ubuntu",
+                  "kernel_release": "6.17.0-1-generic",
+                  "os": "linux",
+                  "version": "24.04"
+                }
+              ],
+              "qualification": {
+                "build_version": "flm-1.0.11-r2",
+                "evidence": {
+                  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "size": 1,
+                  "url": "https://github.com/AtomicBot-ai/atomic-chat-core/releases/download/flm-1.0.11-r2/fixture.json"
+                }
+              },
+              "recipe_id": "fastflowlm-linux-ubuntu-noble",
+              "revision": 1,
+              "sources": [
+                {
+                  "component": "main",
+                  "id": "amd",
+                  "signing_fingerprint": "881CF4B40B0BFA288D6776E83BF36CFA0BD50AEC",
+                  "suite": "noble",
+                  "url": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/"
+                }
+              ],
+              "xrt": "bundled"
+            }
+          ],
+          "schema_version": 1
+        },
+        "manifest_digest": "sha256:3faf3fa91146a36bee308ab98180308f217f2d692877515ed93a8d3c2c159312",
+        "manifest_id": "fastflowlm-linux-r1",
+        "memlock": false,
+        "package_names": [
+          "amdxdna-dkms"
+        ],
+        "recipe_revision": 1,
+        "runtime_account": "atomic",
+        "runtime_mode": "system-service",
+        "runtime_service": "atomic-chat.service"
+      },
+      "parameters_digest": "sha256:ace43bdefc8013743abfb2ca4321e6da57ffd9e40620bdc56558c760a5abf055",
+      "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+      "recipe_id": "fastflowlm-linux-ubuntu-noble",
+      "step_id": "step-1"
+    },
+    "plan": {
+      "blockers": [
+        "driver-missing"
+      ],
+      "changes": [
+        {
+          "code": "package-source",
+          "params": {
+            "component": "main",
+            "fingerprint": "881CF4B40B0BFA288D6776E83BF36CFA0BD50AEC",
+            "suite": "noble",
+            "url": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/"
+          },
+          "text": "Verify the signed package source."
+        },
+        {
+          "code": "install-packages",
+          "text": "Install the pinned AMD NPU dependencies for the running kernel."
+        }
+      ],
+      "manifest_digest": "sha256:3faf3fa91146a36bee308ab98180308f217f2d692877515ed93a8d3c2c159312",
+      "packages": [
+        {
+          "name": "amdxdna-dkms",
+          "sha256": "ea9f07d227d91878f3c660dc82b6abe4e4454b0c25d4ffd383920e6bed083893",
+          "source": "https://ppa.launchpadcontent.net/lemonade-team/stable/ubuntu/pool/main/a/amdxdna-dkms/amdxdna-dkms_7.0.0-rc1+git20260310.6b13cb8f4-noble1_amd64.deb",
+          "version": "7.0.0-rc1+git20260310.6b13cb8f4-noble1"
+        }
+      ],
+      "plan_digest": "sha256:e98052dfa301264711547f33ed59237791b0d4844250e58bd914ba5055b14d36",
+      "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+      "runtime_account": "atomic",
+      "runtime_mode": "system-service",
+      "runtime_service": "atomic-chat.service"
+    },
+    "reason": null,
+    "request_id": "request-1",
+    "revision": 3,
+    "state": "preparing-host"
+  },
+  "desktop_event": "atomic-core://fastflowlm:operation",
+  "event": "fastflowlm:operation",
+  "id": "owner:1",
+  "receipt": {
+    "expected_operation_revision": 3,
+    "nonce": "nonce-1",
+    "outcome": "completed",
+    "parameters_digest": "sha256:ace43bdefc8013743abfb2ca4321e6da57ffd9e40620bdc56558c760a5abf055",
+    "receipt_id": "receipt-1",
+    "recipe_digest": "sha256:c40e114d4b53893024e73d17817961eae244e5a8c9e8d67173db9fb06d7ce01a",
+    "step_id": "step-1"
+  }
+}

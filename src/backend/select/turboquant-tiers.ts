@@ -20,8 +20,9 @@ import {
 } from '../turboquant.js'
 import type { RocmHostProbe } from '../turboquant.js'
 import { stripBom } from '../version.js'
-import { normalizeFeatures } from './features.js'
-import { integratedGpuOnly } from './tiers.js'
+import { gpuMemoryMiB, hasSharedGpuMemory } from '../../hardware/index.js'
+import { isAmdGpu, normalizeFeatures } from './features.js'
+import { hasUsableVulkanGpu } from './tiers.js'
 
 /** The fork's "any GPU backend in the catalog" test — broader than upstream's, it matches every id. */
 export function isTurboquantGpuBackendId(backend: string): boolean {
@@ -57,8 +58,7 @@ export async function detectIdealTurboquantBackendType(
     const features = normalizeFeatures(
       getTurboquantSupportedFeatures(osType, input.cpuExtensions, gpus, input.rocm)
     )
-    const hasEnoughVram = gpus.some((gpu) => (gpu.total_memory ?? 0) >= TURBOQUANT_GPU_MIN_VRAM_MIB)
-    const integratedOnly = integratedGpuOnly(gpus)
+    const gpuWorthIt = hasUsableVulkanGpu(gpus, TURBOQUANT_GPU_MIN_VRAM_MIB)
     const archSuffix = input.arch.includes('aarch64') || input.arch.includes('arm64') ? 'arm64' : 'x64'
 
     if (osType !== 'windows' && osType !== 'linux') return { kind: 'cpu-optimal' }
@@ -77,11 +77,9 @@ export async function detectIdealTurboquantBackendType(
 
       if (features.cuda13 && cuda13) return { kind: 'gpu', backend: cuda13 }
       if (features.cuda12 && cuda12) return { kind: 'gpu', backend: cuda12 }
-      if (features.vulkan && hasEnoughVram && vulkan && !integratedOnly)
-        return { kind: 'gpu', backend: vulkan }
+      if (features.vulkan && gpuWorthIt && vulkan) return { kind: 'gpu', backend: vulkan }
 
-      const gpuCapable =
-        features.cuda13 || features.cuda12 || (features.vulkan && hasEnoughVram && !integratedOnly)
+      const gpuCapable = features.cuda13 || features.cuda12 || (features.vulkan && gpuWorthIt)
       if (gpuCapable && !anyGpuBackendAvailable) {
         warn(
           'detectIdealBackendType: GPU-capable Windows host but no turboquant GPU backend in catalog — treating as detection failure (manifest likely unreachable)'
@@ -96,15 +94,23 @@ export async function detectIdealTurboquantBackendType(
       const cuda12 = pick(/^linux-x64-cuda-12(\.\d+)?$/)
       const rocm = pick(/^linux-x64-rocm$/)
       const vulkan = pick(/^linux-x64-vulkan$/)
-      const gpuWorthIt = hasEnoughVram && !integratedOnly
 
       if (features.cuda13 && cuda13) return { kind: 'gpu', backend: cuda13 }
       if (features.cuda12 && cuda12) return { kind: 'gpu', backend: cuda12 }
-      if (features.rocm && gpuWorthIt && rocm) return { kind: 'gpu', backend: rocm }
+      const rocmWorthIt = gpus.some(
+        (gpu) =>
+          isAmdGpu(gpu) &&
+          gpuMemoryMiB(gpu) >= TURBOQUANT_GPU_MIN_VRAM_MIB &&
+          (gpu.vulkan_info?.device_type !== 'IntegratedGpu' || hasSharedGpuMemory(gpu))
+      )
+      if (features.rocm && rocmWorthIt && rocm) return { kind: 'gpu', backend: rocm }
       if (features.vulkan && gpuWorthIt && vulkan) return { kind: 'gpu', backend: vulkan }
 
       const gpuCapable =
-        features.cuda13 || features.cuda12 || ((features.rocm || features.vulkan) && gpuWorthIt)
+        features.cuda13 ||
+        features.cuda12 ||
+        (features.rocm && rocmWorthIt) ||
+        (features.vulkan && gpuWorthIt)
       if (gpuCapable && !anyGpuBackendAvailable) {
         warn(
           'detectIdealBackendType: GPU-capable Linux host but no turboquant GPU backend in catalog — treating as detection failure (manifest likely unreachable)'

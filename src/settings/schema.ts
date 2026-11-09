@@ -24,6 +24,7 @@ import mlxSchema from './schema/mlx.json' with { type: 'json' }
 import sglangSchema from './schema/sglang.json' with { type: 'json' }
 import foundryLocalSchema from './schema/foundry-local.json' with { type: 'json' }
 import liteRtLmSchema from './schema/litert-lm.json' with { type: 'json' }
+import fastflowlmSchema from './schema/fastflowlm.json' with { type: 'json' }
 import geniexSchema from './schema/geniex.json' with { type: 'json' }
 import tensorrtLlmSchema from './schema/tensorrt-llm.json' with { type: 'json' }
 import vllmSchema from './schema/vllm.json' with { type: 'json' }
@@ -40,6 +41,7 @@ export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'foundry-local',
   'litert-lm',
   'geniex',
+  'fastflowlm',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -75,6 +77,7 @@ const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'sglang': toDescriptors('sglang', sglangSchema),
   'foundry-local': toDescriptors('foundry-local', foundryLocalSchema),
   'litert-lm': toDescriptors('litert-lm', liteRtLmSchema),
+  'fastflowlm': toDescriptors('fastflowlm', fastflowlmSchema),
   'geniex': toDescriptors('geniex', geniexSchema),
 }
 
@@ -270,6 +273,15 @@ export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<stri
   'sglang': SGLANG_VALUE_TYPES,
   'foundry-local': FOUNDRY_LOCAL_VALUE_TYPES,
   'litert-lm': LITERT_LM_VALUE_TYPES,
+  'fastflowlm': {
+    ctx_len: 'number',
+    timeout: 'number',
+    pmode: 'string',
+    prefill_chunk_len: 'number',
+    prefix_cache_mb: 'number',
+    prefix_slots: 'number',
+    prefix_min_gain: 'number',
+  },
   'geniex': GENIEX_VALUE_TYPES,
 }
 

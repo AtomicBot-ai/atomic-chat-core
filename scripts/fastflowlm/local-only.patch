@@ -1,0 +1,496 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index bdf6a47..592eb81 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -573,6 +573,21 @@ else()
+ endif()
+ 
+ # Link your custom libraries (these may still be DLLs if no static versions available)
++target_compile_definitions(flm PRIVATE ATOMIC_FLM_COMMIT="${ATOMIC_FLM_COMMIT}"
++    ATOMIC_FLM_REVISION=${ATOMIC_FLM_REVISION})
++if(MSVC)
++    # The pre-driver capability probe must reach main before importing XRT,
++    # including transitive imports through the vendor engine binaries.
++    # Vendor import libraries also export STL data. Resolve it through the
++    # matching MSVC runtime first, since DLL data cannot be delay-loaded.
++    target_link_libraries(flm PRIVATE delayimp debug msvcprtd optimized msvcprt)
++    foreach(_dll IN LISTS FLM_ENGINE_LINK_LIBS)
++        target_link_options(flm PRIVATE "/DELAYLOAD:${_dll}.dll")
++    endforeach()
++    foreach(_dll xrt_coreutil dequant gemm lm_head mha)
++        target_link_options(flm PRIVATE "/DELAYLOAD:${_dll}.dll")
++    endforeach()
++endif()
+ target_link_libraries(flm PRIVATE flm_xgrammar)
+ 
+ target_link_libraries(flm PUBLIC
+diff --git a/src/common/utils.cpp b/src/common/utils.cpp
+index 5e16386..f2a7572 100644
+--- a/src/common/utils.cpp
++++ b/src/common/utils.cpp
+@@ -1,3 +1,4 @@
++#include "atomic_local.hpp"
+ /// \file utils.cpp
+ /// \brief utils class
+ /// \author FastFlowLM Team
+@@ -20,6 +21,7 @@
+ namespace utils {
+ 
+ std::string find_model_list() {
++    if (atomic_local::enabled) return atomic_local::require_path(std::getenv("FLM_CONFIG_PATH"), false).string();
+     std::string install_prefix = CMAKE_INSTALL_PREFIX;
+ 
+     // 1. Check FLM_CONFIG_PATH environment variable
+@@ -58,6 +60,7 @@ std::string find_model_list() {
+ }
+ 
+ std::string find_model_info() {
++    if (atomic_local::enabled) return atomic_local::require_path(std::getenv("FLM_MODELINFO_PATH"), false).string();
+     std::string install_prefix = CMAKE_INSTALL_PREFIX;
+ 
+     // 1. Check FLM_MODELINFO_PATH environment variable
+@@ -118,6 +121,12 @@ std::string find_model_info() {
+ }
+ 
+ std::string find_xclbin_path() {
++    if (atomic_local::enabled) {
++        const auto base = atomic_local::require_path(std::getenv("FLM_XCLBIN_PATH"), true);
++        if (!std::filesystem::is_directory(base / "xclbins"))
++            throw std::runtime_error("missing_local_kernel_directory");
++        return base.string();
++    }
+     std::string xclbin_prefix = CMAKE_XCLBIN_PREFIX;
+ 
+     // Check FLM_CONFIG_PATH environment variable
+@@ -252,6 +261,7 @@ int get_server_port(int user_port) {
+ ///@brief get_models_directory gets the models directory from environment variable or defaults to user/.flm/models on Windows or ~/.config/flm on Linux
+ ///@return the models directory path
+ std::string get_models_directory() {
++    if (atomic_local::enabled) return atomic_local::require_path(std::getenv("FLM_MODEL_PATH"), true).string();
+ #ifdef _WIN32
+     char* model_path_env = nullptr;
+     size_t len = 0;
+diff --git a/src/include/atomic_local.hpp b/src/include/atomic_local.hpp
+new file mode 100644
+index 0000000..914ba7f
+--- /dev/null
++++ b/src/include/atomic_local.hpp
+@@ -0,0 +1,108 @@
++#pragma once
++
++#include <array>
++#include <charconv>
++#include <filesystem>
++#include <fstream>
++#include <stdexcept>
++#include <string_view>
++#include <nlohmann/json.hpp>
++
++namespace atomic_local {
++namespace fs = std::filesystem;
++
++// Set exactly once, before opening the device or starting server threads.
++inline bool enabled = false;
++
++inline fs::path require_path(const char* raw, bool directory) {
++    const fs::path path = raw ? fs::path(raw) : fs::path();
++    if (!path.is_absolute() || !(directory ? fs::is_directory(path) : fs::is_regular_file(path)))
++        throw std::runtime_error("atomic local installation path is missing or invalid");
++    return path;
++}
++
++// Compare dotted versions numerically and reject malformed local metadata.
++template<std::size_t N = 3>
++inline std::array<unsigned, N> version(std::string_view value) {
++    std::array<unsigned, N> result{};
++    for (unsigned i = 0; i < result.size(); ++i) {
++        const char* end = value.data() + value.size();
++        const auto parsed = std::from_chars(value.data(), end, result[i]);
++        if (parsed.ec != std::errc{} || (i + 1 == N ? parsed.ptr != end :
++            parsed.ptr == end || *parsed.ptr != '.'))
++            throw std::runtime_error("invalid_local_version");
++        if (i + 1 < N) value.remove_prefix(parsed.ptr - value.data() + 1);
++    }
++    return result;
++}
++
++inline fs::path child(const fs::path& root, const fs::path& relative) {
++    if (relative.empty() || relative.has_root_path())
++        throw std::runtime_error("invalid_local_path");
++    for (const auto& part : relative)
++        if (part == "..") throw std::runtime_error("invalid_local_path");
++    const auto resolved = fs::weakly_canonical(root / relative);
++    const auto within = resolved.lexically_relative(fs::canonical(root));
++    if (within.empty() || *within.begin() == "..")
++        throw std::runtime_error("invalid_local_path");
++    return resolved;
++}
++
++inline fs::path check_install(const fs::path& catalog, const fs::path& base,
++                          const std::string& tag, const std::string& build_version) {
++    const auto data = nlohmann::json::parse(std::ifstream(catalog));
++    const auto colon = tag.find(':');
++    const auto& families = data.at("models");
++    if (colon == std::string::npos || families.size() != 1)
++        throw std::runtime_error("invalid_local_catalog");
++    const auto& variants = families.at(tag.substr(0, colon));
++    if (variants.size() != 1) throw std::runtime_error("invalid_local_catalog");
++    const auto& entry = variants.at(tag.substr(colon + 1));
++    auto model = child(base, data.at("model_path").get<std::string>());
++    model = child(model, entry.at("name").get<std::string>());
++    const auto& files = entry.at("files");
++    if (!files.is_array() || files.empty()) throw std::runtime_error("invalid_local_catalog");
++    for (const auto& item : files)
++        if (!fs::is_regular_file(child(model, item.get<std::string>())))
++            throw std::runtime_error("missing_local_file");
++    const auto config = nlohmann::json::parse(std::ifstream(child(model, "config.json")));
++    const auto installed = version(config.at("flm_version").get<std::string>());
++    if (installed < version(entry.at("flm_min_version").get<std::string>()))
++        throw std::runtime_error("outdated_local_model");
++    if (installed > version(build_version)) throw std::runtime_error("newer_local_model");
++    return model;
++}
++
++inline void check_session_install(const fs::path& catalog, const fs::path& base,
++                                  const std::string& tag, const std::string& build_version,
++                                  const fs::path& kernel_root) {
++    const auto model = check_install(catalog, base, tag, build_version);
++    std::error_code error;
++    if (!kernel_root.is_absolute() || !fs::equivalent(model, kernel_root / "xclbins" / model.filename(), error))
++        throw std::runtime_error("invalid_local_kernel_directory");
++}
++
++inline bool allow_route(std::string_view method, std::string_view path) {
++    return (method == "POST" && path == "/v1/chat/completions") ||
++           (method == "GET" && path == "/v1/models");
++}
++
++template <typename Json>
++bool allow_chat(const Json& request, const std::string& model) {
++    if (!request.is_object() || request.contains("backend") ||
++        !request.contains("model") || request.at("model") != model ||
++        !request.contains("messages") || !request.at("messages").is_array()) return false;
++    for (const auto& message : request.at("messages")) {
++        if (!message.is_object() || message.contains("images") || message.contains("audio") ||
++            message.contains("videos")) return false;
++        if (!message.contains("content") || message.at("content").is_null()) continue;
++        const auto& content = message.at("content");
++        if (content.is_string()) continue;
++        if (!content.is_array()) return false;
++        for (const auto& part : content)
++            if (!part.is_object() || !part.contains("type") || part.at("type") != "text" ||
++                !part.contains("text") || !part.at("text").is_string()) return false;
++    }
++    return true;
++}
++}
+diff --git a/src/include/program_args.hpp b/src/include/program_args.hpp
+index caa4a63..4e66f4c 100644
+--- a/src/include/program_args.hpp
++++ b/src/include/program_args.hpp
+@@ -14,6 +14,7 @@ struct program_args_t {
+     std::string command = "version";
+     std::string model_tag = "model-faker";
+     std::string power_mode = "performance";
++    bool atomic_local_only = false;
+     bool preemption = false;
+     bool asr = false;
+     bool embed = false;
+diff --git a/src/include/utils/vm_args.hpp b/src/include/utils/vm_args.hpp
+index 66ae6bf..92b9230 100644
+--- a/src/include/utils/vm_args.hpp
++++ b/src/include/utils/vm_args.hpp
+@@ -91,6 +91,8 @@ bool parse_options(int argc, char *argv[], program_args_t& parsed_args) {
+              "Download models hosted on ModelScope")
+             ("filter", po::value<std::string>(&parsed_args.list_filter)->default_value("all"),
+              "Show models: all | installed | not-installed")
++            ("atomic-local-only", po::bool_switch(&parsed_args.atomic_local_only),
++             "Serve the specified local installation without downloading or repairing files")
+             ("quiet", po::bool_switch(&parsed_args.sub_process_mode),
+              "Quiet mode, for sub-process usages")
+             ("json,j", po::bool_switch(&parsed_args.json_output),
+diff --git a/src/pull/model_downloader.cpp b/src/pull/model_downloader.cpp
+index 67a7ce1..760e9ca 100644
+--- a/src/pull/model_downloader.cpp
++++ b/src/pull/model_downloader.cpp
+@@ -1,3 +1,4 @@
++#include "atomic_local.hpp"
+ /// \file model_downloader.cpp
+ /// \brief Model downloader class
+ /// \author FastFlowLM Team
+@@ -175,6 +176,7 @@ ModelDownloader::ModelDownloader(model_list& models)
+ /// \return true if the model is downloaded, false otherwise
+ ModelDownloader::ModelStatus ModelDownloader::is_model_downloaded(const std::string& model_tag, bool sub_process_mode, bool fast_check) {
+     const auto [new_model_tag, model_info] = supported_models.get_model_info(model_tag);
++    if (atomic_local::enabled) fast_check = true; // The repair path may delete files.
+     const bool strict_integrity = uses_pinned_upstream_integrity(model_info);
+     auto missing_files = get_missing_files(new_model_tag);
+     bool is_config_file_missing = std::find(missing_files.begin(), missing_files.end(), "config.json") != missing_files.end();
+@@ -244,6 +246,7 @@ ModelDownloader::ModelStatus ModelDownloader::check_model_compatibility(const st
+ /// \param force_redownload true if the model should be downloaded even if it is already downloaded
+ /// \return true if the model is downloaded, false otherwise
+ bool ModelDownloader::pull_model(const std::string& model_tag, bool use_modelscope, bool force_redownload) {
++    if (atomic_local::enabled) throw std::runtime_error("model downloads disabled");
+     try {
+         // Once the pull is over, the files on disk say again which source it got.
+         struct SourceChoiceReset {
+@@ -429,6 +432,7 @@ std::vector<std::string> ModelDownloader::get_missing_files(const std::string& m
+             }
+         }
+     } catch (const std::exception& e) {
++        if (atomic_local::enabled) throw;
+         header_print("ERROR", "Error checking missing files: " + std::string(e.what()));
+     }
+ 
+diff --git a/src/server/rest_handler.cpp b/src/server/rest_handler.cpp
+index 9f01b16..7f795b2 100644
+--- a/src/server/rest_handler.cpp
++++ b/src/server/rest_handler.cpp
+@@ -1,3 +1,4 @@
++#include "atomic_local.hpp"
+ /*!
+  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
+  * \file rest_handler.cpp
+@@ -524,6 +525,8 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
+     this->prefix_slots = args.prefix_slots;
+     this->prefix_min_gain = args.prefix_min_gain;
+ 
++    if (atomic_local::enabled && !supported_models.is_model_supported(default_model_tag))
++        throw std::runtime_error("invalid_local_installation");
+     // Initialize chat bot with default model
+ #ifndef FASTFLOWLM_LINUX_LIMITED_MODELS
+     if (this->asr) {
+@@ -553,6 +556,7 @@ RestHandler::RestHandler(model_list& models, ModelDownloader& downloader, progra
+             this->default_model_tag = "llama3.2:1b";
+         }
+         if (!ensure_model_loaded(default_model_tag)) {
++            if (atomic_local::enabled) throw std::runtime_error("invalid_local_installation");
+             header_print("Error", "Failed to load default model: " + default_model_tag);
+         }
+     }
+@@ -617,6 +621,7 @@ bool RestHandler::ensure_model_loaded(const std::string& model_tag,
+                     break;
+                 case ModelDownloader::ModelStatus::Outdated:
+                 case ModelDownloader::ModelStatus::Missing:
++                    if (atomic_local::enabled) throw std::runtime_error("invalid_local_installation");
+                     if (!downloader.pull_model(ensure_tag, this->modelscope)) {
+                         throw std::runtime_error("failed to download " + ensure_tag);
+                     }
+@@ -1282,6 +1287,10 @@ void RestHandler::handle_models_openai(const json& request,
+     std::function<void(const json&)> send_response,
+     StreamResponseCallback send_streaming_response) {
+     try {
++        if (atomic_local::enabled) {
++            send_response({{"object", "list"}, {"data", {{{"id", current_model_tag}, {"object", "model"}}}}});
++            return;
++        }
+         json models = supported_models.get_all_models_openai();
+         send_response(models);
+     }
+@@ -1414,6 +1423,19 @@ void RestHandler::handle_openai_chat_completion(const json& request,
+                                                StreamResponseCallback send_streaming_response,
+                                                std::shared_ptr<CancellationToken> cancellation_token) {
+     try {
++        if (atomic_local::enabled) {
++            if (!atomic_local::allow_chat(request, current_model_tag)) {
++                send_response({{"__http_status", 400}, {"__http_body", {{"error", "invalid_local_request"}}}});
++                return;
++            }
++            try {
++                atomic_local::check_session_install(utils::find_model_list(), utils::get_models_directory(),
++                                                    current_model_tag, __FLM_VERSION__, utils::find_xclbin_path());
++            } catch (const std::exception&) {
++                send_response({{"__http_status", 409}, {"__http_body", {{"error", "invalid_local_installation"}}}});
++                return;
++            }
++        }
+         // Extract OpenAI-style parameters
+         if (!has_value(request, "messages") || !request.at("messages").is_array()) {
+             send_response({{"error", {{"message", "'messages' is required and must be an array"}, {"type", "invalid_request_error"}, {"code", 400}}}});
+diff --git a/src/server/server.cpp b/src/server/server.cpp
+index 08c0c06..b13b743 100644
+--- a/src/server/server.cpp
++++ b/src/server/server.cpp
+@@ -1,3 +1,4 @@
++#include "atomic_local.hpp"
+ /*!
+  *  Copyright (c) 2026 Advanced Micro Devices, Inc.
+  * \file server.cpp
+@@ -547,6 +548,7 @@ bool WebServer::cancel_request(const std::string& request_id) {
+ ///@param path the path
+ ///@param handler the handler
+ void WebServer::register_handler(const std::string& method, const std::string& path, RequestHandler handler) {
++    if (atomic_local::enabled && !atomic_local::allow_route(method, path)) return;
+     std::string key = method + " " + path;
+     routes[key] = handler;
+ }
+diff --git a/src/src/main.cpp b/src/src/main.cpp
+index 814fb52..6fde7f1 100644
+--- a/src/src/main.cpp
++++ b/src/src/main.cpp
+@@ -1,3 +1,4 @@
++#include "atomic_local.hpp"
+ /// \file main.cpp
+ /// \brief Main entry point for the FLM application
+ /// \author FastFlowLM Team
+@@ -215,7 +216,7 @@ std::string identify_npu_arch() {
+ 
+ #endif
+ 
+-static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
++static bool sanity_check_npu_stack(bool quiet, bool json_output = false, bool read_only = false, int accel_index = -1) {
+     bool print_human = !quiet && !json_output;
+ #ifdef FLM_ENABLE_CORE
+     // Everything below reads the NPU's geometry and this process's memlock
+@@ -289,8 +290,8 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+     bool drm_version_ok = true;
+     bool kernel_ok = true;
+ 
+-    for (int i = 0; i < 16; ++i) {
+-        std::string dev_name = "/dev/accel/accel" + std::to_string(i);
++    for (int i = 0; i < (accel_index < 0 ? 16 : 1); ++i) {
++        std::string dev_name = "/dev/accel/accel" + std::to_string(accel_index < 0 ? i : accel_index);
+         int fd = open(dev_name.c_str(), O_RDWR);
+ 
+         if (fd < 0) {
+@@ -407,7 +408,7 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+             : std::to_string(static_cast<unsigned long long>(rl.rlim_cur));
+         if (rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < 100 * 1024 * 1024) {
+             struct rlimit rl_new = { RLIM_INFINITY, RLIM_INFINITY };
+-            if (setrlimit(RLIMIT_MEMLOCK, &rl_new) == 0) {
++            if (!read_only && setrlimit(RLIMIT_MEMLOCK, &rl_new) == 0) {
+                 rl.rlim_cur = RLIM_INFINITY;
+                 rl.rlim_max = RLIM_INFINITY;
+                 validation_json["memlock_limit"] = "infinity";
+@@ -467,12 +468,13 @@ static bool sanity_check_npu_stack(bool quiet, bool json_output = false) {
+ 
+     std::string min_drv = __NPU_VERSION__;
+     std::string drv = get_driver_version("NPU Compute Accelerator Device");
+-    int mver_0, mver_1, mver_2, mver_3;
+-    int ver_0, ver_1, ver_2, ver_3;
+-    sscanf(min_drv.c_str(), "%d.%d.%d.%d", &mver_0, &mver_1, &mver_2, &mver_3);
+-    sscanf(drv.c_str(), "%d.%d.%d.%d", &ver_0, &ver_1, &ver_2, &ver_3);
+-
+-    if (ver_3 < mver_3) {
++    bool supported_driver = false;
++    try {
++        supported_driver = atomic_local::version<4>(drv) >= atomic_local::version<4>(min_drv);
++    } catch (const std::runtime_error&) {
++        // Missing or malformed WMI evidence cannot establish readiness.
++    }
++    if (!supported_driver) {
+         if (print_human) {
+             header_print("Error", "NPU driver version doesn't meet the minimum!");
+         }
+@@ -545,6 +547,13 @@ static flm_rt::device* open_npu_device(std::string* why) {
+ ///@param argv the arguments
+ ///@return the exit code
+ int main(int argc, char* argv[]) {
++    if (argc == 3 && std::string_view(argv[1]) == "atomic-capabilities" &&
++        std::string_view(argv[2]) == "--json") {
++        std::cout << nlohmann::json{{"upstream_commit", ATOMIC_FLM_COMMIT},
++            {"atomic_revision", ATOMIC_FLM_REVISION}, {"local_only_protocol", 1},
++            {"environment_probe_protocol", 1}}.dump() << std::endl;
++        return 0;
++    }
+ #ifdef _WIN32
+     SetConsoleOutputCP(CP_UTF8);
+     SetConsoleCP(CP_UTF8);
+@@ -553,12 +562,68 @@ int main(int argc, char* argv[]) {
+     preload_bundled_libraries();
+ #endif
+     
++    // Run before catalog discovery. Validation and XRT use separate processes:
++    // amdxdna can refuse a second open while the DRM handle is still held.
++#ifndef _WIN32
++    if (argc == 4 && std::string_view(argv[1]) == "atomic-validate" && std::string_view(argv[2]) == "--json") {
++        std::string_view index(argv[3]);
++        int accel_index = -1;
++        auto parsed = std::from_chars(index.data(), index.data() + index.size(), accel_index);
++        if (parsed.ec != std::errc{} || parsed.ptr != index.data() + index.size() || accel_index < 0)
++            return 2;
++        return sanity_check_npu_stack(false, true, true, accel_index) ? 0 : 1;
++    }
++#endif
++    if (argc == 3 && std::string_view(argv[2]) == "--json") {
++        if (std::string_view(argv[1]) == "atomic-validate")
++            return sanity_check_npu_stack(false, true, true) ? 0 : 1;
++        if (std::string_view(argv[1]) == "atomic-xrt") {
++            nlohmann::json result = {{"open", false}};
++            try {
++                flm_rt::device device(0);
++#ifdef _WIN32
++                result["pci"] = nlohmann::json::parse(device.get_info<flm_rt::info::device::pcie_info>());
++#else
++                result["bdf"] = device.get_info<flm_rt::info::device::bdf>();
++#endif
++                result["open"] = true;
++            } catch (const std::exception&) {
++                // The caller associates an unavailable XRT with this build.
++            }
++            std::cout << result.dump() << std::endl;
++            return result["open"].get<bool>() ? 0 : 1;
++        }
++    }
++
+     // Parse command line arguments using Boost Program Options
+     program_args_t parsed_args;
+     if (!arg_utils::parse_options(argc, argv, parsed_args)) {
+         return 1;
+     }
+ 
++    atomic_local::enabled = parsed_args.atomic_local_only;
++    if (atomic_local::enabled) {
++        if (parsed_args.command != "serve" || parsed_args.model_tag.empty() ||
++            parsed_args.model_tag == "model-faker" || parsed_args.host != "127.0.0.1" ||
++            parsed_args.asr || parsed_args.embed || !parsed_args.decision.empty() ||
++            parsed_args.modelscope || parsed_args.force_redownload ||
++            (!parsed_args.backend.empty() && parsed_args.backend != "flm")) {
++            std::cerr << R"({"error":"invalid_atomic_local_command"})" << std::endl;
++            return 1;
++        }
++        try {
++            auto list = utils::find_model_list();
++            if (!nlohmann::json::parse(std::ifstream(utils::find_model_info())).is_object())
++                throw std::runtime_error("invalid_local_model_info");
++            const char* kernel_root = std::getenv("FLM_XCLBIN_PATH");
++            atomic_local::check_session_install(list, utils::get_models_directory(), parsed_args.model_tag,
++                                                __FLM_VERSION__, kernel_root ? kernel_root : "");
++        } catch (const std::exception& error) {
++            std::cerr << nlohmann::json{{"error", "invalid_local_installation"}, {"detail", error.what()}}.dump() << std::endl;
++            return 1;
++        }
++        parsed_args.backend = "flm";
++    }
+     if (parsed_args.command == "help") {
+         return 0;
+     }
+@@ -735,7 +800,7 @@ int main(int argc, char* argv[]) {
+ #ifdef _WIN32
+             std::string xrt_cmd = "cd \"C:\\Windows\\System32\\AMD\" && .\\xrt-smi.exe configure --pmode " + parsed_args.power_mode + " > NUL 2>&1";
+             header_print("FLM", "Configuring NPU Power Mode to " + parsed_args.power_mode + (got_power_mode ? "" : " (flm default)"));
+-            (void)system(xrt_cmd.c_str());
++            if (!atomic_local::enabled) (void)system(xrt_cmd.c_str());
+ #endif
+         }
+         else{
+@@ -819,7 +884,9 @@ int main(int argc, char* argv[]) {
+         ModelDownloader downloader(availble_models);
+ 
+         // Ensure models directory exists
+-        if (!std::filesystem::exists(models_dir)) {
++        if (atomic_local::enabled && !std::filesystem::is_directory(models_dir))
++            throw std::runtime_error("invalid_local_installation");
++        if (!atomic_local::enabled && !std::filesystem::exists(models_dir)) {
+             std::filesystem::create_directories(models_dir);
+         }
+ 
+@@ -839,7 +906,7 @@ int main(int argc, char* argv[]) {
+             runner.run();
+ 
+         } else if (parsed_args.command == "serve") {
+-            check_and_notify_new_version();
++            if (!atomic_local::enabled) check_and_notify_new_version();
+             // Create the server
+             int port = utils::get_server_port(parsed_args.port);
+             if (parsed_args.port == -1) { // User did not specify port

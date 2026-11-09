@@ -14,6 +14,11 @@
  * This file never touches the file system, the network or a process itself.
  */
 
+import { linuxMemlockTarget } from './linux-memlock.js'
+import type { LinuxMemlockStepParameters } from '../../contracts/index.js'
+import { linuxNpuTarget, type LinuxNpuTarget } from './linux-amd-npu.js'
+import { npuRequestTarget } from './windows-amd-npu.js'
+import { createHash } from 'node:crypto'
 import { basename } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import {
@@ -48,6 +53,12 @@ export interface HostCommandOutput {
 }
 
 export interface HostStepExecutorDeps {
+  configureRuntimeMemlock?: (target: LinuxMemlockStepParameters) => Promise<void>
+  installLinuxNpu?: (
+    target: LinuxNpuTarget
+  ) => Promise<'completed' | 'reboot-required' | 'relogin-required' | 'service-restart-required'>
+  installWindowsNpu?: (deviceInstanceId: string) => Promise<{ code: number; satisfied: boolean }>
+
   /** The request's text. Throws when it is not a readable regular file of sane size. */
   readRequest: (path: string) => Promise<string>
   /** Writes the result without following a link planted at its path. */
@@ -597,7 +608,12 @@ function refused(echo: HostStepEcho, problems: string[], now: number): HostStepR
 }
 
 /** Decides what to do with a request's text; runs the recipe only for a request it fully accepts. */
-async function execute(text: string, fileName: string, deps: HostStepExecutorDeps): Promise<HostStepResult> {
+async function execute(
+  text: string,
+  fileName: string,
+  deps: HostStepExecutorDeps,
+  launchDigest?: string
+): Promise<HostStepResult> {
   const parsed = parseHostStepRequest(text)
   if (!parsed.ok) return refused(parsed.echo, parsed.problems, deps.now())
   const request = parsed.request
@@ -610,9 +626,142 @@ async function execute(text: string, fileName: string, deps: HostStepExecutorDep
   }
   const refuse = (problem: string) => refused(echo, [problem], deps.now())
 
+  // The launcher hashes its serialized request before elevation. Compare before dispatch, including
+  // for legacy recipes: a replaced NPU request could otherwise dispatch a different action.
+  if (
+    launchDigest !== undefined ||
+    request.action === 'windows.install-amd-npu' ||
+    request.action === 'linux.install-amd-npu' ||
+    request.action === 'linux.configure-runtime-memlock'
+  ) {
+    if (createHash('sha256').update(text, 'utf8').digest('hex') !== launchDigest)
+      return refuse('The request does not match the pre-elevation launch digest.')
+  }
   // A request copied or renamed into another step's slot would otherwise report under that step.
   if (fileName !== `${request.step_id}.request.json`)
     return refuse(`step_id ${request.step_id} does not match the request file name ${fileName}`)
+  if (request.action === 'linux.configure-runtime-memlock') {
+    const target = linuxMemlockTarget(request)
+    if (!target || !deps.configureRuntimeMemlock)
+      return refuse('Unsupported runtime memory target or policy digest.')
+    const receipt = {
+      schema_version: 1 as const,
+      ...echo,
+      step_id: request.step_id,
+      error_code: null,
+      operation_id: request.operation_id,
+      expected_operation_revision: request.expected_operation_revision,
+      finished_at: deps.now(),
+      steps: [],
+    }
+    try {
+      await deps.configureRuntimeMemlock(target)
+      return {
+        ...receipt,
+        outcome: 'completed',
+        exit_code: 0,
+        log_tail: 'Runtime memory limit applied and saved. Verify NPU readiness as the server account.',
+      }
+    } catch (error) {
+      return { ...receipt, outcome: 'failed', exit_code: null, log_tail: tail((error as Error).message) }
+    }
+  }
+  if (request.action === 'linux.install-amd-npu') {
+    const target = linuxNpuTarget(request)
+    if (!target || !deps.installLinuxNpu)
+      return refuse('Unsupported Linux NPU recipe, target, host or digest.')
+    const receipt = {
+      operation_id: request.operation_id,
+      expected_operation_revision: request.expected_operation_revision,
+      schema_version: 1 as const,
+      ...echo,
+      step_id: request.step_id,
+      error_code: null,
+    }
+    try {
+      const outcome = await deps.installLinuxNpu(target)
+      const activation =
+        outcome === 'service-restart-required' && target.unit
+          ? {
+              kind: 'restart-service' as const,
+              unit: target.unit,
+              account: target.account,
+              scope: target.mode === 'user-service' ? ('user' as const) : ('system' as const),
+            }
+          : undefined
+      const detail = activation
+        ? `Restart the ${activation.scope} service ${activation.unit} for ${activation.account} to apply its memory limit.`
+        : 'Linux NPU preparation: ' + outcome + '. Verify readiness as the runtime account.'
+      return {
+        ...receipt,
+        ...(activation ? { activation } : {}),
+        outcome,
+        exit_code: 0,
+        log_tail: detail,
+        finished_at: deps.now(),
+        steps: [{ id: 'prepare-linux-npu', status: 'applied', exit_code: 0, stderr: '', detail }],
+      }
+    } catch (error) {
+      return {
+        ...receipt,
+        outcome: 'failed',
+        exit_code: null,
+        log_tail: tail((error as Error).message),
+        finished_at: deps.now(),
+        steps: [],
+      }
+    }
+  }
+  if (request.action === 'windows.install-amd-npu') {
+    const target = npuRequestTarget(request)
+    if (!target || !deps.installWindowsNpu)
+      return refuse('Unsupported Windows NPU recipe, target, host or digest.')
+    const result = {
+      operation_id: request.operation_id,
+      expected_operation_revision: request.expected_operation_revision,
+      schema_version: 1 as const,
+      step_id: request.step_id,
+      nonce: request.nonce,
+      recipe_id: request.recipe_id,
+      recipe_digest: request.recipe_digest,
+      parameters_digest: request.parameters_digest,
+      error_code: null,
+    }
+    try {
+      const { code, satisfied } = await deps.installWindowsNpu(target)
+      const outcome =
+        code === 0 ? 'completed' : code === 3010 ? 'reboot-required' : code === 1223 ? 'declined' : 'failed'
+      const detail = satisfied
+        ? 'A sufficient NPU driver is already bound.'
+        : `Windows NPU driver installer returned ${code}.`
+      return {
+        ...result,
+        outcome,
+        exit_code: code,
+        finished_at: deps.now(),
+        log_tail: detail,
+        steps: [
+          {
+            id: 'install-npu-driver',
+            status:
+              outcome === 'failed' || outcome === 'declined' ? 'failed' : satisfied ? 'satisfied' : 'applied',
+            exit_code: code,
+            stderr: '',
+            detail,
+          },
+        ],
+      }
+    } catch (error) {
+      return {
+        ...result,
+        outcome: 'failed',
+        exit_code: null,
+        log_tail: tail((error as Error).message),
+        finished_at: deps.now(),
+        steps: [],
+      }
+    }
+  }
   if (request.recipe_id === ENABLE_WSL_RECIPE_ID) return enableWsl(request, echo, deps)
   if (request.recipe_id !== INSTALL_CONTAINER_RUNTIME_RECIPE_ID)
     return refuse(`unknown recipe ${request.recipe_id}`)
@@ -820,7 +969,8 @@ async function enableWsl(
  */
 export async function executeHostStep(
   requestPath: string,
-  deps: HostStepExecutorDeps
+  deps: HostStepExecutorDeps,
+  launchDigest?: string
 ): Promise<HostStepResult> {
   const resultPath = resultPathFor(requestPath)
   if (resultPath === null)
@@ -831,7 +981,7 @@ export async function executeHostStep(
   const fileName = basename(requestPath)
   const result = await deps.readRequest(requestPath).then(
     (text) =>
-      execute(text, fileName, deps).catch((error: unknown): HostStepResult => {
+      execute(text, fileName, deps, launchDigest).catch((error: unknown): HostStepResult => {
         // Nothing should reach here; if something does, the result file still says so.
         const nothing = {
           step_id: null,

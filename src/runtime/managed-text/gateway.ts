@@ -114,6 +114,9 @@ export interface ManagedGatewayOptions {
    */
   rewriteRequestBody?: (route: string, body: unknown) => unknown
   /** `ManagedTextAdapter.rewriteResponseFor`, bound to the session's family; rewritable routes only. */
+  rewriteModelsResponse?: ManagedResponseRewrite
+  /** Optional bounded per-session admission for chat generation. False means the queue is full. */
+  scheduleChat?: (signal: AbortSignal, forward: () => Promise<void>) => Promise<boolean>
   rewriteResponseFor?: (route: string, requestBody: unknown) => ManagedResponseRewrite | null
   /**
    * Optional: the OpenAI error body for an engine's non-2xx answer on a declared POST route, or null
@@ -353,7 +356,13 @@ async function sendBodyToUpstream(
     return
   }
   if (responseRewrite !== null && status >= 200 && status <= 299) {
-    await relayRewritten(res, upstreamResponse, responseRewrite)
+    const close = () => upstreamResponse.body.destroy()
+    res.once('close', close)
+    try {
+      await relayRewritten(res, upstreamResponse, responseRewrite)
+    } finally {
+      res.off('close', close)
+    }
     return
   }
   // `relay` owns the rest: it writes the status/headers, pipes the body with backpressure, and
@@ -619,7 +628,23 @@ async function proxyToUpstream(
       responseRewrite = null
     }
   }
-  await sendBodyToUpstream(req, res, options.upstream, body, mapError, responseRewrite, options.streamFailure)
+  if (method === 'GET' && route === '/v1/models' && options.rewriteModelsResponse)
+    responseRewrite = options.rewriteModelsResponse
+  const forward = () =>
+    sendBodyToUpstream(req, res, options.upstream, body, mapError, responseRewrite, options.streamFailure)
+  if (!options.scheduleChat || method !== 'POST' || route !== '/v1/chat/completions') return forward()
+  const controller = new AbortController()
+  const disconnect = () => {
+    if (!res.writableFinished) controller.abort()
+  }
+  res.once('close', disconnect)
+  if (res.destroyed) disconnect()
+  try {
+    if (!(await options.scheduleChat(controller.signal, forward)))
+      sendOpenAIError(res, 503, 'The model generation queue is full.', 'server_error', 'queue_full')
+  } finally {
+    res.off('close', disconnect)
+  }
 }
 
 function assertLoopback(host: string): void {

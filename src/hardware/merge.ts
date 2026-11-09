@@ -130,16 +130,22 @@ export function mergeGpus(input: MergeInput): { gpus: GpuInfo[]; warnings: strin
       warnings.push(
         `${name}: NVIDIA GPU without an nvidia-smi answer; driver version and compute capability unknown`
       )
+    const shared = row.sharedMemoryMiB
+    const vulkanInfo = device
+      ? vulkanFromDevice(device)
+      : vulkanFromIcd(gpus.length, vendor, row.deviceId, row.vramTotalMiB, windows?.vulkanDriver ?? false)
+    if (windows?.integrated !== undefined && vulkanInfo)
+      vulkanInfo.device_type = windows.integrated ? 'IntegratedGpu' : 'DiscreteGpu'
+    if (shared !== undefined && vulkanInfo) vulkanInfo.device_type = 'IntegratedGpu'
     gpus.push({
       name,
       total_memory: row.vramTotalMiB ?? 0,
+      ...(shared !== undefined ? { shared_memory: shared } : {}),
       vendor,
       uuid: opaqueId(row),
       driver_version: windows?.driverVersion ?? device?.driverVersion ?? '',
       nvidia_info: null,
-      vulkan_info: device
-        ? vulkanFromDevice(device)
-        : vulkanFromIcd(gpus.length, vendor, row.deviceId, row.vramTotalMiB, windows?.vulkanDriver ?? false),
+      vulkan_info: vulkanInfo,
     })
   }
 

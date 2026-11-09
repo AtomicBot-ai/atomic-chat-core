@@ -128,3 +128,16 @@ describe('installStaged', () => {
     expect(await readdir(join(tagDir(), 'backend'))).toEqual(['current'])
   })
 })
+
+it('restores the prior directory when activation rejects the new tree', async () => {
+  const p = plan({
+    activate: async () => {
+      throw new Error('could not unload the old session')
+    },
+  })
+  await mkdir(p.target, { recursive: true })
+  await writeFile(join(p.target, 'server'), 'working')
+  await expect(installStaged(p)).rejects.toMatchObject({ code: 'ENGINE_INSTALL_FAILED' })
+  expect(await readFile(join(p.target, 'server'), 'utf8')).toBe('working')
+  expect(await readdir(tagDir())).toEqual(['backend'])
+})

@@ -13,7 +13,7 @@
  *   node fake-sglang-engine.mjs <port> <ready|slow|nogen>
  */
 import { createServer } from 'node:http'
-import { exitWithTheTest } from './fake-engine-lifetime.mjs'
+import { exitWithTheTest, listenForDocker } from './fake-engine-lifetime.mjs'
 
 const [port, mode] = process.argv.slice(2)
 const OVERFLOW = {
@@ -26,7 +26,7 @@ const OVERFLOW = {
 
 exitWithTheTest()
 
-createServer((req, res) => {
+const server = createServer((req, res) => {
   let body = ''
   req.on('data', (chunk) => (body += chunk))
   req.on('end', () => {
@@ -77,4 +77,5 @@ createServer((req, res) => {
     }
     json(200, { reached: true, url: req.url })
   })
-}).listen(Number(port), '127.0.0.1')
+})
+listenForDocker(server, port)

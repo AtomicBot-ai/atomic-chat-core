@@ -109,3 +109,14 @@ describe('gpuInfoFromProbe / systemInfoWithOverride', () => {
     expect(info.gpus[0]?.vulkan_info?.device_id).toBe(0x744c)
   })
 })
+
+it.each([15606, undefined, NaN, -1])(
+  'preserves only finite positive shared memory in the hardware response: %s',
+  (shared) => {
+    const gpu = gpuInfoFromProbe(
+      { vendor: 'AMD', total_memory: 512, ...(shared === undefined ? {} : { shared_memory: shared }) },
+      0
+    )
+    expect(gpu.shared_memory).toBe(shared === 15606 ? 15606 : undefined)
+  }
+)

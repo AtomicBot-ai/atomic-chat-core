@@ -103,10 +103,10 @@ export function isAdrenoGpu(gpu: GpuProbeInfo): boolean {
 }
 
 /**
- * The Windows ROCm decision. The upstream archive statically carries HIP inside `ggml-hip.dll`, so
- * an AMD driver is enough; what must be checked is the gfx architecture, and the PCI device id is the
- * only pre-launch signal. Conservative: a card missing from the table falls back to Vulkan — 34.6 MB
- * that works beats ~1 GB that may not — and the manual picker still offers ROCm.
+ * The Windows ROCm decision. The upstream archive bundles the HIP backend and matching runtime
+ * DLLs; the host still needs a compatible AMD driver. Gate the gfx architecture by PCI device id
+ * before launch. A card missing from the reviewed table falls back to Vulkan; the manual picker
+ * still offers ROCm.
  */
 export function rocmSupportedWindows(hasAmdGpu: boolean, deviceIds: readonly number[]): boolean {
   return hasAmdGpu && deviceIds.some((id) => isRocmSupportedPciId(id))

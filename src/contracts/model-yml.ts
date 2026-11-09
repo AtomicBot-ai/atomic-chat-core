@@ -3,6 +3,8 @@
  * see PLAN.md §8.1. Canonical shape: guest-js/types.ts:142-171 (+ `capabilities` from cli/mod.rs).
  */
 
+import type { ModelYmlFastFlowLm } from './fastflowlm.js'
+
 export type ImportedModelSource =
   | 'ollama'
   | 'lmstudio'
@@ -45,6 +47,7 @@ export interface ModelYml {
   litert_lm?: ModelYmlLiteRtLm
   /** A GenieX model (`<data>/geniex/models/<model_id or variant_id>/`), written by the app or `atc`. */
   geniex?: ModelYmlGeniex
+  fastflowlm?: ModelYmlFastFlowLm
 }
 
 export interface ModelYmlAtomicRuntime {

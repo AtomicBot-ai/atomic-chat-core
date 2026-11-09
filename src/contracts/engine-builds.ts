@@ -17,6 +17,7 @@ export const ENGINE_BUILD_IDS = [
   'foundry-local',
   'litert-lm',
   'geniex',
+  'fastflowlm',
   'audio-cpp',
 ] as const
 export type EngineBuildId = (typeof ENGINE_BUILD_IDS)[number]

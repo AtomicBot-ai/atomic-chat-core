@@ -36,3 +36,5 @@ export * from './video-job.js'
 export * from './video-recipe.js'
 export * from './wiring.js'
 export * from './workflow.js'
+
+export { AsyncMutex } from './mutex.js'

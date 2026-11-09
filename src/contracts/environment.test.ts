@@ -592,7 +592,13 @@ describe('managed environment wire shapes', () => {
       'removing',
       'failed',
     ])
-    expect([...MANAGED_HOST_ACTIONS]).toEqual(['linux.install-container-runtime', 'windows.enable-wsl'])
+    expect([...MANAGED_HOST_ACTIONS]).toEqual([
+      'linux.install-container-runtime',
+      'windows.enable-wsl',
+      'linux.install-amd-npu',
+      'linux.configure-runtime-memlock',
+      'windows.install-amd-npu',
+    ])
     // The Windows causes a client switches on (change `add-tensorrt-llm-windows`); the app relays them.
     expect([...WSL_REASONS]).toEqual([
       'wsl-localhost-forwarding',

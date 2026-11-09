@@ -1,3 +1,5 @@
+import type { FlmMaintenance } from '../../runtime/fastflowlm/index.js'
+import type { PreparationCoordinator } from '../../runtime/fastflowlm/environment/index.js'
 /**
  * The control API's dependency surface: what the owner injects into the control server, and the
  * snapshot shape it answers with. Types and shared constants only.
@@ -6,6 +8,8 @@
 import type { CloudProviderInput, CloudProviderView, SubscriptionModel } from '../../cloud/index.js'
 import type { ChatGptStatus } from '../../credentials/index.js'
 import type {
+  FastFlowLmAccelerators,
+  FastFlowLmProbePlan,
   FoundryLocalAccelerators,
   FoundryLocalPrepareRequest,
   FoundryLocalPrepareResult,
@@ -541,6 +545,13 @@ export interface ControlServerDeps {
    * The same route for a native provider with its own answer (change `add-foundry-local`, task 6.5:
    * `foundry-local` → `FoundryLocalCheckResult`). Asked when `managedModelChecks` has no entry.
    */
+  fastFlowLmMaintenance?: Pick<FlmMaintenance, 'begin' | 'get' | 'list' | 'complete'>
+  fastFlowLmOperations?: Pick<
+    PreparationCoordinator,
+    'begin' | 'get' | 'list' | 'consent' | 'cancel' | 'resume' | 'receipt' | 'claim'
+  >
+  fastFlowLmPreparation?: () => Promise<FastFlowLmProbePlan>
+  fastFlowLmAccelerators?: () => Promise<FastFlowLmAccelerators>
   nativeModelChecks?: Readonly<Record<string, (body: unknown) => Promise<object>>>
   /**
    * `DELETE /managed-models/:id` (spec `managed-model-store`, "Модель хранилища удаляется через core"):
