@@ -30,8 +30,9 @@ export const LINUX_ROCM_BACKEND = 'linux-rocm-10.0-x64'
 /**
  * Internal Linux backend id → ggml-org asset infix (between `bin-` and `.tar.gz`). Upstream calls
  * its Linux builds `ubuntu-*`; the app surfaces them as `linux-*`. The whitelist is deliberately
- * narrow (`s390x`, `openvino-*`, the Snapdragon build are dropped). The arm64 CUDA builds
- * carry a toolkit minor and are translated by pattern (`linuxUpstreamInfix`), not listed here.
+ * narrow (`s390x`, `openvino-*`, `sycl-*`, the Snapdragon build are dropped). The CUDA builds
+ * (x64 CUDA 12 and 13, arm64 CUDA 13) carry a toolkit minor and are translated by pattern
+ * (`linuxUpstreamInfix`), not listed here.
  */
 export const LINUX_UPSTREAM_ASSET_BY_BACKEND: Readonly<Record<string, string>> = {
   'linux-cpu-x64': 'ubuntu-x64',
@@ -45,7 +46,7 @@ export const LINUX_BACKEND_BY_UPSTREAM_ASSET: Readonly<Record<string, string>> =
   Object.entries(LINUX_UPSTREAM_ASSET_BY_BACKEND).map(([k, v]) => [v, k])
 )
 
-const LINUX_CUDA_UPSTREAM_INFIX_RE = /^ubuntu-cuda-(13\.\d+)-(arm64)$/
+const LINUX_CUDA_UPSTREAM_INFIX_RE = /^ubuntu-cuda-(12\.\d+|13\.\d+)-(x64|arm64)$/
 
 /** `ubuntu-*` asset infix of a Linux backend id (`linux-cuda-13.4-arm64` → `ubuntu-cuda-13.4-arm64`). */
 export function linuxUpstreamInfix(backend: string): string | null {
@@ -169,13 +170,13 @@ export function buildWindowsCudartArchiveName(
 
 /**
  * `cudart-llama-<tag>-bin-ubuntu-cuda-<toolkit>-<arch>.tar.gz`: the CUDA runtime libraries
- * (`libcudart.so.13`, `libcublas.so.13`, …) the Linux CUDA archive does not carry. Unlike the
- * Windows companion its name carries the release tag. Never mirrored (~550 MB).
+ * (`libcudart.so.<major>`, `libcublas.so.<major>`, `libcublasLt.so.<major>`) the Linux CUDA archive
+ * does not carry. Unlike the Windows companion its name carries the release tag (440–600 MB).
  */
 export function buildLinuxCudartArchiveName(
   version: string,
   cudaToolkitVersion: string,
-  arch: 'arm64' = 'arm64'
+  arch: 'x64' | 'arm64' = 'arm64'
 ): string {
   return `cudart-llama-${stripBom(version)}-bin-ubuntu-cuda-${cudaToolkitVersion}-${arch}.tar.gz`
 }

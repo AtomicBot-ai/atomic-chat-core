@@ -61,7 +61,8 @@ describe('H4: the release archives', () => {
     const findings = check(fresh)
     expect(findings.filter((f) => f.severity !== 'info')).toEqual([])
     const unconsumed = findings.find((f) => f.id === 'assets.core_backends/unconsumed')
-    expect((unconsumed?.evidence as { archives: string[] }).archives).toContain('win-vulkan-arm64.zip')
+    expect((unconsumed?.evidence as { archives: string[] }).archives).toContain('win-sycl-x64.zip')
+    expect((unconsumed?.evidence as { archives: string[] }).archives).not.toContain('win-vulkan-arm64.zip')
   })
 
   it('H4a: a required CPU archive gone (ubuntu-arm64) breaks core and the mirror', () => {
@@ -93,11 +94,11 @@ describe('H4: the release archives', () => {
     )
   })
 
-  it('H4d: a new archive core does not take (win-vulkan-arm64) is information', () => {
-    const older = { tag: 'b11463', assets: pin.assets.filter((n) => !n.endsWith('win-vulkan-arm64.zip')) }
+  it('H4d: a new archive core does not take (win-sycl-x64) is information', () => {
+    const older = { tag: 'b11463', assets: pin.assets.filter((n) => !n.endsWith('win-sycl-x64.zip')) }
     const findings = check(fresh, older)
     expect(findings.filter((f) => f.severity !== 'info')).toEqual([])
-    expect(ids(findings, 'info')).toContain('assets.core_backends/new/win-vulkan-arm64.zip')
+    expect(ids(findings, 'info')).toContain('assets.core_backends/new/win-sycl-x64.zip')
   })
 
   it('H4e: the Windows CPU build shipped as .tar.gz breaks core and the mirror', () => {
@@ -172,10 +173,16 @@ describe("conf's mirror whitelist", () => {
       .filter((n) => MIRROR_WHITELIST.some((e) => new RegExp(`^llama-${tag}-bin-${e.pattern}$`).test(n)))
       .sort()
 
-  it('adds Linux ROCm to the archives conf historically mirrored of b11463', () => {
+  it('adds Linux ROCm, Linux x64 CUDA and Windows arm64 Vulkan to the archives conf historically mirrored of b11463', () => {
     const mirrored = baseline.releases.find((r) => r.tag === 'b11463')!.assets.map((a) => a.name)
     expect(select('b11463', release('b11463').assets)).toEqual(
-      [...mirrored, 'llama-b11463-bin-ubuntu-rocm-10.0-x64.tar.gz'].sort()
+      [
+        ...mirrored,
+        'llama-b11463-bin-ubuntu-rocm-10.0-x64.tar.gz',
+        'llama-b11463-bin-ubuntu-cuda-12.8-x64.tar.gz',
+        'llama-b11463-bin-ubuntu-cuda-13.4-x64.tar.gz',
+        'llama-b11463-bin-win-vulkan-arm64.zip',
+      ].sort()
     )
   })
 

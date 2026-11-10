@@ -18,17 +18,19 @@ import type { BackendVersion, SettingUpdateResult } from '../types.js'
  * Closest current id for a legacy backend id; current ids round-trip unchanged.
  *
  *   - `ubuntu-*` (a tarball installed by file name, ATO-233) → `linux-{cpu,vulkan}-<arch>`, and
- *     `ubuntu-cuda-13.N-arm64` → `linux-cuda-13.N-arm64`.
+ *     `ubuntu-cuda-<toolkit>-<arch>` → `linux-cuda-<toolkit>-<arch>`.
  *   - Windows: `win-cpu-x64`, the family ids `win-cuda-13-x64` / `win-rocm-*`, concrete
  *     `cuda-12.4` / `cuda-13.3` and `win-vulkan-x64` pass through, as do the arm64 ids
- *     (`win-cpu-arm64`, `win-opencl-adreno-arm64`, `win-cuda-13[.N]-arm64`); legacy CUDA 13 / `cu13` →
+ *     (`win-cpu-arm64`, `win-opencl-adreno-arm64`, `win-cuda-13[.N]-arm64`, `win-vulkan-arm64`);
+ *     legacy CUDA 13 / `cu13` →
  *     `win-cuda-13.3`, CUDA 12 / `cu12` → `win-cuda-12.4`, CUDA 11 / `cu11` → `win-cuda-12.4`
  *     (ggml-org dropped CUDA 11; the driver gate refuses it on too-old hosts), vulkan →
  *     `win-vulkan`, AVX tiers / `common_cpus` → `win-cpu`.
- *   - Linux (2026-05-28 ADR "Linux ships only `llamacpp-upstream`"): `linux-{cpu,vulkan}-<arch>` and
- *     the arm64 CUDA 13 ids (`linux-cuda-13[.N]-arm64`) pass through; otherwise anything with
- *     `vulkan` → `linux-vulkan-<arch>`, everything else (legacy CUDA tiers included — x64 Linux ships
- *     no CUDA build) → `linux-cpu-<arch>`.
+ *   - Linux (2026-05-28 ADR "Linux ships only `llamacpp-upstream`"): `linux-{cpu,vulkan}-<arch>`,
+ *     the x64 CUDA 12 / 13 ids (`linux-cuda-1{2,3}[.N]-x64`) and the arm64 CUDA 13 ids
+ *     (`linux-cuda-13[.N]-arm64`) pass through; otherwise anything with `vulkan` →
+ *     `linux-vulkan-<arch>`, everything else (the legacy janhq CUDA tiers included: their driver and
+ *     toolkit were never checked against the ggml-org builds) → `linux-cpu-<arch>`.
  *   - Any other OS: legacy AVX tiers → `<os>common_cpus-<arch>`, else unchanged.
  */
 export function mapOldBackendToNew(oldBackend: string): string {
@@ -62,6 +64,7 @@ export function mapOldBackendToNew(oldBackend: string): string {
     isWindows &&
     (oldBackend === 'win-cpu-arm64' ||
       oldBackend === 'win-opencl-adreno-arm64' ||
+      oldBackend === 'win-vulkan-arm64' ||
       /^win-cuda-13(\.\d+)?-arm64$/.test(oldBackend))
   ) {
     return oldBackend
@@ -97,6 +100,7 @@ export function mapOldBackendToNew(oldBackend: string): string {
       oldBackend === 'linux-vulkan-x64' ||
       oldBackend === 'linux-cpu-arm64' ||
       oldBackend === 'linux-vulkan-arm64' ||
+      /^linux-cuda-1[23](\.\d+)?-x64$/.test(oldBackend) ||
       /^linux-cuda-13(\.\d+)?-arm64$/.test(oldBackend)
     ) {
       return oldBackend

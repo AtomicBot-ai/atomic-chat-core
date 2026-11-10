@@ -233,8 +233,15 @@ describe('determineSupportedBackends (Rust test_determine_supported_backends_*)'
   it.each([
     [features(), ['linux-cpu-x64']],
     [features({ vulkan: true }), ['linux-cpu-x64', 'linux-vulkan-x64']],
-    [features({ cuda11: true, cuda12: true, cuda13: true }), ['linux-cpu-x64']],
-    [features({ cuda11: true, cuda12: true, vulkan: true }), ['linux-cpu-x64', 'linux-vulkan-x64']],
+    [
+      features({ cuda11: true, cuda12: true, cuda13: true }),
+      ['linux-cpu-x64', 'linux-cuda-12-x64', 'linux-cuda-13-x64'],
+    ],
+    [
+      features({ cuda11: true, cuda12: true, vulkan: true }),
+      ['linux-cpu-x64', 'linux-cuda-12-x64', 'linux-vulkan-x64'],
+    ],
+    [features({ cuda11: true }), ['linux-cpu-x64']],
     [features({ vulkan: true, rocm: true }), ['linux-cpu-x64', 'linux-rocm-10.0-x64', 'linux-vulkan-x64']],
   ])('linux x86_64 with %o → %o', (f, expected) => {
     expect(determineSupportedBackends('linux', 'x86_64', f)).toEqual(expected)
@@ -259,7 +266,10 @@ describe('determineSupportedBackends (Rust test_determine_supported_backends_*)'
     ])
     expect(
       determineSupportedBackends('windows', 'aarch64', features({ cuda12: true, cuda13: true, vulkan: true }))
-    ).toEqual(['win-cpu-arm64', 'win-cuda-13-arm64'])
+    ).toEqual(['win-cpu-arm64', 'win-cuda-13-arm64', 'win-vulkan-arm64'])
+    expect(
+      determineSupportedBackends('windows', 'aarch64', features({ opencl: true, vulkan: true }))
+    ).toEqual(['win-cpu-arm64', 'win-opencl-adreno-arm64', 'win-vulkan-arm64'])
     expect(determineSupportedBackends('macos', 'arm64', features())).toEqual(['macos-arm64'])
     expect(determineSupportedBackends('macos', 'x86_64', features())).toEqual(['macos-x64'])
     expect(() => determineSupportedBackends('freebsd', 'x86_64', features())).toThrow(AtomicCoreError)
@@ -352,5 +362,37 @@ describe('filterBackendsBySupport (Windows family-aware filter from backend.ts)'
     ).toEqual(['linux-vulkan-arm64', 'linux-cpu-arm64'])
     const x64 = [b('b11344', 'linux-vulkan-x64'), b('b11344', 'linux-cpu-x64')]
     expect(filterBackendsBySupport(x64, ['linux-cpu-x64'], 'linux')).toEqual(x64)
+  })
+  it('keeps each Linux x64 CUDA asset only through its own toolkit family', () => {
+    const x64 = [
+      b('b12244', 'linux-cuda-13.5-x64'),
+      b('b12244', 'linux-cuda-12.8-x64'),
+      b('b12244', 'linux-vulkan-x64'),
+      b('b12244', 'linux-cpu-x64'),
+    ]
+    const kept = (supported: string[]) =>
+      filterBackendsBySupport(x64, supported, 'linux').map((x) => x.backend)
+    expect(kept(['linux-cpu-x64', 'linux-cuda-12-x64', 'linux-cuda-13-x64'])).toEqual([
+      'linux-cuda-13.5-x64',
+      'linux-cuda-12.8-x64',
+      'linux-vulkan-x64',
+      'linux-cpu-x64',
+    ])
+    expect(kept(['linux-cpu-x64', 'linux-cuda-12-x64'])).toEqual([
+      'linux-cuda-12.8-x64',
+      'linux-vulkan-x64',
+      'linux-cpu-x64',
+    ])
+    expect(kept(['linux-cpu-x64', 'linux-cuda-13-arm64'])).toEqual(['linux-vulkan-x64', 'linux-cpu-x64'])
+  })
+  it('keeps the Windows arm64 Vulkan asset only when Vulkan is supported', () => {
+    const arm = [b('b12244', 'win-vulkan-arm64'), b('b12244', 'win-cpu-arm64')]
+    expect(
+      filterBackendsBySupport(arm, ['win-cpu-arm64', 'win-vulkan-arm64'], 'windows').map((x) => x.backend)
+    ).toEqual(['win-vulkan-arm64', 'win-cpu-arm64'])
+    expect(filterBackendsBySupport(arm, ['win-cpu-arm64'], 'windows').map((x) => x.backend)).toEqual([
+      'win-cpu-arm64',
+    ])
+    expect(filterBackendsBySupport(arm, ['win-cpu-x64', 'win-vulkan-x64'], 'windows')).toEqual([])
   })
 })

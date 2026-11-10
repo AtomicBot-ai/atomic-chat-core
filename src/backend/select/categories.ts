@@ -20,8 +20,8 @@ import { compareBackendVersionsForSort } from '../version.js'
 
 /**
  * Coarse category of a backend id for priority ranking and the "already optimal" comparison.
- * ggml-org Windows names first (`cuda-13.` → `cuda-cu13`, `cuda-12.4`), then legacy janhq /
- * TurboQuant names, `rocm`/`hip` before `vulkan` (a host holding both keeps the ROCm tier), the
+ * ggml-org names first (`cuda-13.` → `cuda-cu13`; any `cuda-12.N`, Windows 12.4 or Linux x64 12.8,
+ * → `cuda-cu12.4`), then legacy janhq / TurboQuant names, `rocm`/`hip` before `vulkan` (a host holding both keeps the ROCm tier), the
  * native CPU name, the legacy CPU buckets, and finally the bare arch. `null` for nothing matching.
  * Verbatim quirk: `avx` is tested before `noavx`, so a `noavx` id categorises as `avx`.
  *
@@ -31,7 +31,7 @@ import { compareBackendVersionsForSort } from '../version.js'
  */
 export function getBackendCategory(backend: string): string | null {
   if (backend.includes('cuda-13.')) return 'cuda-cu13'
-  if (backend.includes('cuda-12.4')) return 'cuda-cu12.4'
+  if (/cuda-12\.\d/.test(backend)) return 'cuda-cu12.4'
   if (backend.includes('cuda-13-common_cpus') || backend.includes('cu13.0')) return 'cuda-cu13.0'
   if (backend.includes('cuda-12-common_cpus') || backend.includes('cu12.0')) return 'cuda-cu12.0'
   if (backend.includes('cuda-11-common_cpus') || backend.includes('cu11.7')) return 'cuda-cu11.7'

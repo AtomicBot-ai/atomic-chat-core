@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-10 — Offer the upstream Linux x64 CUDA and Windows arm64 Vulkan builds](2026-11-10-offer-upstream-linux-x64-cuda-and-windows-arm64-vulkan.md)
+
 - [2026-11-07 — Expose typed FastFlowLM launch settings through the core](2026-11-07-expose-flm-launch-settings.md)
 
 - [2026-11-06 — Wait for FLM cancellation within one deadline](2026-11-06-wait-for-flm-cancellation-within-one-deadline.md)

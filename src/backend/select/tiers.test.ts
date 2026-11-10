@@ -9,6 +9,7 @@ import {
   integratedGpuOnly,
   isGpuBackendId,
   linuxArm64GpuTiers,
+  linuxX64CudaTiers,
   pickFirstWorkingTier,
   tierEnumeratesDevices,
   windowsGpuTiers,
@@ -353,6 +354,88 @@ describe('detectIdealBackendType', () => {
       expect(windowsGpuTiers(features({ opencl: true, cuda13: true }), catalog, 'arm64', [adreno])).toEqual(
         []
       )
+    })
+    it('offers the arm64 Vulkan build below OpenCL, and only for a GPU that carries its own memory', async () => {
+      const withVulkan = [...armCatalog, b('b12244', 'win-vulkan-arm64')]
+      const discrete: GpuProbeInfo = {
+        driver_version: '1.0',
+        vulkan_info: { api_version: '1.3', device_type: 'DiscreteGpu' },
+        total_memory: 8192,
+      }
+      expect(await arm([discrete], withVulkan)).toEqual({ kind: 'gpu', backend: 'win-vulkan-arm64' })
+      expect(
+        windowsGpuTiers(features({ opencl: true, vulkan: true }), withVulkan, 'arm64', [adreno, discrete])
+      ).toEqual(['win-opencl-adreno-arm64', 'win-vulkan-arm64'])
+      // Adreno's 512 MiB of dedicated memory is not enough for Vulkan: OpenCL or CPU, never Vulkan.
+      expect(await arm([adreno], withVulkan, (t) => (t.includes('opencl') ? 'broken' : 'works'))).toEqual({
+        kind: 'cpu-optimal',
+      })
+      expect(
+        windowsGpuTiers(features({ vulkan: true }), [b('b12244', 'win-vulkan-x64')], 'arm64', [discrete])
+      ).toEqual([])
+    })
+  })
+  describe('linux x64 CUDA', () => {
+    const x64Catalog = [
+      b('b12244', 'linux-cuda-13.5-x64'),
+      b('b12244', 'linux-cuda-12.8-x64'),
+      b('b12244', 'linux-vulkan-x64'),
+      b('b12244', 'linux-cpu-x64'),
+    ]
+    const ampere = (driver: string, cc = '8.6') =>
+      nvidia(driver, cc, { total_memory: 12288, vulkan_info: { api_version: '1.4' } })
+    const x64 = (
+      gpus: GpuProbeInfo[],
+      available: BackendVersion[] = x64Catalog,
+      verdict: (t: string) => TierHealth = () => 'works'
+    ) =>
+      detectIdealBackendType({
+        osType: 'linux',
+        arch: 'x86_64',
+        cpuExtensions: [],
+        gpus,
+        listAvailableBackends: async () => available,
+        probeTier: async (t) => verdict(t),
+      })
+
+    it('a driver past the CUDA 13 floor → CUDA 13, then CUDA 12, then Vulkan as each probes broken', async () => {
+      const gpus = [ampere('580.95')]
+      expect(await x64(gpus)).toEqual({ kind: 'gpu', backend: 'linux-cuda-13.5-x64' })
+      expect(await x64(gpus, x64Catalog, (t) => (t.includes('cuda-13') ? 'broken' : 'works'))).toEqual({
+        kind: 'gpu',
+        backend: 'linux-cuda-12.8-x64',
+      })
+      expect(await x64(gpus, x64Catalog, (t) => (t.includes('cuda') ? 'broken' : 'works'))).toEqual({
+        kind: 'gpu',
+        backend: 'linux-vulkan-x64',
+      })
+    })
+    it('a CUDA 12 driver, or a card CUDA 13 dropped, → CUDA 12', async () => {
+      expect(await x64([ampere('550.120')])).toEqual({ kind: 'gpu', backend: 'linux-cuda-12.8-x64' })
+      expect(await x64([ampere('580.95', '6.1')])).toEqual({ kind: 'gpu', backend: 'linux-cuda-12.8-x64' })
+    })
+    it('a release without a Linux x64 CUDA build keeps Vulkan instead of failing detection', async () => {
+      const older = [b('b11463', 'linux-vulkan-x64'), b('b11463', 'linux-cpu-x64')]
+      expect(await x64([ampere('580.95')], older)).toEqual({ kind: 'gpu', backend: 'linux-vulkan-x64' })
+    })
+    it('a driver below every CUDA floor never reads the catalog for CUDA', async () => {
+      const listAvailableBackends = vi.fn(async () => x64Catalog)
+      expect(
+        await detectIdealBackendType({
+          osType: 'linux',
+          arch: 'x86_64',
+          cpuExtensions: [],
+          gpus: [ampere('470.256')],
+          listAvailableBackends,
+          probeTier: async () => 'works',
+        })
+      ).toEqual({ kind: 'gpu', backend: 'linux-vulkan-x64' })
+      expect(listAvailableBackends).not.toHaveBeenCalled()
+    })
+    it('never picks an arm64 or Windows build, nor a toolkit the driver cannot run', () => {
+      const foreign = [b('b12244', 'linux-cuda-13.5-arm64'), b('b12244', 'win-cuda-12.4-x64')]
+      expect(linuxX64CudaTiers(features({ cuda12: true, cuda13: true }), foreign)).toEqual([])
+      expect(linuxX64CudaTiers(features({ cuda12: true }), x64Catalog)).toEqual(['linux-cuda-12.8-x64'])
     })
   })
   describe('linux arm64', () => {

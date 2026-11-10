@@ -68,8 +68,25 @@ describe('getBackendArchiveName / getBackendDownloadUrl (app backend.test.ts)', 
     )
     expect(linuxUpstreamInfix('linux-cuda-13-arm64')).toBeNull()
     expect(linuxBackendForUpstreamInfix('ubuntu-cuda-13.4-arm64')).toBe('linux-cuda-13.4-arm64')
-    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-13.4-x64')).toBeUndefined()
     expect(linuxBackendForUpstreamInfix('ubuntu-s390x')).toBeUndefined()
+    expect(linuxBackendForUpstreamInfix('ubuntu-sycl-fp16-x64')).toBeUndefined()
+  })
+  it('translates the Linux x64 CUDA 12 and 13 ids by pattern, never the minor-less family', () => {
+    expect(getBackendArchiveName('b12244', 'linux-cuda-12.8-x64')).toBe(
+      'llama-b12244-bin-ubuntu-cuda-12.8-x64.tar.gz'
+    )
+    expect(getBackendArchiveName('b12244', 'linux-cuda-13.5-x64')).toBe(
+      'llama-b12244-bin-ubuntu-cuda-13.5-x64.tar.gz'
+    )
+    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-12.8-x64')).toBe('linux-cuda-12.8-x64')
+    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-13.5-x64')).toBe('linux-cuda-13.5-x64')
+    expect(linuxBackendForUpstreamInfix('ubuntu-cuda-11.7-x64')).toBeUndefined()
+    expect(linuxUpstreamInfix('linux-cuda-12-x64')).toBeNull()
+    expect(linuxUpstreamInfix('linux-cuda-13-x64')).toBeNull()
+  })
+  it('names the Windows arm64 Vulkan zip like every other Windows build', () => {
+    expect(getBackendArchiveName('b12244', 'win-vulkan-arm64')).toBe('llama-b12244-bin-win-vulkan-arm64.zip')
+    expect(friendlyBackendLabel('win-vulkan-arm64')).toBe('Vulkan')
   })
   it('uses tarballs for macOS and zips for Windows, and strips BOMs', () => {
     expect(getBackendArchiveName('b9702', 'macos-arm64')).toBe('llama-b9702-bin-macos-arm64.tar.gz')
@@ -201,6 +218,17 @@ describe('cudart companion', () => {
     )
     expect(getCudaToolkitVersion('linux-cuda-13.4-arm64')).toBe('13.4')
   })
+  it('pairs each Linux x64 CUDA backend with its own toolkit companion', () => {
+    expect(getCudartArchiveName('linux-cuda-12.8-x64', 'b12244')).toBe(
+      'cudart-llama-b12244-bin-ubuntu-cuda-12.8-x64.tar.gz'
+    )
+    expect(getCudartDownloadUrl('b12244', 'linux-cuda-13.5-x64')).toBe(
+      `${GGML_ORG_DOWNLOAD_BASE}/b12244/cudart-llama-b12244-bin-ubuntu-cuda-13.5-x64.tar.gz`
+    )
+    expect(getCudaToolkitVersion('linux-cuda-12.8-x64')).toBe('12.8')
+    expect(friendlyBackendLabel('linux-cuda-12.8-x64')).toBe('CUDA 12')
+    expect(friendlyBackendLabel('linux-cuda-13-x64')).toBe('CUDA 13')
+  })
   it.each([
     'linux-cpu-arm64',
     'linux-vulkan-arm64',
@@ -211,6 +239,9 @@ describe('cudart companion', () => {
     'macos-arm64',
     'win-cpu-arm64',
     'win-opencl-adreno-arm64',
+    'win-vulkan-arm64',
+    'linux-cuda-12-x64',
+    'linux-cuda-13-x64',
   ])('is null for %s', (backend) => {
     expect(getCudartArchiveName(backend)).toBeNull()
     expect(getCudartDownloadUrl('b10205', backend)).toBeNull()

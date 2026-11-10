@@ -198,10 +198,11 @@ export function normalizeFeatures(features: Partial<BackendFeatures> | null | un
 /**
  * Backend ids installable on `<osType>-<arch>` given the detected features. Windows x64 always has
  * CPU, then CUDA 12.4, the *family* ids `win-cuda-13-x64` / `win-rocm-x64` (concrete minors come
- * from the manifest, ATO-105) and Vulkan. Windows arm64: CPU, OpenCL on an Adreno GPU and the
- * `win-cuda-13-arm64` family. Linux x64: CPU, the supported ROCm build and Vulkan. Linux arm64: CPU, Vulkan and the `linux-cuda-13-arm64` family (NVIDIA GB10 /
- * Grace hosts); the Snapdragon build is not offered. macOS its single arch build. Anything else is
- * `INVALID_ARGUMENT`.
+ * from the manifest, ATO-105) and Vulkan. Windows arm64: CPU, OpenCL on an Adreno GPU, the
+ * `win-cuda-13-arm64` family and Vulkan. Linux x64: CPU, the `linux-cuda-12-x64` /
+ * `linux-cuda-13-x64` families, the supported ROCm build and Vulkan. Linux arm64: CPU, Vulkan and
+ * the `linux-cuda-13-arm64` family (NVIDIA GB10 / Grace hosts); the Snapdragon build is not
+ * offered. macOS its single arch build. Anything else is `INVALID_ARGUMENT`.
  */
 export function determineSupportedBackends(
   osType: string,
@@ -223,10 +224,13 @@ export function determineSupportedBackends(
       supported.push('win-cpu-arm64')
       if (features.opencl) supported.push('win-opencl-adreno-arm64')
       if (features.cuda13) supported.push('win-cuda-13-arm64')
+      if (features.vulkan) supported.push('win-vulkan-arm64')
       break
     case 'linux-x86_64':
     case 'linux-x86':
       supported.push('linux-cpu-x64')
+      if (features.cuda12) supported.push('linux-cuda-12-x64')
+      if (features.cuda13) supported.push('linux-cuda-13-x64')
       if (features.rocm) supported.push(LINUX_ROCM_BACKEND)
       if (features.vulkan) supported.push('linux-vulkan-x64')
       break
@@ -274,9 +278,10 @@ export function listSupportedBackends(
  * The hardware gate on the merged catalog. Windows keeps only backends whose (normalised) id is in
  * `supportedBackends`, matching concrete CUDA-13 and ROCm assets against their family ids so
  * `win-cuda-13.4-x64` is accepted when `win-cuda-13-x64` is supported and flows downstream unchanged.
- * Linux gates ROCm on support for the published build and CUDA on its family id: CUDA ranks above every other category, so an unfiltered entry would be recommended to
- * a host without an NVIDIA GPU. Every other OS returns the list unfiltered (the manifest parser
- * already applied the arch filter).
+ * Linux gates ROCm on support for the published build and CUDA (x64 12/13, arm64 13) on its family
+ * id: CUDA ranks above every other category, so an unfiltered entry would be recommended to a host
+ * without an NVIDIA GPU or below the driver floor. Every other OS returns the list unfiltered (the
+ * manifest parser already applied the arch filter).
  */
 export function filterBackendsBySupport(
   merged: readonly BackendVersion[],
@@ -289,7 +294,7 @@ export function filterBackendsBySupport(
       const raw = stripBom(b.backend)
       if (/^(linux|ubuntu)-rocm-/.test(raw))
         return mapOldBackendToNew(raw) === LINUX_ROCM_BACKEND && supportedSet.has(LINUX_ROCM_BACKEND)
-      const m = /^linux-cuda-(\d+)\.\d+-(arm64)$/.exec(stripBom(b.backend))
+      const m = /^linux-cuda-(\d+)\.\d+-(x64|arm64)$/.exec(raw)
       return !m || supportedSet.has(`linux-cuda-${m[1]}-${m[2]}`)
     })
   }

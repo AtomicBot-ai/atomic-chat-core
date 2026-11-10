@@ -167,6 +167,14 @@ describe('backendTypeEquivalents / findCompatibleInstalledBackend', () => {
       'ubuntu-cuda-13.4-arm64',
       'linux-cuda-13.4-arm64',
     ])
+    expect([...backendTypeEquivalents('linux-cuda-12.8-x64')]).toEqual([
+      'linux-cuda-12.8-x64',
+      'ubuntu-cuda-12.8-x64',
+    ])
+    expect([...backendTypeEquivalents('ubuntu-cuda-13.5-x64')]).toEqual([
+      'ubuntu-cuda-13.5-x64',
+      'linux-cuda-13.5-x64',
+    ])
   })
   it('returns the newest same-type build by install order, never crossing types', () => {
     const installed = [
