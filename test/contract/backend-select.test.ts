@@ -180,7 +180,33 @@ function correctedMergeExpectation(input: Extract<Input, { kind: 'merge' }>, exp
  * (features.ts `gpuMeetsCuda13DriverForArch`), so Turing on the case's 581.42 no longer gets it.
  */
 const WINDOWS_TURING_CUDA13_CASE = 'features_windows_turing_7_5_is_the_cuda13_floor'
-const LINUX_ROCM_CASE = 'supported_linux_x86_64_rocm_flag_ignored'
+
+/**
+ * Builds the core offers that the Rust plugin did not when it was recorded, one entry per case:
+ * the recorded answer → the core's. `index.json` `known_divergence` gives each one's reason.
+ */
+const BUILDS_ADDED_SINCE_RECORDING: Record<string, (expected: Expected) => Expected> = {
+  supported_linux_x86_64_rocm_flag_ignored: () => [
+    'linux-cpu-x64',
+    'linux-rocm-10.0-x64',
+    'linux-vulkan-x64',
+  ],
+  supported_linux_x86_64_cuda_flags_ignored: () => [
+    'linux-cpu-x64',
+    'linux-cuda-12-x64',
+    'linux-cuda-13-x64',
+  ],
+  supported_linux_x86_64_nvidia_with_vulkan: () => ['linux-cpu-x64', 'linux-cuda-12-x64', 'linux-vulkan-x64'],
+  setting_update_maps_ubuntu_cuda_13_4_x64: (expected) => ({
+    ...(expected as SettingUpdateResult),
+    effective_backend_type: 'linux-cuda-13.4-x64',
+  }),
+  supported_windows_aarch64_every_flag: (expected) => [...(expected as string[]), 'win-vulkan-arm64'],
+  supported_windows_aarch64_every_flag_but_opencl: (expected) => [
+    ...(expected as string[]),
+    'win-vulkan-arm64',
+  ],
+}
 
 for (const [set, port] of [
   ['backend-select', UPSTREAM],
@@ -196,10 +222,14 @@ for (const [set, port] of [
       expect(cases.map((c) => c.name).sort()).toEqual([...index.cases].sort())
     })
 
-    it('records only the merge `order` shape and the two hardware selection changes as known divergences', () => {
+    it('records only the merge `order` shape and the hardware selection changes as known divergences', () => {
       expect(Object.keys(knownDivergence)).toEqual(
         set === 'backend-select'
-          ? ['merge_remote_without_order_defaults_to_zero', WINDOWS_TURING_CUDA13_CASE, LINUX_ROCM_CASE]
+          ? [
+              'merge_remote_without_order_defaults_to_zero',
+              WINDOWS_TURING_CUDA13_CASE,
+              ...Object.keys(BUILDS_ADDED_SINCE_RECORDING),
+            ]
           : ['merge_remote_without_order_defaults_to_zero']
       )
     })
@@ -232,8 +262,8 @@ for (const [set, port] of [
         }
       } else if (c.name in knownDivergence && c.input.kind === 'merge') {
         expect(run(port, c.input)).toEqual(correctedMergeExpectation(c.input, c.expected as BackendVersion[]))
-      } else if (c.name === LINUX_ROCM_CASE && c.name in knownDivergence) {
-        expect(run(port, c.input)).toEqual(['linux-cpu-x64', 'linux-rocm-10.0-x64', 'linux-vulkan-x64'])
+      } else if (c.name in BUILDS_ADDED_SINCE_RECORDING && c.name in knownDivergence) {
+        expect(run(port, c.input)).toEqual(BUILDS_ADDED_SINCE_RECORDING[c.name]!(c.expected))
       } else if (c.name === WINDOWS_TURING_CUDA13_CASE && c.name in knownDivergence) {
         expect(run(port, c.input)).toEqual({ ...(c.expected as object), cuda13: false })
       } else {

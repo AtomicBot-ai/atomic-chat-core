@@ -38,7 +38,7 @@ describe('configureBackends startup decisions', () => {
       'win-rocm-x64',
       'win-vulkan-x64',
     ])
-    const armVariants = ['win-cpu-arm64', 'win-opencl-adreno-arm64', 'win-cuda-13-arm64']
+    const armVariants = ['win-cpu-arm64', 'win-opencl-adreno-arm64', 'win-cuda-13-arm64', 'win-vulkan-arm64']
     expect(staticLatestVariants('windows', 'b11344/win-cpu-x64', 'aarch64')).toEqual(armVariants)
     expect(staticLatestVariants('windows', 'b11344/win-cpu-arm64')).toEqual(armVariants)
     expect(staticLatestVariants('windows', 'b11344/win-cpu-arm64', 'x86_64')[0]).toBe('win-cpu-x64')
@@ -46,20 +46,27 @@ describe('configureBackends startup decisions', () => {
       'Latest CPU',
       'Latest OpenCL (Adreno)',
       'Latest CUDA 13',
+      'Latest Vulkan',
     ])
-    expect(staticLatestVariants('linux')).toEqual([
+    const linuxX64 = [
       'linux-cpu-x64',
+      'linux-cuda-12-x64',
+      'linux-cuda-13-x64',
       'linux-rocm-10.0-x64',
       'linux-vulkan-x64',
+    ]
+    expect(staticLatestVariants('linux')).toEqual(linuxX64)
+    expect(latestBackendOptions(linuxX64).map((o) => o.name)).toEqual([
+      'Latest CPU',
+      'Latest CUDA 12',
+      'Latest CUDA 13',
+      'Latest ROCm 10.0',
+      'Latest Vulkan',
     ])
     const linuxArm = ['linux-cpu-arm64', 'linux-vulkan-arm64', 'linux-cuda-13-arm64']
     expect(staticLatestVariants('linux', null, 'aarch64')).toEqual(linuxArm)
     expect(staticLatestVariants('linux', 'b11344/linux-cpu-arm64')).toEqual(linuxArm)
-    expect(staticLatestVariants('linux', 'b11344/linux-cpu-arm64', 'x86_64')).toEqual([
-      'linux-cpu-x64',
-      'linux-rocm-10.0-x64',
-      'linux-vulkan-x64',
-    ])
+    expect(staticLatestVariants('linux', 'b11344/linux-cpu-arm64', 'x86_64')).toEqual(linuxX64)
     expect(latestBackendOptions(linuxArm).map((o) => o.name)).toEqual([
       'Latest CPU',
       'Latest Vulkan',

@@ -18,10 +18,16 @@ import { stripBom } from '../version.js'
 export const WIN_CUDA_FAMILY_RE = /^win-cuda-(\d+)-(x64|arm64)$/
 /** Concrete Windows CUDA asset id: `win-cuda-12.4-x64`, `win-cuda-13.3-x64`, `win-cuda-13.4-arm64`. */
 export const WINDOWS_CUDA_BACKEND_RE = /^win-cuda-(12\.\d+|13\.\d+)-(x64|arm64)$/
-/** Minor-less Linux CUDA family id: `linux-cuda-13-arm64` (upstream ships Linux CUDA for arm64 only here). */
-export const LINUX_CUDA_FAMILY_RE = /^linux-cuda-(\d+)-(arm64)$/
-/** Concrete Linux CUDA backend id: `linux-cuda-13.4-arm64` (asset `ubuntu-cuda-13.4-arm64`). */
-export const LINUX_CUDA_BACKEND_RE = /^linux-cuda-(13\.\d+)-(arm64)$/
+/**
+ * Minor-less Linux CUDA family id: `linux-cuda-12-x64`, `linux-cuda-13-x64`, `linux-cuda-13-arm64`.
+ * Upstream ships Ubuntu x64 CUDA 12 and 13 and arm64 CUDA 13; each moves its toolkit minor.
+ */
+export const LINUX_CUDA_FAMILY_RE = /^linux-cuda-(\d+)-(x64|arm64)$/
+/**
+ * Concrete Linux CUDA backend id: `linux-cuda-12.8-x64`, `linux-cuda-13.5-x64`,
+ * `linux-cuda-13.4-arm64` (asset `ubuntu-cuda-<toolkit>-<arch>`).
+ */
+export const LINUX_CUDA_BACKEND_RE = /^linux-cuda-(12\.\d+|13\.\d+)-(x64|arm64)$/
 /** HIP has no major to pin: one `win-rocm-<major>.<minor>-x64` asset per release, moved wholesale. */
 export const WIN_ROCM_FAMILY_ID = 'win-rocm-x64'
 export const WIN_ROCM_CONCRETE_RE = /^win-rocm-(\d+)\.(\d+)-x64$/
@@ -99,16 +105,16 @@ export function windowsCudaBackendArch(backend: string): 'x64' | 'arm64' | null 
   return m ? (m[2] as 'x64' | 'arm64') : null
 }
 
-/** CUDA toolkit version (`"13.4"`) of a concrete Linux CUDA backend id, or `null` for anything else. */
+/** CUDA toolkit version (`"12.8"`, `"13.4"`) of a concrete Linux CUDA backend id, or `null` for anything else. */
 export function matchLinuxCudaBackend(backend: string): string | null {
   const m = LINUX_CUDA_BACKEND_RE.exec(stripBom(backend))
   return m ? (m[1] ?? null) : null
 }
 
 /** Arch suffix of a concrete Linux CUDA backend id, or `null` for anything else. */
-export function linuxCudaBackendArch(backend: string): 'arm64' | null {
+export function linuxCudaBackendArch(backend: string): 'x64' | 'arm64' | null {
   const m = LINUX_CUDA_BACKEND_RE.exec(stripBom(backend))
-  return m ? (m[2] as 'arm64') : null
+  return m ? (m[2] as 'x64' | 'arm64') : null
 }
 
 /**

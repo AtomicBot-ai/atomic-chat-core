@@ -262,17 +262,14 @@
       "check": "assets.core_backends",
       "severity": "info",
       "subject": "unconsumed",
-      "message": "8 archive(s) for the platforms core ships that no backend it installs takes",
+      "message": "5 archive(s) for the platforms core ships that no backend it installs takes",
       "evidence": {
         "archives": [
-          "ubuntu-cuda-12.8-x64.tar.gz",
-          "ubuntu-cuda-13.4-x64.tar.gz",
           "ubuntu-openvino-2026.4.1-x64.tar.gz",
           "ubuntu-sycl-fp16-x64.tar.gz",
           "ubuntu-sycl-fp32-x64.tar.gz",
           "win-openvino-2026.4.1-x64.zip",
-          "win-sycl-x64.zip",
-          "win-vulkan-arm64.zip"
+          "win-sycl-x64.zip"
         ]
       }
     },

@@ -1567,6 +1567,18 @@
       },
       {
         "platform": "linux-x64",
+        "backend": "linux-cuda-12-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-ubuntu-cuda-12\\.\\d+-x64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-x64",
+        "backend": "linux-cuda-13-x64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-ubuntu-cuda-13\\.\\d+-x64\\.tar\\.gz"
+      },
+      {
+        "platform": "linux-x64",
         "backend": "linux-rocm-10.0-x64",
         "cpu": false,
         "asset": "llama-{tag}-bin-ubuntu-rocm-10\\.0-x64\\.tar\\.gz"
@@ -1654,6 +1666,12 @@
         "backend": "win-cuda-13-arm64",
         "cpu": false,
         "asset": "llama-{tag}-bin-win-cuda-13\\.\\d+-arm64\\.zip"
+      },
+      {
+        "platform": "windows-arm64",
+        "backend": "win-vulkan-arm64",
+        "cpu": false,
+        "asset": "llama-{tag}-bin-win-vulkan-arm64\\.zip"
       }
     ]
   },

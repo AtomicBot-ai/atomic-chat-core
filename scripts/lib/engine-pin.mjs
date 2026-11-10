@@ -112,7 +112,7 @@ const LINUX_BACKEND_BY_INFIX = {
 function linuxBackendForUpstreamInfix(infix) {
   const listed = LINUX_BACKEND_BY_INFIX[infix]
   if (listed) return listed
-  const m = /^ubuntu-cuda-(13\.\d+)-(arm64)$/.exec(infix)
+  const m = /^ubuntu-cuda-(12\.\d+|13\.\d+)-(x64|arm64)$/.exec(infix)
   return m ? `linux-cuda-${m[1]}-${m[2]}` : undefined
 }
 
@@ -124,7 +124,8 @@ const WINDOWS_ALLOWED = (name) =>
   name === 'win-vulkan-x64' ||
   name === 'win-cpu-arm64' ||
   name === 'win-opencl-adreno-arm64' ||
-  /^win-cuda-13\.\d+-arm64$/.test(name)
+  /^win-cuda-13\.\d+-arm64$/.test(name) ||
+  name === 'win-vulkan-arm64'
 
 /** Backends a release offers an OS + arch (`parseManifestForPlatform`). */
 export function parseManifestForPlatform(release, osType, archSuffix) {
