@@ -174,6 +174,7 @@ describe('the sd.cpp engine contract: routes and strings', () => {
       'src/runtime/tiling.cpp',
       'src/pipeline/image.cpp',
       'src/model_manager.cpp',
+      'src/core/execution_engine.cpp',
     ])
       expect(watched).toContain(path)
   })
