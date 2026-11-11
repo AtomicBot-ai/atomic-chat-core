@@ -412,6 +412,7 @@ export class EngineBuildsService {
           cApiVersion: cApiVersion ?? null,
           abi: abi ?? null,
           probe: facts,
+          ...(release.min_core_version ? { minCoreVersion: release.min_core_version } : {}),
           ...(release.flmIdentity ? { flmIdentity: release.flmIdentity } : {}),
         }),
     })
@@ -537,7 +538,7 @@ export class EngineBuildsService {
   }
 
   private activeOf(engine: EngineBuildId, builds: Build[]): Build | undefined {
-    return this.engine(engine).active(builds)
+    return this.engine(engine).active(builds, this.context(engine))
   }
 
   /** The table row of `engine`; one cast, since TypeScript cannot correlate a key with its row. */
@@ -589,7 +590,7 @@ export class EngineBuildsService {
 
   // --- manifests and the host ------------------------------------------------------------------
 
-  private readManifest(
+  private async readManifest(
     engine: EngineBuildId,
     request: EngineBuildCatalogRequest
   ): Promise<ManifestRead<AnyManifest>> {
@@ -597,7 +598,9 @@ export class EngineBuildsService {
       ...(request.force ? { force: true } : {}),
       ...(request.proxy ? { proxy: request.proxy } : {}),
     }
-    return this.deps.manifests[engine].read(options)
+    const read = await this.deps.manifests[engine].read(options)
+    const filter = this.engine(engine).compatibleManifest
+    return read.manifest && filter ? { ...read, manifest: filter(read.manifest, this.context(engine)) } : read
   }
 
   private hostChoice(engine: EngineBuildId, manifest: AnyManifest | null): Promise<HostChoice> {

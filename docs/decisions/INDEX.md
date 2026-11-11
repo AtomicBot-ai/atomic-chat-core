@@ -11,6 +11,16 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-11 — Isolate managed Foundry CUDA DLLs on Windows](2026-11-11-isolate-managed-foundry-cuda-dlls-on-windows.md)
+
+- [2026-11-11 — Prepare Foundry CUDA on Linux and ARM64](2026-11-11-prepare-foundry-cuda-on-linux-and-arm64.md)
+
+- [2026-11-11 — Prepare Foundry Windows x64 CUDA from NVIDIA](2026-11-11-prepare-foundry-windows-x64-cuda-from-nvidia.md)
+
+- [2026-11-10 — Prepare Foundry macOS WebGPU through ORT](2026-11-10-prepare-foundry-macos-webgpu-through-ort.md)
+
+- [2026-11-10 — Upgrade Foundry Local with build-scoped preparation](2026-11-10-upgrade-foundry-local-with-build-scoped-preparation.md)
+
 - [2026-11-10 — Offer the upstream Linux x64 CUDA and Windows arm64 Vulkan builds](2026-11-10-offer-upstream-linux-x64-cuda-and-windows-arm64-vulkan.md)
 
 - [2026-11-07 — Expose typed FastFlowLM launch settings through the core](2026-11-07-expose-flm-launch-settings.md)

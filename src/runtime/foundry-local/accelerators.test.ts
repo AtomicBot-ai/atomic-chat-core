@@ -19,7 +19,16 @@ beforeEach(async () => {
 afterEach(() => data.cleanup())
 
 function service(
-  opts: { eps?: string; fail?: string; mode?: string; build?: () => Promise<string | undefined> } = {}
+  opts: {
+    eps?: string
+    fail?: string
+    mode?: string
+    build?: () => Promise<string | undefined>
+    cuda?: {
+      supports(build: string): boolean
+      prepare(build: string, progress: (fraction: number) => void): Promise<string | undefined>
+    }
+  } = {}
 ) {
   const events: FoundryLocalAcceleratorsEvent[] = []
   const argvFile = join(data.root, 'argv.jsonl')
@@ -38,6 +47,7 @@ function service(
       FAKE_FOUNDRY_MODE: opts.mode ?? 'ready',
     },
     now: () => 1_000,
+    ...(opts.cuda ? { cuda: opts.cuda } : {}),
   })
   const probes = async () =>
     existsSync(argvFile)
@@ -51,6 +61,49 @@ function service(
 }
 
 describe.skipIf(!POSIX)('FoundryLocalAcceleratorService (task 6.4)', () => {
+  it('keeps legacy preparation and errors on 2.1.0, isolates 2.4.0, and restores them on rollback', async () => {
+    let tag = 'v2.1.0'
+    const { accelerators, paths } = service({
+      fail: 'CUDAExecutionProvider',
+      build: async () => join(data.layout.provider('foundry-local').backendsDir, tag, 'linux-x64'),
+    })
+    await accelerators.prepare({})
+    const legacy = await readFile(join(paths.runtimeDir!, 'accelerators.json'), 'utf8')
+    tag = 'v2.4.0'
+    expect(await accelerators.prepared()).toEqual([])
+    const newer = await accelerators.list()
+    expect(newer.accelerators.every((ep) => !ep.prepared && ep.reason === undefined)).toBe(true)
+    await accelerators.prepare({ accelerators: ['CUDAExecutionProvider'] })
+    expect(await readFile(join(paths.runtimeDir!, 'accelerators.json'), 'utf8')).toBe(legacy)
+    tag = 'v2.1.0'
+    expect(await accelerators.prepared()).toEqual(['WebGpuExecutionProvider'])
+    expect(
+      (await accelerators.list()).accelerators.find((ep) => ep.name === 'CUDAExecutionProvider')?.reason
+    ).toContain('libcublasLt')
+  })
+
+  it('writes a late preparation result to the original build even after active changes', async () => {
+    let tag = 'v2.1.0'
+    let announce: () => void = () => {}
+    const started = new Promise<void>((resolve) => {
+      announce = resolve
+    })
+    const { accelerators } = service({
+      build: async () => {
+        const original = tag
+        announce()
+        return join(data.layout.provider('foundry-local').backendsDir, original, 'linux-x64')
+      },
+    })
+    const preparing = accelerators.prepare({ accelerators: ['WebGpuExecutionProvider'] })
+    await started
+    tag = 'v2.4.0'
+    await preparing
+    expect(await accelerators.prepared()).toEqual([])
+    tag = 'v2.1.0'
+    expect(await accelerators.prepared()).toEqual(['WebGpuExecutionProvider'])
+  })
+
   it('probes the active build on the first request and answers from that probe until the build changes', async () => {
     let build = 'v2.1.0'
     const { accelerators, probes, paths } = service({
@@ -144,6 +197,40 @@ describe.skipIf(!POSIX)('FoundryLocalAcceleratorService (task 6.4)', () => {
       },
     ])
     expect((await probes()).at(-1)).toEqual(expect.arrayContaining(['--prepared', 'WebGpuExecutionProvider']))
+  })
+
+  it('fetches NVIDIA libraries only for an offered CUDA prepare', async () => {
+    const cuda = { supports: () => true, prepare: vi.fn(async () => 'C:\\atomic-cuda') }
+    const { accelerators } = service({ cuda })
+    await accelerators.list()
+    await accelerators.prepare({ accelerators: ['WebGpuExecutionProvider'] })
+    expect(cuda.prepare).not.toHaveBeenCalled()
+    const absent = service({ cuda, eps: 'WebGpuExecutionProvider' })
+    await absent.accelerators.prepare({ accelerators: ['CUDAExecutionProvider'] })
+    expect(cuda.prepare).not.toHaveBeenCalled()
+    expect((await accelerators.prepare({ accelerators: ['CUDAExecutionProvider'] })).accelerators).toEqual([
+      { name: 'CUDAExecutionProvider', prepared: true },
+    ])
+    expect(cuda.prepare).toHaveBeenCalledOnce()
+  })
+
+  it('records NVIDIA download failure and still prepares other accelerators', async () => {
+    const cuda = {
+      supports: () => true,
+      prepare: vi.fn(async () => {
+        throw new Error('bad digest')
+      }),
+    }
+    const { accelerators, events } = service({ cuda })
+    const result = await accelerators.prepare({})
+    expect(result.accelerators).toEqual([
+      { name: 'WebGpuExecutionProvider', prepared: true },
+      { name: 'CUDAExecutionProvider', prepared: false, reason: expect.stringContaining('bad digest') },
+    ])
+    expect(await accelerators.prepared()).toEqual(['WebGpuExecutionProvider'])
+    expect(events).toContainEqual(
+      expect.objectContaining({ accelerator: 'CUDAExecutionProvider', stage: 'failed' })
+    )
   })
 
   it('runs one prepare at a time, and needs an installed build', async () => {

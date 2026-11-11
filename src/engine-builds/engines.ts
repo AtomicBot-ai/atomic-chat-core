@@ -23,7 +23,6 @@ import { listLiteRtLmBuilds, prepareLiteRtLmTree, writeLiteRtLmInstallRecord } f
 import { listGeniexBuilds, prepareGeniexTree, writeGeniexInstallRecord } from './geniex.js'
 import {
   audiocppAssetUrl,
-  FOUNDRY_LOCAL_C_API_VERSIONS,
   foundryLocalAssetUrl,
   mlxAssetUrl,
   sdcppAssetUrl,
@@ -48,6 +47,7 @@ import {
   backendKindOf,
   companionFor,
   foundryLocalHostChoice,
+  foundryLocalBuildCompatible,
   geniexHostChoice,
   liteRtLmHostChoice,
   mlxHostChoice,
@@ -61,6 +61,8 @@ import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
+  /** Foundry: retained locally so downgrading core cannot activate an incompatible build offline. */
+  min_core_version?: string
   /** For a bundled MLX build, `resources-dir`; otherwise the build's own directory. */
   immutable_sha256?: string
   dir: string
@@ -82,6 +84,8 @@ export interface Build extends EngineBuildRef {
  * nothing to keep answer `void`.
  */
 export interface EngineProbeFacts {
+  /** Foundry Local: the maximum supported table actually provided by the loaded library. */
+  cApiVersion?: number
   libraryVersion: string | null
   devices: string[]
 }
@@ -127,6 +131,7 @@ export interface HostChoice {
 export type ArchiveRef = Omit<BuildArchive, 'sha256' | 'size'> & { sha256?: string; size?: number }
 
 export interface BuildRecordInfo {
+  minCoreVersion?: string
   flmIdentity?: FastFlowLmIdentity
   tag: string
   backendId: string
@@ -142,6 +147,7 @@ export interface BuildRecordInfo {
 }
 
 export interface BuildRelease {
+  min_core_version?: string
   tag: string
   published_at: string | null
   c_api_version?: number
@@ -150,6 +156,8 @@ export interface BuildRelease {
 }
 
 export interface EngineDescriptor<M> {
+  /** Filter once so catalog, update and installation use the same host-compatible candidates. */
+  compatibleManifest?(manifest: M, ctx: EngineContext): M
   /** The release an install takes from the manifest, and the order key it carries. */
   release(manifest: M): BuildRelease | null
   hostChoice(ctx: EngineContext, manifest: M | null): Promise<HostChoice>
@@ -173,7 +181,7 @@ export interface EngineDescriptor<M> {
   record(staging: string, info: BuildRecordInfo): Promise<void>
   builds(ctx: EngineContext): Promise<Build[]>
   /** The build the next load uses. */
-  active(builds: Build[]): Build | undefined
+  active(builds: Build[], ctx?: EngineContext): Build | undefined
   /**
    * Present when a build that fails its probe sends the install down the host's ladder (sd.cpp,
    * design D7 of `move-sdcpp-mlx-install-to-core`): remember the failed rung for this tag.
@@ -345,9 +353,29 @@ function bundledMlxBuild(bundled: BundledMlx, resourcesDir: string): Build {
 }
 
 const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
+  compatibleManifest: (manifest, ctx) => ({
+    ...manifest,
+    releases: manifest.releases.filter((release) =>
+      release.assets.some((asset) =>
+        foundryLocalBuildCompatible(ctx.hostPlatform as FoundryLocalHostPlatform, {
+          tag: release.tag,
+          backend_id: asset.platform,
+          c_api_version: release.c_api_version,
+          min_core_version: release.min_core_version,
+        })
+      )
+    ),
+  }),
   release: (manifest) => {
-    const newest = manifest.releases[0] as FoundryLocalManifest['releases'][number]
-    return { tag: newest.tag, published_at: newest.published_at, c_api_version: newest.c_api_version }
+    const newest = manifest.releases[0]
+    return newest
+      ? {
+          tag: newest.tag,
+          published_at: newest.published_at,
+          c_api_version: newest.c_api_version,
+          min_core_version: newest.min_core_version,
+        }
+      : null
   },
   hostChoice: async (ctx, manifest) =>
     foundryLocalHostChoice(ctx.hostPlatform as FoundryLocalHostPlatform, manifest?.releases[0] ?? null),
@@ -359,13 +387,21 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
       : []
   },
   prepare: (staging, ctx) => prepareFoundryLocalTree(staging, ctx.platform),
-  async probe(staging, ctx) {
+  async probe(staging, ctx, _backendId, release) {
     if (!ctx.hostProbe)
       throw new AtomicCoreError(
         'ENGINE_INSTALL_FAILED',
         'This core has no Foundry Local host to check the build with.'
       )
-    await ctx.hostProbe(staging)
+    const facts = await ctx.hostProbe(staging)
+    const version = facts?.libraryVersion?.trim().match(/^v?(\d+\.\d+\.\d+)(?:$|[+\s-])/u)?.[1]
+    if (!release || version !== release.tag.replace(/^v/, '') || facts?.cApiVersion !== release.c_api_version)
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        'The Foundry Local library version or C API does not match the selected release.',
+        `Expected ${release?.tag} / C API ${release?.c_api_version}; loaded ${facts?.libraryVersion ?? 'unknown'} / C API ${facts?.cApiVersion ?? 'unknown'}.`
+      )
+    return facts
   },
   record: (staging, { abi: _abi, probe: _probe, ...info }) => writeFoundryLocalInstallRecord(staging, info),
   async builds(ctx) {
@@ -377,14 +413,15 @@ const foundryLocal: EngineDescriptor<FoundryLocalManifest> = {
       installed_at_ms: record.installedAtMs,
       published_at: record.publishedAt,
       c_api_version: record.cApiVersion,
+      ...(record.minCoreVersion ? { min_core_version: record.minCoreVersion } : {}),
     }))
   },
   /** The newest by `published_at` among the builds whose C API this core's host binds (design D2). */
-  active: (builds) =>
+  active: (builds, ctx) =>
     newest(
       'foundry-local',
       builds.filter(
-        (build) => build.c_api_version != null && FOUNDRY_LOCAL_C_API_VERSIONS.includes(build.c_api_version)
+        (build) => ctx && foundryLocalBuildCompatible(ctx.hostPlatform as FoundryLocalHostPlatform, build)
       )
     ),
 }

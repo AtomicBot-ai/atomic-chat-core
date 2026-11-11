@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   foundryLocalHostChoice,
+  foundryLocalBuildCompatible,
   foundryLocalHostPlatform,
   liteRtLmHostChoice,
   liteRtLmHostPlatform,
@@ -620,8 +621,14 @@ describe('foundryLocalHostPlatform', () => {
   })
 
   it('takes Linux x64 and arm64 with glibc 2.28 or newer, and nothing without glibc', () => {
-    expect(host({ arch: 'x64', glibcVersion: '2.28' })).toEqual({ platform: 'linux-x64' })
-    expect(host({ arch: 'arm64', glibcVersion: '2.43' })).toEqual({ platform: 'linux-arm64' })
+    expect(host({ arch: 'x64', glibcVersion: '2.28' })).toEqual({
+      platform: 'linux-x64',
+      glibcVersion: '2.28',
+    })
+    expect(host({ arch: 'arm64', glibcVersion: '2.43' })).toEqual({
+      platform: 'linux-arm64',
+      glibcVersion: '2.43',
+    })
     expect(host({ glibcVersion: '2.27' })).toEqual({
       platform: null,
       reason: expect.stringMatching(/glibc 2\.28/),
@@ -754,5 +761,46 @@ describe('geniexHostChoice (change add-geniex-runtime, task 4.4)', () => {
       backend_id: null,
       reason: 'no',
     })
+  })
+})
+
+describe('foundryLocalBuildCompatible', () => {
+  it('rejects a local build requiring a newer core without a manifest or network', () => {
+    expect(
+      foundryLocalBuildCompatible(
+        { platform: 'win-x64' },
+        {
+          tag: 'v2.4.0',
+          backend_id: 'win-x64',
+          c_api_version: 3,
+          min_core_version: '99.0.0',
+        }
+      )
+    ).toBe(false)
+  })
+
+  it.each([
+    ['linux-arm64', '2.31', 'v2.1.0', 2, true],
+    ['linux-arm64', '2.31', 'v2.4.0', 3, false],
+    ['linux-arm64', '2.34', 'v2.4.0', 3, true],
+    ['linux-arm64', undefined, 'v2.4.0', 3, false],
+    ['linux-x64', '2.28', 'v2.4.0', 3, true],
+    ['linux-x64', '2.28', 'v2.4.0', 99, false],
+  ] as const)('%s glibc %s / %s API %s compatible: %s', (platform, glibcVersion, tag, api, expected) => {
+    expect(
+      foundryLocalBuildCompatible(
+        { platform, ...(glibcVersion ? { glibcVersion } : {}) },
+        {
+          tag,
+          backend_id: platform,
+          c_api_version: api,
+        }
+      )
+    ).toBe(expected)
+  })
+  it('rejects a different platform and an unsupported host even for an installed library', () => {
+    const build = { tag: 'v2.1.0', backend_id: 'win-x64', c_api_version: 2 }
+    expect(foundryLocalBuildCompatible({ platform: 'macos-arm64' }, build)).toBe(false)
+    expect(foundryLocalBuildCompatible({ platform: null, reason: 'unsupported' }, build)).toBe(false)
   })
 })

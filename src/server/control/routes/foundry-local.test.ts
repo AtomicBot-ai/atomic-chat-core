@@ -1,3 +1,4 @@
+import { foundryLocalVerdict, parseFoundryLocalCheckRequest } from '../../../runtime/foundry-local/index.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AtomicCoreError } from '../../../contracts/index.js'
 import type { FoundryLocalAccelerators, FoundryLocalPrepareRequest } from '../../../contracts/index.js'
@@ -94,6 +95,38 @@ describe('foundry-local routes (task 6.4)', () => {
 })
 
 describe('POST /models/foundry-local/check (task 6.5)', () => {
+  it('accepts a minimum version, returns update-required, and rejects an invalid minimum over HTTP', async () => {
+    h = await start({
+      nativeModelChecks: {
+        'foundry-local': async (body) =>
+          foundryLocalVerdict(
+            {
+              platform: 'linux',
+              arch: 'x64',
+              installed: true,
+              runtimeVersion: '2.1.0',
+              accelerators: [],
+              npu: false,
+            },
+            parseFoundryLocalCheckRequest(body)
+          ),
+      },
+    })
+    const post = (body: unknown) =>
+      h!.get('/atomic/v1/models/foundry-local/check', { method: 'POST', body: JSON.stringify(body) })
+    const cpu = { execution_provider: 'cpu', device: 'cpu' }
+    expect(await (await post(cpu)).json()).toMatchObject({ verdict: 'ok' })
+    const result = await post({ ...cpu, min_runtime_version: '2.4.0' })
+    expect(result.status).toBe(200)
+    expect(await result.json()).toMatchObject({
+      verdict: 'engine-update-required',
+      reason: expect.stringMatching(/2.1.0.*2.4.0/),
+    })
+    const bad = await post({ ...cpu, min_runtime_version: '2.4' })
+    expect(bad.status).toBe(400)
+    expect(await bad.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
+  })
+
   it('answers from the native check table, after the managed one has no entry for the provider', async () => {
     const seen: unknown[] = []
     h = await start({

@@ -55,7 +55,25 @@ describe('foundryLocalVerdict (task 6.5)', () => {
       'gpu',
       'platform-unsupported',
     ],
-    ['CUDA on Linux arm64', { platform: 'linux', arch: 'arm64' }, 'cuda', 'gpu', 'platform-unsupported'],
+    [
+      'CUDA on Linux ARM64 needs Foundry 2.4.0',
+      { platform: 'linux', arch: 'arm64', runtimeVersion: '2.1.0' },
+      'cuda',
+      'gpu',
+      'engine-update-required',
+    ],
+    [
+      'CUDA on Linux ARM64 can use the prepared Foundry 2.4.0 provider',
+      {
+        platform: 'linux',
+        arch: 'arm64',
+        runtimeVersion: '2.4.0',
+        accelerators: [ep('CUDAExecutionProvider', true)],
+      },
+      'cuda',
+      'gpu',
+      'ok',
+    ],
     [
       'an accelerator this core does not know (TensorRT-RTX)',
       {},
@@ -101,6 +119,41 @@ describe('parseFoundryLocalCheckRequest', () => {
       { execution_provider: 'cpu', device: 'cpu', extra: 1 },
     ])
       expect(() => parseFoundryLocalCheckRequest(bad), JSON.stringify(bad)).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' })
+      )
+  })
+})
+
+describe('Foundry minimum runtime version', () => {
+  const cpu = { execution_provider: 'cpu', device: 'cpu', min_runtime_version: '2.4.0' }
+  it.each([
+    ['2.1.0', 'engine-update-required'],
+    ['2.4.0', 'ok'],
+    ['2.10.0', 'ok'],
+    ['2.3.99', 'engine-update-required'],
+  ] as const)('compares runtime %s numerically: %s', (runtimeVersion, verdict) => {
+    const result = foundryLocalVerdict({ ...WINDOWS_WITH_NPU, runtimeVersion }, cpu)
+    expect(result.verdict).toBe(verdict)
+    if (verdict === 'engine-update-required') {
+      expect(result.reason).toContain(runtimeVersion)
+      expect(result.reason).toContain('2.4.0')
+    }
+  })
+  it('keeps missing-engine precedence and treats zero as no extra minimum', () => {
+    expect(foundryLocalVerdict({ ...WINDOWS_WITH_NPU, installed: false }, cpu).verdict).toBe(
+      'engine-not-installed'
+    )
+    expect(
+      foundryLocalVerdict(
+        { ...WINDOWS_WITH_NPU, runtimeVersion: '2.1.0' },
+        { ...cpu, min_runtime_version: '0.0.0' }
+      ).verdict
+    ).toBe('ok')
+  })
+  it('parses an optional valid minimum and rejects invalid direct requests', () => {
+    expect(parseFoundryLocalCheckRequest(cpu)).toEqual(cpu)
+    for (const value of [null, 2.4, '', '2.4', 'v2.4.0', '2.4.0-beta', ' 2.4.0 '])
+      expect(() => parseFoundryLocalCheckRequest({ ...cpu, min_runtime_version: value })).toThrow(
         expect.objectContaining({ code: 'INVALID_ARGUMENT' })
       )
   })

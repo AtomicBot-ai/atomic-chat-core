@@ -111,6 +111,30 @@ describe('libraryDir', () => {
 })
 
 describe('runFoundryHost prepare', () => {
+  it('awaits asynchronous EP registration and enables downloads only for preparation', async () => {
+    let registered = false
+    const fake = fakeLibrary({
+      discoverableEps: () => [{ name: 'WebGpuExecutionProvider', registered }],
+      downloadAndRegisterEps: async () => {
+        await Promise.resolve()
+        registered = true
+      },
+    })
+    const out = io()
+    expect(
+      await runFoundryHost(['prepare', ...COMMON, 'WebGpuExecutionProvider'], {
+        ...out,
+        loadLibrary: async () => fake.library,
+        readLogTail: async () => '',
+      })
+    ).toBe(0)
+    expect(fake.configs[0]?.allowEpDownloads).toBe(true)
+    expect(JSON.parse(out.out.at(-1)!)).toEqual({
+      done: true,
+      accelerators: [{ name: 'WebGpuExecutionProvider', prepared: true }],
+    })
+  })
+
   /** A library whose CUDA download fails half way, as on a host without CUDA 12 (rulings S1, finding 11). */
   function partlyFailing() {
     const registered = new Set<string>()
@@ -276,6 +300,17 @@ describe('runFoundryHost prepare', () => {
 })
 
 describe('failureReason', () => {
+  it('explains a missing Windows CUDA dependency while preserving the native loader detail', () => {
+    const log = "[2026-11-10] [warning] EP: failed to load 'C:\\cuda-ep\\onnxruntime-genai-cuda.dll' (126)"
+    const reason = failureReason(log, 'CUDAExecutionProvider')
+    expect(failureReason(log, 'CUDAExecutionProvider', 13)).toContain('CUDA 13')
+    expect(reason).toContain('CUDA 12')
+    expect(reason).toContain('cuDNN 9')
+    expect(reason).toContain('126')
+    expect(reason).toContain('PATH')
+    expect(failureReason(log, 'OpenVINOExecutionProvider')).toBeNull()
+  })
+
   it('finds the cause the library logged, by the accelerator or its family, past the generic summary', () => {
     const linux = [
       "[2026-10-15 16:32:51.303] [warning] EP: failed to load '/x/cuda-ep/bin/libonnxruntime-genai-cuda.so' (libcublasLt.so.12: cannot open shared object file: No such file or directory)",
@@ -331,6 +366,42 @@ describe('logTailReader', () => {
 })
 
 describe('runFoundryHost serve', () => {
+  it('awaits asynchronous EP registration before loading and forbids EP downloads on serve', async () => {
+    let registered = false
+    let loaded = false
+    const fake = fakeLibrary({
+      discoverableEps: () => [{ name: 'WebGpuExecutionProvider', registered }],
+      downloadAndRegisterEps: async () => {
+        await Promise.resolve()
+        registered = true
+      },
+      registerLocalModel: () => ({
+        load: () => {
+          expect(registered).toBe(true)
+          loaded = true
+        },
+        unload: () => {},
+        executionProvider: () => 'WebGPUExecutionProvider',
+      }),
+      webServiceStart: () => ['http://127.0.0.1:41987'],
+    })
+    const out = io()
+    expect(
+      await runFoundryHost(SERVE, {
+        ...out,
+        loadLibrary: async () => fake.library,
+        watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+        removeDir: async () => {},
+      })
+    ).toBe(0)
+    expect(loaded).toBe(true)
+    expect(fake.configs[0]?.allowEpDownloads).toBe(false)
+    expect(JSON.parse(out.out[0]!)).toMatchObject({
+      ready: true,
+      execution_provider: 'WebGPUExecutionProvider',
+    })
+  })
+
   const SERVE = [
     'serve',
     ...COMMON,

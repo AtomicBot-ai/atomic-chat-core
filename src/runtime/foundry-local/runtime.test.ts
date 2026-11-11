@@ -7,6 +7,7 @@ import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { CoreEvents } from '../../contracts/index.js'
 import { ModelRegistry, serializeModelYml } from '../../models/index.js'
+import { spawnAndAwaitReady } from '../shared/index.js'
 import type { GpuClaimHook } from '../shared/index.js'
 import { FoundryLocalRuntime } from './runtime.js'
 import type { FoundryLocalRuntimeOptions } from './runtime.js'
@@ -91,6 +92,51 @@ const chat = (
   })
 
 describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
+  it('checks preparation against the exact build selected for load', async () => {
+    await variant('gpu-build-scope', { execution_provider: 'webgpu', device: 'gpu' })
+    let checked: string | undefined
+    const { rt } = runtime({
+      preparedAccelerators: async (build) => {
+        checked = build
+        return []
+      },
+    })
+    await expect(rt.load('gpu-build-scope')).rejects.toMatchObject({
+      code: 'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED',
+    })
+    expect(checked).toBe(BUILD)
+    expect(await starts()).toEqual([])
+  })
+
+  it('uses the Linux ARM64 CUDA cache only after the active runtime reaches 2.4.0', async () => {
+    await variant('arm-cuda-gpu', { execution_provider: 'cuda', device: 'gpu' })
+    let build = '/build/v2.1.0/linux-arm64'
+    const cached = vi.fn(async () => '/private/cuda')
+    const spawn: typeof spawnAndAwaitReady = (spec, options) => {
+      expect(spec.env?.['LD_LIBRARY_PATH']).toBe('/private/cuda:/driver/lib')
+      return spawnAndAwaitReady(spec, options)
+    }
+    const { rt } = runtime({
+      platform: 'linux',
+      arch: 'arm64',
+      resolveBuild: async () => build,
+      preparedAccelerators: async () => ['CUDAExecutionProvider'],
+      cuda: { cached },
+      baseEnv: { ...process.env, LD_LIBRARY_PATH: '/driver/lib' },
+      spawn,
+    })
+    await expect(rt.load('arm-cuda-gpu')).rejects.toMatchObject({ code: 'ENGINE_UPDATE_REQUIRED' })
+    expect(cached).not.toHaveBeenCalled()
+    build = '/build/v2.4.0/linux-arm64'
+    const session = await rt.load('arm-cuda-gpu')
+    try {
+      expect(session.model_id).toBe('arm-cuda-gpu')
+      expect(cached).toHaveBeenCalledExactlyOnceWith(build)
+    } finally {
+      await rt.unload('arm-cuda-gpu')
+    }
+  })
+
   it('starts the host for a variant, registered explicitly, behind a gateway that names the model as core does', async () => {
     await variant('qwen3-0.6b-generic-gpu', {
       execution_provider: 'webgpu',

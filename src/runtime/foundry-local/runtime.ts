@@ -13,7 +13,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { compareVersions } from '../../backend/index.js'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelYmlFoundryLocal, SessionInfo, UnloadResult } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
@@ -43,6 +44,8 @@ import type { BackendOutputSink } from '../shared/index.js'
 import { executionProvider } from './host/execution-providers.js'
 import { LOCAL_CATALOG_BASE_PATH } from './host/run.js'
 import type { FoundryHostCommand } from './host-process.js'
+import { withCudaRuntime } from './cuda/index.js'
+import type { CudaRuntimeStore } from './cuda/index.js'
 import { readFoundryLocalBlock } from './model-yml.js'
 
 /** The settings' `timeout` default, in seconds: registering, building the ORT session, compiling (OpenVINO). */
@@ -67,8 +70,17 @@ export function variantRunsOn(
   if (ep === 'cpu') return true
   if (platform === 'win32') return true
   if (platform === 'darwin') return ep === 'webgpu'
-  if (platform === 'linux') return arch === 'x64' && ep === 'cuda'
+  if (platform === 'linux') return (arch === 'x64' || arch === 'arm64') && ep === 'cuda'
   return false
+}
+
+/** Linux ARM64 first supports the CUDA variant in Foundry Local 2.4. */
+export function minimumFoundryVariantRuntime(
+  platform: NodeJS.Platform,
+  arch: string,
+  ep: ModelYmlFoundryLocal['execution_provider']
+): string | undefined {
+  return platform === 'linux' && arch === 'arm64' && ep === 'cuda' ? '2.4.0' : undefined
 }
 
 /** The registration id the host serves the model under: `<name>:<version>`, one segment. */
@@ -93,7 +105,7 @@ export interface FoundryLocalRuntimeOptions {
   /** The active build's directory (engine-builds), or nothing installed. */
   resolveBuild: () => Promise<string | undefined>
   /** The accelerators core recorded as prepared (`accelerators.json`, task 6.4). */
-  preparedAccelerators: () => Promise<readonly string[]>
+  preparedAccelerators: (build: string) => Promise<readonly string[]>
   /** The same live trusted-hosts list `:1337` and the managed gateways use. */
   trustedHosts: string[]
   /** The `foundry-local` provider settings, re-read per load. */
@@ -101,6 +113,7 @@ export interface FoundryLocalRuntimeOptions {
   journal?: ProcessJournal | undefined
   emit?: EmitFn
   baseEnv?: NodeJS.ProcessEnv
+  cuda?: Pick<CudaRuntimeStore, 'cached'>
   backendOutput?: BackendOutputSink
   log?: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
   /** GPU residency (spec `gpu-residency`): CUDA and WebGPU variants hold every card. */
@@ -234,16 +247,27 @@ export class FoundryLocalRuntime implements LocalRuntime {
         'FOUNDRY_LOCAL_VARIANT_UNSUPPORTED',
         `This ${block.execution_provider.toUpperCase()} variant does not run on ${this.options.platform} ${this.options.arch}.`
       )
-    if (ep.register && !(await this.options.preparedAccelerators()).includes(ep.register))
-      throw new AtomicCoreError(
-        'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED',
-        `${ep.register} is not prepared; prepare it on the Foundry Local page before loading this model.`
-      )
     const build = await this.options.resolveBuild()
     if (!build)
       throw new AtomicCoreError(
         'BINARY_NOT_FOUND',
         'Foundry Local is not installed; install it before loading a model.'
+      )
+    const minimum = minimumFoundryVariantRuntime(
+      this.options.platform,
+      this.options.arch,
+      block.execution_provider
+    )
+    const version = basename(dirname(build)).replace(/^v/, '')
+    if (minimum && compareVersions(version, minimum) < 0)
+      throw new AtomicCoreError(
+        'ENGINE_UPDATE_REQUIRED',
+        `Foundry Local ${version} is active; CUDA on Linux ARM64 requires ${minimum} or newer.`
+      )
+    if (ep.register && !(await this.options.preparedAccelerators(build)).includes(ep.register))
+      throw new AtomicCoreError(
+        'FOUNDRY_LOCAL_ACCELERATOR_NOT_PREPARED',
+        `${ep.register} is not prepared; prepare it on the Foundry Local page before loading this model.`
       )
     const { modelPath } = registry.resolvePaths(yml)
     const settings = await this.options.readSettings()
@@ -332,8 +356,15 @@ export class FoundryLocalRuntime implements LocalRuntime {
       'info',
       `starting the Foundry Local host for ${modelId} (${block.execution_provider}) from ${build}`
     )
+    const cudaDir = block.execution_provider === 'cuda' ? await this.options.cuda?.cached(build) : undefined
     const started = await (this.options.spawn ?? spawnAndAwaitReady)(
-      { exe, args, env, stdin: 'pipe', platform: this.options.platform },
+      {
+        exe,
+        args,
+        env: cudaDir ? withCudaRuntime(env, build, cudaDir) : env,
+        stdin: 'pipe',
+        platform: this.options.platform,
+      },
       {
         timeoutMs: timeoutSecs * 1000,
         signal: this.table.signal,

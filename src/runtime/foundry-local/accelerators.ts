@@ -1,6 +1,7 @@
 /**
  * Foundry Local's accelerators (openspec change `add-foundry-local`, task 6.4, design D3). The
- * library finds and downloads them itself; core only decides when: a `probe` of the active build
+ * library discovers and downloads its provider bundles; core stages external CUDA dependencies and
+ * decides when to run a `probe` of the active build
  * when a client first asks or the active build changed, and a `prepare` when a client orders it — one
  * at a time, each step published as `foundry-local:accelerators`.
  *
@@ -20,7 +21,9 @@ import type {
   FoundryLocalPrepareResult,
 } from '../../contracts/index.js'
 import { runFoundryHostPrepare, runFoundryHostProbe } from './host-process.js'
-import type { FoundryHostCommand } from './host-process.js'
+import type { FoundryHostCommand, FoundryHostPrepareSummary } from './host-process.js'
+import { FOUNDRY_CUDA_EXECUTION_PROVIDER, withCudaRuntime } from './cuda/index.js'
+import type { CudaRuntimeStore } from './cuda/index.js'
 
 export const ACCELERATORS_FILE = 'accelerators.json'
 
@@ -41,6 +44,7 @@ export interface FoundryLocalAcceleratorDeps {
   emit: (name: 'foundry-local:accelerators', payload: CoreEvents['foundry-local:accelerators']) => void
   env?: NodeJS.ProcessEnv
   now?: () => number
+  cuda?: Pick<CudaRuntimeStore, 'supports' | 'prepare'>
 }
 
 const EMPTY: AcceleratorsRecord = { prepared: [], failures: {}, updated_at: 0 }
@@ -55,13 +59,14 @@ export class FoundryLocalAcceleratorService {
   }
 
   /** The names core recorded as prepared: what a load checks before it starts a host. */
-  async prepared(): Promise<string[]> {
-    return [...(await this.read()).prepared]
+  async prepared(build?: string): Promise<string[]> {
+    const selected = build ?? (await this.deps.resolveBuild())
+    return selected ? [...(await this.read(selected)).prepared] : []
   }
 
   /** The last probe of the active build, with core's record of what is prepared; `force` probes again. */
-  async list(options: { force?: boolean } = {}): Promise<FoundryLocalAccelerators> {
-    const build = await this.deps.resolveBuild()
+  async list(options: { force?: boolean; build?: string } = {}): Promise<FoundryLocalAccelerators> {
+    const build = options.build ?? (await this.deps.resolveBuild())
     if (!build)
       return {
         installed: false,
@@ -72,7 +77,7 @@ export class FoundryLocalAcceleratorService {
         accelerators: [],
         error: null,
       }
-    const record = await this.read()
+    const record = await this.read(build)
     if (!options.force && this.cache?.build === build) return this.withRecord(this.cache.answer, record)
     const name = `${basename(dirname(build))}/${basename(build)}`
     let answer: FoundryLocalAccelerators
@@ -133,14 +138,8 @@ export class FoundryLocalAcceleratorService {
           'BINARY_NOT_FOUND',
           'Foundry Local is not installed; install it before preparing accelerators.'
         )
-      const summary = await runFoundryHostPrepare(
-        this.deps.hostCommand,
-        { libDir: build, appDataDir: this.deps.runtimeDir, logsDir: this.deps.logsDir },
-        request.accelerators ?? [],
-        (step) => this.deps.emit('foundry-local:accelerators', step),
-        this.deps.env ? { env: this.deps.env } : {}
-      )
-      const record = await this.read()
+      const summary = await this.prepareHost(build, request.accelerators ?? [])
+      const record = await this.read(build)
       const prepared = new Set(record.prepared)
       const failures = { ...record.failures }
       for (const outcome of summary.accelerators) {
@@ -152,12 +151,64 @@ export class FoundryLocalAcceleratorService {
           failures[outcome.name] = outcome.reason ?? 'Foundry Local did not register it.'
         }
       }
-      await this.write({ prepared: [...prepared], failures, updated_at: this.now() })
+      await this.write(build, { prepared: [...prepared], failures, updated_at: this.now() })
       // The library state changed: the next request probes again (spec: after install, update, prepare).
       this.cache = null
       return { accelerators: summary.accelerators }
     } finally {
       this.preparing = false
+    }
+  }
+
+  private async prepareHost(build: string, requested: string[]): Promise<FoundryHostPrepareSummary> {
+    const target = { libDir: build, appDataDir: this.deps.runtimeDir, logsDir: this.deps.logsDir }
+    const env = this.deps.env ?? process.env
+    const emit = (step: CoreEvents['foundry-local:accelerators']) =>
+      this.deps.emit('foundry-local:accelerators', step)
+    const run = (names: readonly string[]) =>
+      runFoundryHostPrepare(this.deps.hostCommand, target, names, emit, { env })
+    const cuda = this.deps.cuda
+    const accelerator = FOUNDRY_CUDA_EXECUTION_PROVIDER
+    if (!cuda?.supports(build) || (requested.length && !requested.includes(accelerator)))
+      return run(requested)
+    const offered = (await this.list({ build })).accelerators.map(({ name }) => name)
+    if (!offered.includes(accelerator)) return run(requested)
+
+    const names = requested.length ? requested : offered
+    const otherNames = names.filter((name) => name !== accelerator)
+    // Let the other accelerators finish before a potentially long CUDA download.
+    const others = otherNames.length ? (await run(otherNames)).accelerators : []
+    emit({ accelerator, stage: 'started', fraction: 0 })
+    let outcomes: FoundryHostPrepareSummary['accelerators']
+    try {
+      const dir = await cuda.prepare(build, (fraction) =>
+        emit({ accelerator, stage: 'downloading', fraction: fraction / 2 })
+      )
+      const result = await runFoundryHostPrepare(
+        this.deps.hostCommand,
+        target,
+        [accelerator],
+        (step) => {
+          if (step.stage === 'started') return
+          emit(
+            step.stage === 'downloading' && step.fraction !== null
+              ? { ...step, fraction: 0.5 + step.fraction / 2 }
+              : step
+          )
+        },
+        { env: dir ? withCudaRuntime(env, build, dir) : env }
+      )
+      outcomes = result.accelerators
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      emit({ accelerator, stage: 'failed', fraction: null, reason })
+      outcomes = [{ name: accelerator, prepared: false, reason }]
+    }
+    let otherIndex = 0
+    return {
+      accelerators: names.flatMap((name) =>
+        name === accelerator ? outcomes : others.slice(otherIndex, ++otherIndex)
+      ),
     }
   }
 
@@ -172,11 +223,17 @@ export class FoundryLocalAcceleratorService {
     }
   }
 
-  private async read(): Promise<AcceleratorsRecord> {
+  /** 2.1.0 keeps its legacy record readable by an older core after rollback. */
+  private recordPath(build: string): string {
+    const tag = basename(dirname(build))
+    return tag === 'v2.1.0'
+      ? join(this.deps.runtimeDir, ACCELERATORS_FILE)
+      : join(this.deps.runtimeDir, tag, basename(build), ACCELERATORS_FILE)
+  }
+
+  private async read(build: string): Promise<AcceleratorsRecord> {
     try {
-      const raw = JSON.parse(
-        await readFile(join(this.deps.runtimeDir, ACCELERATORS_FILE), 'utf8')
-      ) as Partial<AcceleratorsRecord>
+      const raw = JSON.parse(await readFile(this.recordPath(build), 'utf8')) as Partial<AcceleratorsRecord>
       return {
         prepared: Array.isArray(raw.prepared)
           ? raw.prepared.filter((name): name is string => typeof name === 'string')
@@ -193,9 +250,9 @@ export class FoundryLocalAcceleratorService {
   }
 
   /** Write-then-rename: a crash mid-write leaves the previous record, never half of one. */
-  private async write(record: AcceleratorsRecord): Promise<void> {
-    await mkdir(this.deps.runtimeDir, { recursive: true })
-    const path = join(this.deps.runtimeDir, ACCELERATORS_FILE)
+  private async write(build: string, record: AcceleratorsRecord): Promise<void> {
+    const path = this.recordPath(build)
+    await mkdir(dirname(path), { recursive: true })
     const temporary = `${path}.tmp-${process.pid}`
     await writeFile(temporary, JSON.stringify(record, null, 2))
     await rename(temporary, path)

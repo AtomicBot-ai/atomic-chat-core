@@ -41,8 +41,8 @@ if (argv[0] === 'probe' || argv[0] === 'prepare') {
   if (argv[0] === 'probe') {
     console.log(
       JSON.stringify({
-        c_api_version: 2,
-        version: '2.1.0',
+        c_api_version: arg('--lib')?.includes('v2.4.0') ? 3 : 2,
+        version: arg('--lib')?.includes('v2.4.0') ? '2.4.0' : '2.1.0',
         accelerators: offered.map((name) => ({
           name,
           execution_provider: short(name),

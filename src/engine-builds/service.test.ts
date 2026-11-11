@@ -168,7 +168,7 @@ function harness(
     resourcesDir?: string
     platform?: NodeJS.Platform
     foundryLocalHost?: FoundryLocalHostPlatform
-    foundryProbe?: (dir: string) => Promise<void>
+    foundryProbe?: (dir: string) => Promise<EngineProbeFacts | void>
     liteRtLmHost?: LiteRtLmHostPlatform
     liteRtLmProbe?: (dir: string) => Promise<void>
     geniexHost?: GeniexHostPlatform
@@ -262,10 +262,18 @@ function harness(
       'geniex': opts.geniexHost ?? { platform: 'win-arm64', chip: 'x-elite' },
     },
     hostProbes: {
+      ...(opts.foundryProbe
+        ? {
+            'foundry-local': async (dir: string) => {
+              const facts = await opts.foundryProbe!(dir)
+              const tag = dir.split(/[\\/]/).at(-2)!.replace(/^v/, '')
+              return facts ?? { libraryVersion: tag, cApiVersion: tag === '2.4.0' ? 3 : 2, devices: [] }
+            },
+          }
+        : {}),
       ...(opts.geniexProbe ? { geniex: opts.geniexProbe } : {}),
     },
     probe: {
-      ...(opts.foundryProbe ? { 'foundry-local': opts.foundryProbe } : {}),
       ...(opts.liteRtLmProbe ? { 'litert-lm': opts.liteRtLmProbe } : {}),
     },
     hardware: async () => opts.facts ?? LINUX_VULKAN,
@@ -1102,6 +1110,86 @@ describe.skipIf(!POSIX)('EngineBuildsService.remove (task 3.4)', () => {
 })
 
 describe.skipIf(!POSIX)('Foundry Local builds (task 4.5)', () => {
+  it.each([
+    { libraryVersion: '2.1.0', cApiVersion: 3, devices: [] },
+    { libraryVersion: '2.4.0', cApiVersion: 2, devices: [] },
+    { libraryVersion: null, cApiVersion: 3, devices: [] },
+  ])(
+    'rejects a Foundry staging identity mismatch %j before activating or stopping the old build',
+    async (facts) => {
+      const h = harness({ foundryProbe: async () => facts })
+      h.setFoundry(
+        foundryManifest([
+          {
+            tag: 'v2.4.0',
+            published_at: '2026-11-09T00:00:00Z',
+            c_api_version: 3,
+            assets: serve('v2.4.0', {
+              'linux-x64': {
+                name: 'foundry-local-linux-x64.tgz',
+                body: await foundryArchive('mismatch', FOUNDRY_LINUX),
+              },
+            }),
+          },
+        ])
+      )
+      await expect(h.service.install('foundry-local', { task_id: 'mismatch' })).rejects.toMatchObject({
+        code: 'ENGINE_INSTALL_FAILED',
+      })
+      expect(h.hosts['foundry-local'].calls).toEqual([])
+      expect(await ls(join(FOUNDRY_ROOT(), 'v2.4.0'))).toEqual([])
+    }
+  )
+
+  it.each([
+    ['linux-arm64', '2.31', 'v2.1.0'],
+    ['linux-arm64', '2.34', 'v2.4.0'],
+    ['linux-x64', '2.28', 'v2.4.0'],
+  ] as const)(
+    'uses the same compatible Foundry release for %s glibc %s online and offline',
+    async (platform, glibcVersion, expected) => {
+      const h = harness({ foundryLocalHost: { platform, glibcVersion }, foundryProbe: async () => {} })
+      const releases = []
+      for (const [tag, date, api] of [
+        ['v2.1.0', '2026-09-30T00:00:00Z', 2],
+        ['v2.4.0', '2026-11-09T00:00:00Z', 3],
+      ] as const) {
+        releases.push({
+          tag,
+          published_at: date,
+          c_api_version: api,
+          assets: serve(tag, {
+            [platform]: {
+              name: `foundry-local-${platform}.tgz`,
+              body: await foundryArchive(tag, FOUNDRY_LINUX),
+            },
+          }),
+        })
+      }
+      h.setFoundry(foundryManifest([releases[0]!]))
+      await h.service.install('foundry-local', { task_id: 'old-compatible' })
+      h.setFoundry(foundryManifest(releases))
+      expect((await h.service.catalog('foundry-local')).manifest?.tag).toBe(expected)
+      const result = await h.service.install('foundry-local', { task_id: 'compatible' })
+      expect(result.build.tag).toBe(expected)
+      const record = JSON.parse(
+        await readFile(join(FOUNDRY_ROOT(), expected, platform, 'install.json'), 'utf8')
+      )
+      expect(record.minCoreVersion).toBe('0.1.0')
+      expect(await h.service.checkUpdates('foundry-local')).toMatchObject({ update_needed: false })
+      const offline = harness({ foundryLocalHost: { platform, glibcVersion } })
+      expect(await offline.service.activeDir('foundry-local')).toBe(join(FOUNDRY_ROOT(), expected, platform))
+      if (platform === 'linux-arm64') {
+        const oldHost = harness({ foundryLocalHost: { platform, glibcVersion: '2.31' } })
+        expect(await oldHost.service.activeDir('foundry-local')).toBe(
+          join(FOUNDRY_ROOT(), 'v2.1.0', platform)
+        )
+      }
+      const unsupported = harness({ foundryLocalHost: { platform: null, reason: 'unsupported' } })
+      expect(await unsupported.service.activeDir('foundry-local')).toBeUndefined()
+    }
+  )
+
   it('installs the host archive: debug symbols gone, the Linux soname added, probed in staging, then activated', async () => {
     const probed: string[] = []
     const h = harness({

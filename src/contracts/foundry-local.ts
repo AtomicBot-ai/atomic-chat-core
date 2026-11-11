@@ -63,6 +63,8 @@ export interface FoundryLocalAcceleratorsEvent {
 
 /** `POST /models/foundry-local/check`: the variant's accelerator and device, as conf and `model.yml` spell them. */
 export interface FoundryLocalCheckRequest {
+  /** Minimum runtime required by this model revision, X.Y.Z; absent: no version constraint. */
+  min_runtime_version?: string
   execution_provider: string
   device: string
 }
@@ -73,6 +75,7 @@ export const FOUNDRY_LOCAL_CHECK_VERDICTS = [
   'accelerator-unavailable',
   'platform-unsupported',
   'engine-not-installed',
+  'engine-update-required',
 ] as const
 export type FoundryLocalCheckVerdict = (typeof FOUNDRY_LOCAL_CHECK_VERDICTS)[number]
 

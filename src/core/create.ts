@@ -37,6 +37,7 @@ import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
 import { MlxRuntime } from '../runtime/mlx/index.js'
+import { CudaRuntimeStore } from '../runtime/foundry-local/cuda/index.js'
 import {
   FoundryLocalAcceleratorService,
   FoundryLocalRuntime,
@@ -436,6 +437,11 @@ export async function createAtomicCore(
     const geniexHostCmd = geniexHostCommand(env)
     const foundryLocalPaths = layout.provider('foundry-local')
     const foundryHost = foundryHostCommand(env)
+    const foundryCuda = new CudaRuntimeStore({
+      runtimeDir: foundryLocalPaths.runtimeDir as string,
+      platform,
+      fetch: options.fetch ?? fetch,
+    })
     // The provider itself (task 6.6): one foundry-host per model, where the platform rule holds. The
     // active build and the prepared accelerators are read per load, from services wired below.
     const foundryLocalRuntime: FoundryLocalRuntime | undefined =
@@ -449,14 +455,15 @@ export async function createAtomicCore(
             arch: foundryLocalArch,
             hostCommand: foundryHost,
             resolveBuild: (): Promise<string | undefined> => engineBuilds.activeDir('foundry-local'),
-            preparedAccelerators: async () =>
-              foundryLocalAccelerators ? foundryLocalAccelerators.prepared() : [],
+            preparedAccelerators: async (build) =>
+              foundryLocalAccelerators ? foundryLocalAccelerators.prepared(build) : [],
             trustedHosts: managedTrustedHosts,
             readSettings: async () => settings.get('foundry-local'),
             journal,
             emit: (name, payload) => emitter.emit(name, payload),
             claimGpu: gpuResidency.hook('foundry-local'),
             baseEnv: env,
+            cuda: foundryCuda,
             log: runtimeLog,
             ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
           })
@@ -898,7 +905,7 @@ export async function createAtomicCore(
       },
       hostProbes: {
         'foundry-local': async (libDir) => {
-          await runFoundryHostProbe(
+          const probe = await runFoundryHostProbe(
             foundryHost,
             {
               libDir,
@@ -907,6 +914,7 @@ export async function createAtomicCore(
             },
             { env }
           )
+          return { libraryVersion: probe.version ?? null, cApiVersion: probe.c_api_version, devices: [] }
         },
         'litert-lm': liteRtHostProber(liteRtHost, env),
         'geniex': geniexHostProber(geniexHostCmd, env),
@@ -984,6 +992,7 @@ export async function createAtomicCore(
             logsDir: foundryLocalPaths.logsDir as string,
             emit: (name, payload) => emitter.emit(name, payload),
             env,
+            cuda: foundryCuda,
           })
 
     // The managed container environment and the one Docker executor of this core (task 2.6). The
@@ -1240,13 +1249,17 @@ export async function createAtomicCore(
                 // Task 6.5: the platform, the active build, the last probe, the NPU — no network.
                 'foundry-local': async (body: unknown) => {
                   const request = parseFoundryLocalCheckRequest(body)
-                  const installed = (await engineBuilds.activeDir('foundry-local')) !== undefined
+                  const active = await engineBuilds.activeBuild('foundry-local')
+                  const installed = active !== undefined
                   return foundryLocalVerdict(
                     {
                       platform,
                       arch: foundryLocalArch,
                       installed,
-                      accelerators: installed ? (await foundryLocalAccelerators.list()).accelerators : [],
+                      ...(active ? { runtimeVersion: active.tag.replace(/^v/, '') } : {}),
+                      accelerators: active
+                        ? (await foundryLocalAccelerators.list({ build: active.dir })).accelerators
+                        : [],
                       npu: (await foundryLocalNpu()).present,
                     },
                     request
