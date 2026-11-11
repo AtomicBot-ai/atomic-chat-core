@@ -11,14 +11,17 @@ import type {
   FoundryLocalCheckResult,
   FoundryLocalExecutionProvider,
 } from '../../contracts/index.js'
+import { compareVersions } from '../../backend/index.js'
 import { executionProvider } from './host/execution-providers.js'
-import { variantRunsOn } from './runtime.js'
+import { minimumFoundryVariantRuntime, variantRunsOn } from './runtime.js'
 
 export interface FoundryLocalCheckFacts {
   platform: NodeJS.Platform
   arch: string
   /** A Foundry Local build is installed and active. */
   installed: boolean
+  /** The active runtime version, not the core npm version. */
+  runtimeVersion?: string
   /** The last probe's accelerators, with core's record of what is prepared. */
   accelerators: readonly FoundryLocalAccelerator[]
   /** An NPU on this machine (`probeNpu`); `null` when unknown — the probe's list decides then. */
@@ -51,6 +54,22 @@ export function foundryLocalVerdict(
       reason: 'Foundry Local is not installed on this computer.',
       accelerator,
     }
+  const platformMinimum = minimumFoundryVariantRuntime(facts.platform, facts.arch, short)
+  const requestedMinimum = request.min_runtime_version
+  const minimum =
+    requestedMinimum && (!platformMinimum || compareVersions(requestedMinimum, platformMinimum) > 0)
+      ? requestedMinimum
+      : platformMinimum
+  if (
+    minimum &&
+    minimum !== '0.0.0' &&
+    (!facts.runtimeVersion || compareVersions(facts.runtimeVersion, minimum) < 0)
+  )
+    return {
+      verdict: 'engine-update-required',
+      reason: `Foundry Local ${facts.runtimeVersion ?? 'unknown'} is active; this model requires ${minimum} or newer.`,
+      accelerator,
+    }
   if (accelerator === null) return { verdict: 'ok', reason: null, accelerator: null }
   if (request.device === 'npu' && facts.npu === false)
     return { verdict: 'accelerator-unavailable', reason: 'This computer has no NPU.', accelerator }
@@ -70,7 +89,7 @@ export function foundryLocalVerdict(
   return { verdict: 'ok', reason: null, accelerator }
 }
 
-/** The request body, strictly: the accelerator and the device as text, nothing else. */
+/** The request body, strictly: the accelerator, device and optional runtime minimum. */
 export function parseFoundryLocalCheckRequest(body: unknown): FoundryLocalCheckRequest {
   const invalid = (why: string): never => {
     throw new AtomicCoreError('INVALID_ARGUMENT', why)
@@ -78,11 +97,20 @@ export function parseFoundryLocalCheckRequest(body: unknown): FoundryLocalCheckR
   if (typeof body !== 'object' || body === null || Array.isArray(body))
     return invalid('The request body must be a JSON object.')
   const record = body as Record<string, unknown>
-  const extra = Object.keys(record).filter((key) => key !== 'execution_provider' && key !== 'device')
+  const extra = Object.keys(record).filter(
+    (key) => key !== 'execution_provider' && key !== 'device' && key !== 'min_runtime_version'
+  )
   if (extra.length > 0) invalid(`The request has fields this core does not know: ${extra.sort().join(', ')}.`)
   const { execution_provider: executionProvider, device } = record
   if (typeof executionProvider !== 'string' || executionProvider === '')
     invalid('execution_provider is required.')
   if (typeof device !== 'string' || device === '') invalid('device is required.')
-  return { execution_provider: executionProvider as string, device: device as string }
+  const minimum = record['min_runtime_version']
+  if (minimum !== undefined && (typeof minimum !== 'string' || !/^\d+\.\d+\.\d+$/.test(minimum)))
+    invalid('min_runtime_version must be a version in X.Y.Z format.')
+  return {
+    execution_provider: executionProvider as string,
+    device: device as string,
+    ...(typeof minimum === 'string' ? { min_runtime_version: minimum } : {}),
+  }
 }

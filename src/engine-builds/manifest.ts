@@ -37,7 +37,7 @@ import { CORE_VERSION } from '../version.js'
  * The `FOUNDRY_LOCAL_API_VERSION`s this core's `foundry-host` binds (design D1). A release built
  * against another one is not offered.
  */
-export const FOUNDRY_LOCAL_C_API_VERSIONS: readonly number[] = [2]
+export const FOUNDRY_LOCAL_C_API_VERSIONS: readonly number[] = [2, 3]
 
 /**
  * The `abi` numbers this core's `litert-host` binds (change `add-litert-lm-runtime`, design D2). The
@@ -144,6 +144,8 @@ export interface FoundryLocalAsset {
 }
 
 export interface FoundryLocalRelease {
+  /** Absent: Microsoft releases; atomic-conf: the fixed conf release namespace. */
+  distribution?: 'atomic-conf'
   /** The `microsoft/foundry-local` release tag, `v<major>.<minor>.<patch>`. */
   tag: string
   /** The order builds of this engine have. */
@@ -394,6 +396,7 @@ function parseFoundryLocalAsset(raw: unknown): FoundryLocalAsset | null {
 function parseFoundryLocalRelease(raw: unknown): FoundryLocalRelease | null {
   if (!isRecord(raw)) return null
   const { tag, published_at, min_core_version, c_api_version, notes_url } = raw
+  if (raw['distribution'] !== undefined && raw['distribution'] !== 'atomic-conf') return null
   if (typeof tag !== 'string' || !FOUNDRY_LOCAL_TAG_RE.test(tag)) return null
   if (!isDateTime(published_at)) return null
   if (typeof min_core_version !== 'string' || !SEMVER_RE.test(min_core_version)) return null
@@ -412,6 +415,7 @@ function parseFoundryLocalRelease(raw: unknown): FoundryLocalRelease | null {
     published_at,
     min_core_version,
     c_api_version,
+    ...(raw['distribution'] === 'atomic-conf' ? { distribution: 'atomic-conf' as const } : {}),
     ...(typeof notes_url === 'string' && /^https:\/\/\S+$/.test(notes_url) ? { notes_url } : {}),
     assets,
   }
@@ -643,11 +647,15 @@ export function foundryLocalAssetUrl(
   release: FoundryLocalRelease,
   asset: FoundryLocalAsset
 ): string {
-  return `https://github.com/${manifest.upstream_repo}/releases/download/${release.tag}/${asset.name}`
+  return release.distribution === 'atomic-conf'
+    ? `https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download/foundry-local-${release.tag}/${asset.name}`
+    : `https://github.com/${manifest.upstream_repo}/releases/download/${release.tag}/${asset.name}`
 }
 
 /** Which manifest: everything that differs between the engines. */
 export interface ManifestKind<T> {
+  /** A legacy disk document may omit fields the network parser deliberately drops. */
+  parseCached?: (data: unknown) => T
   label: string
   url: string
   urlEnv: string
@@ -695,6 +703,11 @@ export function manifestKinds(layout: DataLayout): {
       urlEnv: 'ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL',
       parse: (data) =>
         parseFoundryLocalManifest(data, {
+          coreVersion: CORE_VERSION,
+          cApiVersions: FOUNDRY_LOCAL_C_API_VERSIONS,
+        }),
+      parseCached: (data) =>
+        parseFoundryLocalManifest(isRecord(data) ? { schema_version: 1, ...data } : data, {
           coreVersion: CORE_VERSION,
           cApiVersions: FOUNDRY_LOCAL_C_API_VERSIONS,
         }),
@@ -866,7 +879,10 @@ export class EngineManifestSource<T> {
     try {
       const raw = JSON.parse(await (this.deps.readFile ?? defaultReadFile)(this.cachePath)) as unknown
       if (!isRecord(raw) || typeof raw['fetched_at'] !== 'number') return null
-      return { fetchedAt: raw['fetched_at'], manifest: this.kind.parse(raw['manifest']) }
+      return {
+        fetchedAt: raw['fetched_at'],
+        manifest: (this.kind.parseCached ?? this.kind.parse)(raw['manifest']),
+      }
     } catch {
       return null
     }

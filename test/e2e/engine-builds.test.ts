@@ -20,7 +20,7 @@ import qwen from '../fixtures/fastflowlm/qwen3-candidate.json' with { type: 'jso
 import { flmRelease } from '../helpers/fastflowlm-manifest.js'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { c as tarCreate } from 'tar'
@@ -323,6 +323,129 @@ const FOUNDRY_PLATFORMS = ['win-x64', 'win-arm64', 'macos-arm64', 'linux-x64', '
 const FOUNDRY_HOST = process.platform === 'win32' ? null : foundryLocalTestPlatform()
 
 describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)('Foundry Local builds through the core', () => {
+  it('migrates a loaded CPU variant only after staging passes and rolls back without rewriting model files', async () => {
+    const folder = ctx.dataFolder
+    const platform = FOUNDRY_HOST!
+    const archive = await foundryArchive(folder)
+    const manifest = join(folder, 'foundry-local-manifest.json')
+    const release = (tag: string, api: number, distribution?: string) => ({
+      tag,
+      published_at: tag === 'v2.1.0' ? '2026-09-30T00:00:00Z' : '2026-11-09T00:00:00Z',
+      min_core_version: '0.1.0',
+      c_api_version: api,
+      ...(distribution ? { distribution } : {}),
+      assets: [
+        { platform, name: `foundry-local-${platform}.tgz`, size: archive.size, sha256: archive.sha256 },
+      ],
+    })
+    const old = release('v2.1.0', 2)
+    const newer = release('v2.4.0', 3, 'atomic-conf')
+    const writeManifest = (releases: unknown[]) =>
+      writeFile(
+        manifest,
+        JSON.stringify({ schema_version: 1, upstream_repo: 'microsoft/foundry-local', releases })
+      )
+    await writeManifest([old])
+    mirror.serve(
+      `/microsoft/foundry-local/releases/download/v2.1.0/foundry-local-${platform}.tgz`,
+      archive.body
+    )
+    mirror.serve(
+      `/AtomicBot-ai/atomic-chat-conf/releases/download/foundry-local-v2.4.0/foundry-local-${platform}.tgz`,
+      archive.body
+    )
+    const fake = fileURLToPath(new URL('../helpers/fake-foundry-host.mjs', import.meta.url))
+    const host = join(folder, 'fake-foundry-host')
+    const failFlag = join(folder, 'probe.fail')
+    const argvFile = join(folder, 'host.jsonl')
+    await writeFile(
+      host,
+      [
+        '#!/bin/sh',
+        `if [ "$1" = probe ] && [ -f ${JSON.stringify(failFlag)} ]; then echo "missing native dependency" >&2; exit 3; fi`,
+        `export FAKE_FOUNDRY_ARGV=${JSON.stringify(argvFile)}`,
+        `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(fake)} "$@"`,
+      ].join('\n'),
+      { mode: 0o755 }
+    )
+    const { ready } = await core.startDaemon(folder, ctx.daemons, [], {
+      ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL: pathToFileURL(manifest).href,
+      ATOMIC_FOUNDRY_HOST_TEST_COMMAND: host,
+    })
+    const install = () =>
+      post(ready, '/engine-builds/foundry-local/install', { task_id: 'migration', proxy: mirror.proxy })
+    await json(await install())
+    const model = join(folder, 'foundry-local', 'models', 'old-cpu')
+    await mkdir(model, { recursive: true })
+    const files = {
+      'genai_config.json': '{}',
+      'weights.onnx': 'original model bytes',
+      'model.yml':
+        'model_path: foundry-local/models/old-cpu\nname: old-cpu\nsize_bytes: 20\nfoundry_local:\n  model_id: old-cpu\n  variant_id: old-cpu\n  execution_provider: cpu\n  device: cpu\n',
+    }
+    for (const [name, content] of Object.entries(files)) await writeFile(join(model, name), content)
+    const runtime = join(folder, 'foundry-local', 'runtime')
+    await mkdir(runtime, { recursive: true })
+    const legacy = JSON.stringify({ prepared: ['CUDAExecutionProvider'], failures: {}, updated_at: 1 })
+    await writeFile(join(runtime, 'accelerators.json'), legacy)
+    const load = () => post(ready, '/models/foundry-local/old-cpu/load')
+    const first = await json<{ session: { pid: number } }>(await load())
+    const publicServer = await json<{ port: number }>(await post(ready, '/server/start', { port: 0 }))
+    const answer = async () => {
+      const response = await fetch(`http://127.0.0.1:${publicServer.port}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'old-cpu',
+          stream: true,
+          messages: [{ role: 'user', content: 'hello' }],
+        }),
+      })
+      expect(response.status, await response.clone().text()).toBe(200)
+      expect(await response.text()).toContain('data: [DONE]')
+    }
+    await answer()
+    await writeManifest([newer, old])
+    await json(await post(ready, '/engine-builds/foundry-local/catalog', { force: true }))
+    await writeFile(failFlag, '')
+    expect(await (await install()).json()).toMatchObject({ error: { code: 'ENGINE_INSTALL_FAILED' } })
+    expect(process.kill(first.session.pid, 0)).toBe(true)
+    await answer()
+    await rm(failFlag)
+    await json(await install())
+    expect(() => process.kill(first.session.pid, 0)).toThrow()
+    expect((await json<Catalog>(await post(ready, '/engine-builds/foundry-local/catalog'))).active?.tag).toBe(
+      'v2.4.0'
+    )
+    await json(await load())
+    await answer()
+    await json(await post(ready, '/models/foundry-local/old-cpu/unload'))
+    expect(
+      await json(
+        await control(ctx, ready, `/engine-builds/foundry-local/v2.4.0/${platform}`, { method: 'DELETE' })
+      )
+    ).toEqual({ removed: true })
+    await rm(manifest)
+    expect(
+      (await json<Catalog>(await post(ready, '/engine-builds/foundry-local/catalog', { force: true }))).active
+        ?.tag
+    ).toBe('v2.1.0')
+    await json(await load())
+    await answer()
+    const starts = (await readFile(argvFile, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => (JSON.parse(line) as { argv: string[] }).argv)
+      .filter((argv) => argv[0] === 'serve')
+    expect(starts.map((argv) => argv[argv.indexOf('--lib') + 1])).toEqual(
+      ['v2.1.0', 'v2.4.0', 'v2.1.0'].map((tag) => join(folder, 'foundry-local', 'backends', tag, platform))
+    )
+    for (const [name, content] of Object.entries(files))
+      expect(await readFile(join(model, name), 'utf8')).toBe(content)
+    expect(await readFile(join(runtime, 'accelerators.json'), 'utf8')).toBe(legacy)
+    expect(mirror.seen.some((path) => /azure/i.test(path))).toBe(false)
+  }, 120_000)
+
   it('installs the host archive from a file:// manifest, checked by the host, and leaves nothing when the host refuses it', async () => {
     const folder = ctx.dataFolder
     const archive = await foundryArchive(folder)
@@ -363,7 +486,7 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)('Foundry Local builds
         '#!/bin/sh',
         `echo "$@" >> ${JSON.stringify(argvFile)}`,
         `if [ -f ${JSON.stringify(failFlag)} ]; then echo "libatomic.so.1: cannot open shared object file" >&2; exit 3; fi`,
-        `echo '{"c_api_version":2,"accelerators":[]}'`,
+        `echo '{"version":"2.1.0","c_api_version":2,"accelerators":[]}'`,
       ].join('\n'),
       { mode: 0o755 }
     )
@@ -768,14 +891,29 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(
       })
       const afterSecondCheck = await probes()
       expect(afterSecondCheck).toBe(busyFree + 1)
+      const upgraded = await accelerators()
+      expect(upgraded).toMatchObject({
+        build: `v2.2.0/${platform}`,
+        accelerators: [
+          { name: 'WebGpuExecutionProvider', prepared: false },
+          { name: 'CUDAExecutionProvider', prepared: false },
+        ],
+      })
+      expect(upgraded.accelerators[1]).not.toHaveProperty('reason')
+      expect(await probes()).toBe(afterSecondCheck + 1)
+
+      await json(
+        await post(ready, '/runtimes/foundry-local/accelerators/prepare', {
+          accelerators: ['WebGpuExecutionProvider'],
+        })
+      )
       expect(await accelerators()).toMatchObject({
         build: `v2.2.0/${platform}`,
         accelerators: [
-          expect.objectContaining({ name: 'WebGpuExecutionProvider', prepared: true }),
-          expect.anything(),
+          { name: 'WebGpuExecutionProvider', prepared: true },
+          { name: 'CUDAExecutionProvider', prepared: false },
         ],
       })
-      expect(await probes()).toBe(afterSecondCheck + 1)
     }, 120_000)
   }
 )

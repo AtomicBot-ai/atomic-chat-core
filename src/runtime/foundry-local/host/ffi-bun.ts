@@ -4,7 +4,7 @@
  * imported dynamically by the `foundry-host` mode alone, so the npm package still loads under Node.
  *
  * The library exports three symbols; everything else is a table of function pointers (`flApi` and its
- * sub-APIs), read here by index. Indices follow `foundry_local_c.h` of C API version 2: tables only
+ * sub-APIs), read here by index. Indices follow `foundry_local_c.h` of C API versions 2 and 3: tables only
  * ever grow at the end, so a library that grants version 2 keeps these positions.
  *
  * Proven by the spike (rulings S1, S2): progress callbacks must not be `threadsafe` — the native caller
@@ -14,9 +14,12 @@
 
 import { CFunction, CString, dlopen, FFIType, JSCallback, ptr, read } from 'bun:ffi'
 import type { NativeArgument, Pointer } from 'bun:ffi'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FoundryLibraryError } from './library.js'
+import { foundryWindowsCudaCache, foundryWindowsDllDirectories } from './windows-dlls.js'
+import { FoundryLibraryError, selectFoundryApi } from './library.js'
+import { requiresBundledOpenVino, withBundledOpenVino } from './openvino.js'
+import { ensureMacWebGpu, requiresMacWebGpu, withMacWebGpu } from './webgpu/index.js'
 import type {
   DiscoverableEp,
   FoundryLibrary,
@@ -26,9 +29,6 @@ import type {
   LoadFoundryLibrary,
   ModelMetadata,
 } from './library.js'
-
-/** The `FOUNDRY_LOCAL_API_VERSION` these bindings are written against. */
-export const BOUND_C_API_VERSION = 2
 
 const POINTER = 8
 const CATALOG_LOCAL = 1
@@ -87,6 +87,40 @@ const cstr = (value: string): Buffer => Buffer.from(`${value}\0`, 'utf8')
 const outPointer = (): BigUint64Array => new BigUint64Array(1)
 const deref = (out: BigUint64Array): Pointer => Number(out[0])
 
+function windowsSystemCudaDirectories(): string[] {
+  const children = (dir: string): string[] => {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+    } catch {
+      return []
+    }
+  }
+  const discovered: string[] = []
+  const programFiles = process.env['ProgramFiles'] ?? 'C:\\Program Files'
+  const cudaRoot = join(programFiles, 'NVIDIA GPU Computing Toolkit', 'CUDA')
+  const cudnnRoot = join(programFiles, 'NVIDIA', 'CUDNN')
+  for (const version of children(cudaRoot).filter((version) => /^v12(?:\.|$)/.test(version)))
+    discovered.push(join(cudaRoot, version, 'bin'), join(cudaRoot, version, 'bin', 'x64'))
+  const cudnnRoots = [
+    ...children(cudnnRoot)
+      .filter((version) => /^v9(?:\.|$)/.test(version))
+      .map((version) => join(cudnnRoot, version)),
+    ...(process.env['CUDNN_PATH'] ? [process.env['CUDNN_PATH']] : []),
+  ]
+  for (const root of cudnnRoots) {
+    const bin = join(root, 'bin')
+    discovered.push(
+      bin,
+      ...children(bin)
+        .filter((version) => /^12(?:\.|$)/.test(version))
+        .map((version) => join(bin, version))
+    )
+  }
+  return discovered
+}
+
 export const loadBunFoundryLibrary: LoadFoundryLibrary = async (libDir) => {
   const file = LIBRARY_FILE[process.platform]
   if (!file) throw new FoundryLibraryError('load', 0, `Foundry Local has no library for ${process.platform}`)
@@ -94,26 +128,197 @@ export const loadBunFoundryLibrary: LoadFoundryLibrary = async (libDir) => {
   if (!existsSync(path))
     throw new FoundryLibraryError('load', 0, `${path} not found: no ${file} in this build`)
   if (process.platform === 'win32') {
-    // The loader does not search the DLL's own folder for onnxruntime.dll and its siblings (error 126).
-    const kernel32 = dlopen('kernel32.dll', { SetDllDirectoryW: { args: [T.ptr], returns: T.i32 } })
-    kernel32.symbols.SetDllDirectoryW(ptr(Buffer.from(`${libDir}\0`, 'utf16le')))
+    // All loader changes stay in this child. Keep the build's dependencies and PATH providers,
+    // and expose CUDA/cuDNN directories to LoadLibraryEx(LOAD_LIBRARY_SEARCH_USER_DIRS).
+    const kernel32 = dlopen('kernel32.dll', {
+      SetDllDirectoryW: { args: [T.ptr], returns: T.i32 },
+      SetDefaultDllDirectories: { args: [T.u32], returns: T.i32 },
+      AddDllDirectory: { args: [T.ptr], returns: T.ptr },
+      LoadLibraryExW: { args: [T.ptr, T.ptr, T.u32], returns: T.ptr },
+      GetLastError: { args: [], returns: T.u32 },
+    })
+    const wide = (value: string) => ptr(Buffer.from(`${value}\0`, 'utf16le'))
+    if (!kernel32.symbols.SetDllDirectoryW(wide(libDir)))
+      throw new FoundryLibraryError('load', 0, 'Windows could not configure the Foundry DLL directory')
+    const cudaCache = foundryWindowsCudaCache(process.env)
+    // A managed CUDA host searches only the Foundry build, its CUDA cache and System32.
+    // AddDllDirectory does not promise an order when several directories supply the same DLL.
+    const searchFlags = cudaCache ? 0x0c00 : 0x1000
+    if (process.arch === 'x64' || cudaCache) {
+      const discovered = cudaCache ? [] : windowsSystemCudaDirectories()
+      if (!kernel32.symbols.SetDefaultDllDirectories(searchFlags))
+        throw new FoundryLibraryError('load', 0, 'Windows could not configure the Foundry DLL search path')
+      for (const dir of foundryWindowsDllDirectories(libDir, process.env, discovered)) {
+        if (dir === cudaCache) {
+          if (!kernel32.symbols.AddDllDirectory(wide(dir)))
+            throw new FoundryLibraryError(
+              'load',
+              0,
+              `Windows could not open the Foundry CUDA cache at ${dir}.`
+            )
+        } else if (existsSync(dir)) {
+          kernel32.symbols.AddDllDirectory(wide(dir))
+        }
+      }
+    }
+    // DLL_LOAD_DIR precedes the process search path for dependencies. In particular, Windows'
+    // own onnxruntime.dll must not replace the newer ORT shipped beside foundry_local.dll.
+    // Keep this handle for the child's lifetime; dlopen below binds the already loaded module.
+    if (!kernel32.symbols.LoadLibraryExW(wide(path), null, 0x100 | searchFlags))
+      throw new FoundryLibraryError(
+        'load',
+        0,
+        `Windows could not load ${path} and its dependencies (error ${String(kernel32.symbols.GetLastError())})`
+      )
   }
   const library = dlopen(path, {
     FoundryLocalGetApi: { args: [T.u32], returns: T.ptr },
     FoundryLocalGetVersionString: { args: [], returns: T.cstring },
   })
   const version = String(library.symbols.FoundryLocalGetVersionString())
-  const api = library.symbols.FoundryLocalGetApi(BOUND_C_API_VERSION) as Pointer | null
-  if (!api)
-    throw new FoundryLibraryError(
-      'FoundryLocalGetApi',
-      0,
-      `Foundry Local ${version} does not provide C API version ${BOUND_C_API_VERSION}`
-    )
-  return bindLibrary(api, version)
+  const { api, cApiVersion } = selectFoundryApi(
+    version,
+    (requested) => library.symbols.FoundryLocalGetApi(requested) as Pointer | null
+  )
+  return bindLibrary(api, version, cApiVersion, libDir)
 }
 
-function bindLibrary(api: Pointer, version: string): FoundryLibrary {
+/**
+ * The pinned Intel EP is registered on ORT's shared process environment, which Foundry also uses.
+ * Acquire our own environment reference lazily: CPU/CUDA and installation probes need no Intel DLLs.
+ * Release it only after the manager and its sessions. DLL handles remain pinned for this child.
+ * OrtApi slots follow the original Microsoft.ML.OnnxRuntime 1.31.0 onnxruntime_c_api.h.
+ */
+function bundledOpenVino(libDir: string): { register(): void; release(): void } {
+  let releaseEnv: (() => void) | undefined
+  return {
+    register() {
+      if (releaseEnv) return
+      const dir = join(libDir, 'openvino')
+      const path = join(dir, 'onnxruntime_providers_openvino_plugin.dll')
+      if (!existsSync(path))
+        throw new FoundryLibraryError(
+          'OpenVINO',
+          0,
+          'This Foundry 2.4.0 build is missing the bundled Intel OpenVINO 1.8.1 EP. Reinstall the NPU-compatible Windows x64 build.'
+        )
+      const kernel = dlopen('kernel32.dll', {
+        AddDllDirectory: { args: [T.ptr], returns: T.ptr },
+        LoadLibraryExW: { args: [T.ptr, T.ptr, T.u32], returns: T.ptr },
+        GetLastError: { args: [], returns: T.u32 },
+      })
+      const wide = (value: string) => Buffer.from(`${value}\0`, 'utf16le')
+      if (
+        !kernel.symbols.AddDllDirectory(ptr(wide(dir))) ||
+        !kernel.symbols.LoadLibraryExW(ptr(wide(path)), null, 0x1100)
+      )
+        throw new FoundryLibraryError(
+          'OpenVINO',
+          0,
+          `Windows could not load the bundled Intel OpenVINO EP (error ${String(kernel.symbols.GetLastError())}). Reinstall this Foundry build and check the Intel NPU driver.`
+        )
+      const ort = dlopen(join(libDir, 'onnxruntime.dll'), {
+        OrtGetApiBase: { args: [], returns: T.ptr },
+      })
+      const base = ort.symbols.OrtGetApiBase() as Pointer
+      const api = CFunction({ ptr: read.ptr(base), args: [T.u32], returns: T.ptr })(31) as Pointer | null
+      if (!api) throw new FoundryLibraryError('OpenVINO', 0, 'The bundled Intel EP requires ORT API 31')
+      const fn = (index: number, args: number[], returns: number) =>
+        CFunction({ ptr: read.ptr(api, index * POINTER), args, returns })
+      const statusCode = fn(1, [T.ptr], T.i32)
+      const statusMessage = fn(2, [T.ptr], T.cstring)
+      const statusRelease = fn(93, [T.ptr], T.void)
+      const check = (status: unknown) => {
+        if (!status) return
+        const code = Number(statusCode(status as Pointer))
+        const message = String(statusMessage(status as Pointer))
+        statusRelease(status as Pointer)
+        throw new FoundryLibraryError('OpenVINO', code, message)
+      }
+      const envOut = outPointer()
+      check(fn(3, [T.i32, T.ptr, T.ptr], T.ptr)(3, ptr(cstr('atomic-foundry-openvino')), ptr(envOut)))
+      const env = deref(envOut)
+      const release = () => fn(92, [T.ptr], T.void)(env)
+      try {
+        check(
+          fn(301, [T.ptr, T.ptr, T.ptr], T.ptr)(
+            env,
+            ptr(cstr('atomic-foundry-openvino-1.8.1')),
+            ptr(wide(path))
+          )
+        )
+        releaseEnv = release
+      } catch (error) {
+        release()
+        throw error
+      }
+    },
+    release() {
+      releaseEnv?.()
+      releaseEnv = undefined
+    },
+  }
+}
+
+/** Register the pinned Mac EP in the same ORT environment used by Foundry/GenAI. */
+function macWebGpu(libDir: string, config: FoundryManagerConfig) {
+  let releaseEnv: (() => void) | undefined
+  return {
+    async register(onProgress?: (percent: number) => void) {
+      if (releaseEnv) return
+      const file = await ensureMacWebGpu({
+        runtimeDir: config.appDataDir,
+        allowDownload: config.allowEpDownloads === true,
+        fetch,
+        ...(onProgress ? { onProgress } : {}),
+      })
+      const ort = dlopen(join(libDir, 'libonnxruntime.1.dylib'), {
+        OrtGetApiBase: { args: [], returns: T.ptr },
+      })
+      const base = ort.symbols.OrtGetApiBase() as Pointer
+      const api = CFunction({ ptr: read.ptr(base), args: [T.u32], returns: T.ptr })(31) as Pointer | null
+      if (!api) throw new FoundryLibraryError('WebGPU', 0, 'The pinned Mac WebGPU EP requires ORT API 31')
+      const fn = (index: number, args: number[], returns: number) =>
+        CFunction({ ptr: read.ptr(api, index * POINTER), args, returns })
+      const code = fn(1, [T.ptr], T.i32)
+      const message = fn(2, [T.ptr], T.cstring)
+      const releaseStatus = fn(93, [T.ptr], T.void)
+      const check = (status: unknown) => {
+        if (!status) return
+        const error = new FoundryLibraryError(
+          'WebGPU',
+          Number(code(status as Pointer)),
+          String(message(status as Pointer))
+        )
+        releaseStatus(status as Pointer)
+        throw error
+      }
+      const envOut = outPointer()
+      check(fn(3, [T.i32, T.ptr, T.ptr], T.ptr)(3, ptr(cstr('atomic-foundry-webgpu')), ptr(envOut)))
+      const env = deref(envOut)
+      const release = () => fn(92, [T.ptr], T.void)(env)
+      try {
+        check(
+          fn(301, [T.ptr, T.ptr, T.ptr], T.ptr)(
+            env,
+            ptr(cstr('atomic-foundry-webgpu-0.2.1')),
+            ptr(cstr(file))
+          )
+        )
+        releaseEnv = release
+      } catch (error) {
+        release()
+        throw error
+      }
+    },
+    release() {
+      releaseEnv?.()
+      releaseEnv = undefined
+    },
+  }
+}
+
+function bindLibrary(api: Pointer, version: string, cApiVersion: number, libDir: string): FoundryLibrary {
   const fn = (table: Pointer, index: number, args: number[], returns: number) =>
     CFunction({ ptr: read.ptr(table, index * POINTER), args, returns })
 
@@ -191,7 +396,12 @@ function bindLibrary(api: Pointer, version: string): FoundryLibrary {
     } finally {
       f.configRelease(cfg)
     }
-    return bindManager(manager)
+    const bound = bindManager(manager)
+    if (requiresMacWebGpu(process.platform, process.arch, version))
+      return withMacWebGpu(bound, macWebGpu(libDir, config))
+    return requiresBundledOpenVino(process.platform, process.arch, version)
+      ? withBundledOpenVino(bound, bundledOpenVino(libDir))
+      : bound
   }
 
   function bindManager(manager: Pointer): FoundryManager {
@@ -294,5 +504,5 @@ function bindLibrary(api: Pointer, version: string): FoundryLibrary {
     }
   }
 
-  return { version, cApiVersion: BOUND_C_API_VERSION, createManager }
+  return { version, cApiVersion, createManager }
 }

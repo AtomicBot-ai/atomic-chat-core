@@ -10,6 +10,7 @@
  */
 import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
 import { createServer } from 'node:http'
+import { basename, dirname } from 'node:path'
 
 const argv = process.argv.slice(2)
 const arg = (key) => {
@@ -39,10 +40,13 @@ if (argv[0] === 'probe' || argv[0] === 'prepare') {
   }
   const prepared = argv.flatMap((a, i) => (argv[i - 1] === '--prepared' ? [a] : []))
   if (argv[0] === 'probe') {
+    // Install probes run in an .incoming directory beside the final platform path.
+    const release = basename(dirname(arg('--lib') ?? ''))
+    const version = /^v(\d+\.\d+\.\d+)$/.exec(release)?.[1] ?? '2.1.0'
     console.log(
       JSON.stringify({
-        c_api_version: 2,
-        version: '2.1.0',
+        c_api_version: version === '2.4.0' ? 3 : 2,
+        version,
         accelerators: offered.map((name) => ({
           name,
           execution_provider: short(name),

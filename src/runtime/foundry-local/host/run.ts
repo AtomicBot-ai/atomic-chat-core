@@ -9,7 +9,7 @@
 
 import { existsSync } from 'node:fs'
 import { open, readdir, rm, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { FoundryHostUsageError, parseFoundryHostArgs } from './args.js'
 import type { FoundryHostArgs } from './args.js'
 import { describeDiscoverable, executionProvider } from './execution-providers.js'
@@ -103,7 +103,7 @@ export function logTailReader(): (logsDir: string) => Promise<string> {
  * The library's own words for why `name` was not registered: the last warning or error that names the
  * accelerator or its family (`cuda` for `CUDAExecutionProvider`), not the generic summary line.
  */
-export function failureReason(log: string, name: string): string | null {
+export function failureReason(log: string, name: string, cudaMajor: 12 | 13 = 12): string | null {
   const family = name.replace(/ExecutionProvider$/, '').toLowerCase()
   const lines = log
     .split(/\r?\n/)
@@ -114,7 +114,10 @@ export function failureReason(log: string, name: string): string | null {
   if (!last) return null
   const blocked = /failed to load '([^']+)' \(4551\)/.exec(last)
   if (blocked) return appControlBlocked(blocked[1] ?? '', family)
-  return last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
+  const detail = last.replace(/^\[[^\]]*\]\s*\[[^\]]*\]\s*/, '').trim()
+  if (family === 'cuda' && /\.dll['"]?\s*\(126\)/i.test(last))
+    return `CUDA could not load a required DLL. Install CUDA ${cudaMajor} and cuDNN 9 for CUDA ${cudaMajor}, make their bin directories available through CUDA_PATH, CUDNN_PATH or PATH, then retry preparation. ${detail}`
+  return detail
 }
 
 /**
@@ -189,6 +192,7 @@ function openManager(
     webServiceEndpoints: extra.endpoints,
     // Design D8: the optional telemetry off; `ProcessInfo` still goes, and is disclosed.
     additionalOptions: { DisableNonessentialTelemetry: 'true' },
+    allowEpDownloads: args.mode === 'prepare',
   })
 }
 
@@ -251,6 +255,7 @@ async function prepare(
   await readLog(args.logs)
   const manager = openManager(library, args, { cache: join(args.appData, 'cache'), endpoints: [] })
   const summary: PrepareSummary[] = []
+  const cudaMajor = basename(args.lib) === 'win-arm64' ? 13 : 12
   try {
     const offered = manager.discoverableEps().map((ep) => ep.name)
     const wanted = args.accelerators.length > 0 ? args.accelerators : offered
@@ -264,7 +269,7 @@ async function prepare(
       try {
         // The callback goes only where the library calls it on this thread: Windows ML reported a first
         // install from a thread of its own, and Bun's plain callback called there failed the prepare.
-        manager.downloadAndRegisterEps(
+        await manager.downloadAndRegisterEps(
           [name],
           CDN_ACCELERATORS.has(name)
             ? (_label, percent) =>
@@ -282,7 +287,9 @@ async function prepare(
         summary.push({ name, prepared: true })
       } else {
         const reason =
-          thrown ?? failureReason(await readLog(args.logs), name) ?? `Foundry Local did not register ${name}.`
+          thrown ??
+          failureReason(await readLog(args.logs), name, cudaMajor) ??
+          `Foundry Local did not register ${name}.`
         deps.stdout(json({ accelerator: name, stage: 'failed', fraction: null, reason }))
         summary.push({ name, prepared: false, reason })
       }
@@ -313,7 +320,7 @@ async function serve(
   })
   try {
     if (ep.register) {
-      manager.downloadAndRegisterEps([ep.register])
+      await manager.downloadAndRegisterEps([ep.register])
       if (!manager.discoverableEps().some((found) => found.name === ep.register && found.registered)) {
         deps.stderr(`${ep.register} is not prepared on this computer; prepare it before loading this model.`)
         return 5

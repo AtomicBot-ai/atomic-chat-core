@@ -36,6 +36,8 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { AudioBackend, DiffusionBackend } from '../contracts/index.js'
+import { CORE_VERSION } from '../version.js'
+import { FOUNDRY_LOCAL_C_API_VERSIONS } from './manifest.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import type { FoundryLocalPlatform, LiteRtLmPlatform } from './manifest.js'
@@ -350,7 +352,8 @@ export interface FoundryLocalHostFacts {
   glibcVersion: string | undefined
 }
 
-export type FoundryLocalHostPlatform = { platform: FoundryLocalPlatform } | { platform: null; reason: string }
+export type FoundryLocalHostPlatform =
+  { platform: FoundryLocalPlatform; glibcVersion?: string } | { platform: null; reason: string }
 
 const leadingNumbers = (version: string): number[] =>
   version.split('.').map((part) => Number.parseInt(part, 10))
@@ -374,9 +377,30 @@ export function foundryLocalHostPlatform(host: FoundryLocalHostFacts): FoundryLo
         platform: null,
         reason: `Foundry Local needs glibc ${needMajor}.${needMinor} or newer${host.glibcVersion ? `; this system has ${host.glibcVersion}` : '; this system has none'}.`,
       }
-    return { platform: `linux-${arch}` }
+    return { platform: `linux-${arch}`, glibcVersion: host.glibcVersion }
   }
   return { platform: null, reason: `Foundry Local does not run on ${host.platform} ${host.arch}.` }
+}
+
+/** Release-specific host and ABI policy, shared by remote candidates and offline installs. */
+export function foundryLocalBuildCompatible(
+  host: FoundryLocalHostPlatform,
+  build: { tag: string; backend_id: string; c_api_version?: number | null; min_core_version?: string }
+): boolean {
+  if (host.platform === null || build.backend_id !== host.platform) return false
+  if (
+    build.min_core_version &&
+    compareVersions(versionKey(build.min_core_version), versionKey(CORE_VERSION)) > 0
+  )
+    return false
+  if (build.c_api_version == null || !FOUNDRY_LOCAL_C_API_VERSIONS.includes(build.c_api_version)) return false
+  if (
+    host.platform !== 'linux-arm64' ||
+    compareVersions(versionKey(build.tag.replace(/^v/, '')), [2, 4, 0]) < 0
+  )
+    return true
+  if (!host.glibcVersion) return false
+  return compareVersions(versionKey(host.glibcVersion), [2, 34]) >= 0
 }
 
 /** The host's archive in the newest installable release, as a one-rung ladder. */

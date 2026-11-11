@@ -48,6 +48,8 @@ export async function prepareFoundryLocalTree(staging: string, platform: NodeJS.
 }
 
 export interface FoundryLocalInstallRecord {
+  /** Absent in the legacy 2.1.0 record. */
+  minCoreVersion?: string
   tag: string
   backendId: string
   sha256: string | null
@@ -70,6 +72,7 @@ export async function writeFoundryLocalInstallRecord(
     installedAtMs: record.installedAtMs,
     publishedAt: record.publishedAt,
     cApiVersion: record.cApiVersion,
+    ...(record.minCoreVersion ? { minCoreVersion: record.minCoreVersion } : {}),
   }
   await writeFile(join(dir, INSTALL_RECORD), JSON.stringify(file, null, 2))
 }
@@ -82,7 +85,10 @@ async function readFoundryLocalInstallRecord(dir: string): Promise<FoundryLocalI
     return undefined
   }
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const { tag, backendId, sha256, installedAtMs, publishedAt, cApiVersion } = raw as Record<string, unknown>
+  const { tag, backendId, sha256, installedAtMs, publishedAt, cApiVersion, minCoreVersion } = raw as Record<
+    string,
+    unknown
+  >
   if (
     typeof tag !== 'string' ||
     typeof backendId !== 'string' ||
@@ -91,6 +97,9 @@ async function readFoundryLocalInstallRecord(dir: string): Promise<FoundryLocalI
   )
     return undefined
   return {
+    ...(typeof minCoreVersion === 'string' && /^\d+\.\d+\.\d+$/.test(minCoreVersion)
+      ? { minCoreVersion }
+      : {}),
     tag,
     backendId,
     sha256: typeof sha256 === 'string' ? sha256 : null,

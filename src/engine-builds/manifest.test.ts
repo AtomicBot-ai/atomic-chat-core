@@ -255,6 +255,36 @@ const FOUNDRY = (releases: unknown[], over: Record<string, unknown> = {}) => ({
 const FL_HOST = { coreVersion: '0.18.0', cApiVersions: [2] }
 
 describe('parseFoundryLocalManifest', () => {
+  it('preserves the atomic-conf distribution and resolves only its fixed release URL', () => {
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([
+        FL_RELEASE('v2.4.0', '2026-11-09T00:00:00Z', { c_api_version: 3, distribution: 'atomic-conf' }),
+        FL_RELEASE('v2.1.0', '2026-09-30T00:00:00Z'),
+      ]),
+      { coreVersion: '0.22.1', cApiVersions: [2, 3] }
+    )
+    const release = parsed.releases[0]!
+    expect(release).toHaveProperty('distribution', 'atomic-conf')
+    expect(foundryLocalAssetUrl(parsed, release, release.assets[3]!)).toBe(
+      'https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download/foundry-local-v2.4.0/foundry-local-linux-x64.tgz'
+    )
+    const old = parsed.releases[1]!
+    expect(foundryLocalAssetUrl(parsed, old, old.assets[3]!)).toBe(
+      'https://github.com/microsoft/foundry-local/releases/download/v2.1.0/foundry-local-linux-x64.tgz'
+    )
+  })
+
+  it('skips unknown distributions instead of downloading from upstream by mistake', () => {
+    const parsed = parseFoundryLocalManifest(
+      FOUNDRY([
+        FL_RELEASE('v2.4.0', '2026-11-09T00:00:00Z', { distribution: 'other' }),
+        FL_RELEASE('v2.1.0', '2026-09-30T00:00:00Z'),
+      ]),
+      FL_HOST
+    )
+    expect(parsed.releases.map((release) => release.tag)).toEqual(['v2.1.0'])
+  })
+
   it('reads the manifest conf publishes, .tgz archives included, newest release first', () => {
     const parsed = parseFoundryLocalManifest(
       FOUNDRY([FL_RELEASE('v2.1.0', '2026-09-30T00:43:42Z'), FL_RELEASE('v2.0.0', '2026-08-01T00:00:00Z')]),
@@ -695,7 +725,7 @@ afterEach(() => data.cleanup())
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status })
 
 function source<T>(
-  kind: 'sd-cpp' | 'fastflowlm' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
+  kind: 'foundry-local' | 'sd-cpp' | 'fastflowlm' | 'mlx' | 'litert-lm' | 'geniex' | 'audio-cpp',
   respond: (url: string) => Response | Promise<Response>,
   opts: { env?: Record<string, string>; clock?: { now: number } } = {}
 ) {
@@ -718,6 +748,32 @@ function source<T>(
 }
 
 describe('EngineManifestSource', () => {
+  it('reloads a Foundry file override from disk without a network after restart', async () => {
+    const doc = FOUNDRY([
+      FL_RELEASE('v2.4.0', '2026-11-09T00:00:00Z', { c_api_version: 3, distribution: 'atomic-conf' }),
+      FL_RELEASE('v2.1.0', '2026-09-30T00:00:00Z'),
+    ])
+    const file = join(data.root, 'foundry-local-manifest.json')
+    await writeFile(file, JSON.stringify(doc))
+    const local = source<ReturnType<typeof parseFoundryLocalManifest>>(
+      'foundry-local',
+      () => {
+        throw new Error('network forbidden')
+      },
+      {
+        env: { ATOMIC_FOUNDRY_LOCAL_MANIFEST_URL: pathToFileURL(file).href },
+      }
+    )
+    expect((await local.src.read()).manifest?.releases.map((r) => r.tag)).toEqual(['v2.4.0', 'v2.1.0'])
+    expect(local.urls).toEqual([])
+    const offline = source<ReturnType<typeof parseFoundryLocalManifest>>('foundry-local', () => {
+      throw new Error('offline')
+    })
+    const cached = await offline.src.read()
+    expect(cached.source).toBe('cache')
+    expect(cached.manifest?.releases[0]).toHaveProperty('distribution', 'atomic-conf')
+  })
+
   it('reads conf main, caches the accepted document on disk and serves memory until the TTL ends', async () => {
     const { src, urls, clock } = source<SdcppManifest>('sd-cpp', () => json(SDCPP))
     const first = await src.read()

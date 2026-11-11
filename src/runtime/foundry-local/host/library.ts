@@ -1,7 +1,8 @@
 /**
  * The part of Foundry Local's C API (`foundry_local_c.h`, `FOUNDRY_LOCAL_API_VERSION` 2) the host
  * uses, as an interface. `ffi-bun.ts` implements it over `bun:ffi`; the protocol tests (tasks 5.2,
- * 5.3) run the host against a fake one. Every call is synchronous and may block, like the C API.
+ * 5.3) run the host against a fake one. Native calls are synchronous and may block; host-managed
+ * accelerator preparation can await a verified download.
  */
 
 /** A non-null `flStatus*`: the library's error code and message. */
@@ -25,6 +26,8 @@ export interface FoundryManagerConfig {
   webServiceEndpoints: string[]
   /** `SetAdditionalOptions`, e.g. `DisableNonessentialTelemetry`. */
   additionalOptions: Record<string, string>
+  /** Only explicit accelerator preparation may fetch a host-managed EP. */
+  allowEpDownloads?: boolean
 }
 
 export interface DiscoverableEp {
@@ -52,8 +55,12 @@ export interface FoundryManager {
    * CDN accelerators (spike findings 2, 15). Windows ML ones may call it from a thread of their own
    * on a first install, where the plain callback cannot run: pass it only for CDN accelerators. A
    * per-EP failure is not an error — read `discoverableEps()` afterwards.
+   * Await the return value: host-managed providers prepare asynchronously.
    */
-  downloadAndRegisterEps(names: string[], onProgress?: (ep: string, percent: number) => void): void
+  downloadAndRegisterEps(
+    names: string[],
+    onProgress?: (ep: string, percent: number) => void
+  ): void | Promise<void>
   /** `RegisterModel` in the local catalog; files are not copied. */
   registerLocalModel(path: string, id: string, metadata: ModelMetadata): FoundryModel
   /** Start the built-in server; the bound URLs. */
@@ -72,3 +79,19 @@ export interface FoundryLibrary {
 
 /** Opens the library of one build (`<build>/lib`); throws when it does not load or speaks another C API. */
 export type LoadFoundryLibrary = (libDir: string) => Promise<FoundryLibrary>
+
+/** Highest supported table provided by the loaded library; API 3 keeps the API 2 slots. */
+export function selectFoundryApi(
+  version: string,
+  getApi: (version: number) => number | null
+): { api: number; cApiVersion: number } {
+  for (const cApiVersion of [3, 2]) {
+    const api = getApi(cApiVersion)
+    if (api) return { api, cApiVersion }
+  }
+  throw new FoundryLibraryError(
+    'FoundryLocalGetApi',
+    0,
+    `Foundry Local ${version} provides neither supported C API 3 nor 2`
+  )
+}

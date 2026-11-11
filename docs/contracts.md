@@ -170,6 +170,39 @@ New with Foundry Local (ADRs 2026-10-15-foundry-local-*): `<data>/foundry-local/
 builds, the variants the app installs, the library's own data (accelerators, shared by every build) with the core's
 `runtime/accelerators.json`, each host's catalog cache (`tmp/<uuid>`, deleted when the host exits), the library's logs —
 and `<data>/foundry-local/foundry-local-manifest.cache.json`.
+Foundry Local 2.4 (change `upgrade-foundry-local-2-4`): new preparation records are
+`foundry-local/runtime/<tag>/<platform>/accelerators.json`; the unversioned record remains exclusive
+to 2.1.0 and stays readable after rollback. Preparation, model checks and loads capture a build's identity.
+The schema 1 manifest optionally declares `distribution: "atomic-conf"`, restricted to
+`https://github.com/AtomicBot-ai/atomic-chat-conf/releases/download/foundry-local-<tag>/<asset>`;
+without it the Microsoft URL stays unchanged. C API 2 and 3 are supported. Linux ARM64 needs glibc
+2.34 for runtime 2.4.0 (2.28 for 2.1.0); Linux x64 remains at 2.28. Installation validates the loaded
+library's normalized runtime version and maximum supported table against the selected release before activation.
+Windows x64 2.4.0 bundles Intel OpenVINO 1.8.1 and its dependencies under the build's
+`lib/openvino/`. The child host explicitly registers it on the shared ORT environment when
+OpenVINO is requested, instead of using the incompatible system WinML EP. Discovery still uses
+WinML; the current process reports registered only after the bundled registration succeeds.
+Missing Intel files fail OpenVINO preparation with a reinstall instruction; CPU and CUDA do not
+load this bundle. Runtime 2.1.0 and other platforms retain their original provider registration.
+macOS ARM64 2.4.0 prepares the original Microsoft WebGPU EP 0.2.1 ZIP using the core downloader,
+then registers the verified library through ORT API 31 instead of the failing native bootstrap.
+Its library cache is `foundry-local/runtime/v2.4.0/macos-arm64/webgpu-ep/0.2.1/`.
+Both the archive and native library have pinned sizes and SHA-256 hashes; cache activation is atomic.
+Only explicit accelerator preparation may download it. Every model host validates and registers
+the cached library locally; an absent or modified library asks for preparation again. Other runtime
+versions retain their provider path. The existing accelerator events and control API are unchanged.
+Foundry Local 2.4.0 stages pinned NVIDIA CUDA and cuDNN redistributables on
+explicit CUDA preparation for Windows and Linux x64 and ARM64. Each complete
+runtime set and its notices are cached in
+`foundry-local/runtime/v2.4.0/<platform>/cuda/<revision>/`. The revision is
+computed from that target's pins. CUDA preparation and model hosts receive the
+private cache through the child loader search path. The core checks Linux ARM64
+CUDA variants against a minimum runtime of 2.4.0 and requires the CUDA provider
+reported by the active build. The existing API is unchanged.
+`POST /atomic/v1/models/foundry-local/check` accepts optional `min_runtime_version: "X.Y.Z"`.
+An installed runtime below the minimum returns `engine-update-required` with both versions in
+`reason`; an absent engine remains `engine-not-installed`. Comparison is numeric and local; omitted
+minimum and `0.0.0` retain the old verdicts. Invalid direct minima return `INVALID_ARGUMENT` (400).
 New with LiteRT-LM (ADRs 2026-10-21-litert-lm-*): `<data>/litert-lm/{backends,accelerators,models,cache,runtime,tmp,logs}` —
 builds, prepared OpenVINO (`accelerators/openvino/<version>/`), the variants the clients install
 (`models/<variant_id>/<file>` + `model.yml`), the library's `cache_dir` (CPU XNNPACK caches, about 1 GB per model, named
