@@ -29,8 +29,12 @@ describe('workflowsForFamily', () => {
     expect(workflowsForFamily('krea-2-turbo')).toEqual(['create'])
     // sd.cpp runs FLUX.3 Klein's reference edits; they are not measured yet.
     expect(workflowsForFamily('flux.3-klein')).toEqual(['create'])
-    // Likewise MiniMax-H3-Image's reference edits (up to 16 pictures in sd.cpp).
-    expect(workflowsForFamily('minimax-h3-image')).toEqual(['create'])
+    // MiniMax-H3-Image creates and edits with one checkpoint (up to 16 pictures in sd.cpp); its
+    // encoder carries the vision tower, so no llmVision file is needed for the references.
+    expect(workflowsForFamily('minimax-h3-image')).toEqual(['create', 'reference', 'edit'])
+    expect(
+      workflowsForSpec({ family: 'minimax-h3-image', files: { diffusionModel: '/m/dit.gguf' } })
+    ).toEqual(['create', 'reference', 'edit'])
     expect(workflowsForFamily('wan2.2-ti2v-5b')).toEqual(['create'])
     expect(workflowsForFamily('unknown')).toEqual(['create'])
   })
