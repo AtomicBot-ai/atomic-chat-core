@@ -375,7 +375,11 @@ export function checkReleaseNotes(contract, upstream) {
   return findings
 }
 
-/** What changed in each watched path, and a watched path the candidate no longer has. */
+/**
+ * What changed in each watched path, and a watched path the candidate does not have: gone in this
+ * range, or in neither build (no diff, no commit touched it), where the contract names a stale path
+ * and the strings counted in the watched files go blind for it.
+ */
 export function checkWatched(contract, upstream) {
   const findings = []
   for (const { path, why } of contract.upstream?.watched_paths ?? []) {
@@ -384,18 +388,21 @@ export function checkWatched(contract, upstream) {
       findings.push(finding('upstream.watched_paths', path, 'error', `${path} was not compared`))
       continue
     }
+    const commits = upstream.commits.filter((c) => Array.isArray(c.files) && c.files.includes(path))
     if (stat.exists === false) {
+      const neither = commits.length === 0 && stat.additions === 0 && stat.deletions === 0
       findings.push(
         finding(
           'upstream.watched_paths',
           path,
           'warn',
-          `${path} is gone from the candidate (watched for: ${why}); see where it went`
+          neither
+            ? `${path} is in neither build (watched for: ${why}); the contract names a path this range does not have`
+            : `${path} is gone from the candidate (watched for: ${why}); see where it went`
         )
       )
       continue
     }
-    const commits = upstream.commits.filter((c) => Array.isArray(c.files) && c.files.includes(path))
     if (commits.length === 0 && stat.additions === 0 && stat.deletions === 0) continue
     findings.push(
       finding(

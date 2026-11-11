@@ -464,7 +464,7 @@ export function deriveLlamaEngineContract(): EngineContract {
         { path: 'tools/server/server-common.cpp', why: 'error types → HTTP codes, media errors' },
         { path: 'tools/server/server-task.cpp', why: 'timings, usage, n_prompt_tokens / n_ctx' },
         { path: 'tools/server/server-chat.cpp', why: 'reasoning_content' },
-        { path: 'tools/mtmd/clip.cpp', why: 'unknown projector type' },
+        { path: 'tools/mtmd/mtmd-model.cpp', why: 'unknown projector type' },
         { path: 'src/llama-model.cpp', why: 'architecture errors, offload and buffer-size log lines' },
         { path: 'src/llama-model-loader.cpp', why: 'missing keys, tensor count, corrupt file' },
         {

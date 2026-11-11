@@ -104,10 +104,10 @@
     },
     "same_as_pin": false
   },
-  "status": "pass",
+  "status": "warn",
   "counts": {
     "break": 0,
-    "warn": 0,
+    "warn": 1,
     "info": 28,
     "error": 0
   },
@@ -225,11 +225,11 @@
     {
       "id": "upstream.watched_paths",
       "title": "changes to the sources core depends on",
-      "status": "pass",
+      "status": "warn",
       "counts": {
         "break": 0,
-        "warn": 0,
-        "info": 16,
+        "warn": 1,
+        "info": 15,
         "error": 0
       }
     },
@@ -240,7 +240,7 @@
       "counts": {
         "break": 0,
         "warn": 0,
-        "info": 9,
+        "info": 10,
         "error": 0
       }
     },
@@ -257,6 +257,14 @@
     }
   ],
   "findings": [
+    {
+      "id": "upstream.watched_paths/tools/mtmd/mtmd-model.cpp",
+      "check": "upstream.watched_paths",
+      "severity": "warn",
+      "subject": "tools/mtmd/mtmd-model.cpp",
+      "message": "tools/mtmd/mtmd-model.cpp is in neither build (watched for: unknown projector type); the contract names a path this range does not have",
+      "hint": "Update the contract’s upstream.watched_paths."
+    },
     {
       "id": "assets.core_backends/unconsumed",
       "check": "assets.core_backends",
@@ -331,6 +339,16 @@
       "severity": "info",
       "subject": "error.oom.out-of-memory",
       "message": "\"out of memory\" is in neither tree: core matches text upstream does not print",
+      "evidence": {
+        "source": "src/runtime/llamacpp/errors.ts"
+      }
+    },
+    {
+      "id": "upstream.contract_strings/error.projector.unknown-type",
+      "check": "upstream.contract_strings",
+      "severity": "info",
+      "subject": "error.projector.unknown-type",
+      "message": "\"unknown projector type\" is in neither tree: core matches text upstream does not print",
       "evidence": {
         "source": "src/runtime/llamacpp/errors.ts"
       }
@@ -580,22 +598,6 @@
           "37ac634566 model : support classifier_activation for rerankers (#29692)",
           "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
           "448147d42a llama: share the nextn tensor flags between models (#30097)"
-        ]
-      }
-    },
-    {
-      "id": "upstream.watched_paths/tools/mtmd/clip.cpp",
-      "check": "upstream.watched_paths",
-      "severity": "info",
-      "subject": "tools/mtmd/clip.cpp",
-      "message": "5 commit(s), +128 −16 (watched for: unknown projector type)",
-      "evidence": {
-        "commits": [
-          "69f201a205 model : support MiniCPM-V 4.7 (#29416)",
-          "0fd868cbca mtmd: add build_inp_attn_mask (#30259)",
-          "a657f7e981 model : add LiquidAI/d1-omni-600M decision model (#30114)",
-          "88dcc460d6 model : add LiquidAI/d1-3B decision model (#30110)",
-          "50a6c5cf7c mtmd: add cohere2 vision support (#30062)"
         ]
       }
     },

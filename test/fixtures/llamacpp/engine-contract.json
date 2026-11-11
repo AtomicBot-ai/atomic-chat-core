@@ -1943,7 +1943,7 @@
       "source": "src/runtime/llamacpp/errors.ts",
       "severity_if_lost": "warn",
       "live_expectation": "unobservable",
-      "note": "MULTIMODAL_PROJECTOR_LOAD_FAILED: a projector this build does not know (tools/mtmd/clip.cpp)."
+      "note": "MULTIMODAL_PROJECTOR_LOAD_FAILED: a projector this build does not know (tools/mtmd/mtmd-model.cpp; tools/mtmd/clip.cpp before upstream #31865)."
     },
     {
       "id": "error.corrupt.incomplete",
@@ -2437,7 +2437,7 @@
         "why": "reasoning_content"
       },
       {
-        "path": "tools/mtmd/clip.cpp",
+        "path": "tools/mtmd/mtmd-model.cpp",
         "why": "unknown projector type"
       },
       {
