@@ -275,6 +275,21 @@ describe('H2: the release notes between the pin and the candidate', () => {
       ids(checkReleaseNotes(contract, upstream({ method: 'compare-api', commits: [unknown] })), 'warn')
     ).toEqual(['upstream.release_notes/dddddddddd'])
   })
+
+  it('keeps a commit someone has read to information, with why', () => {
+    const read = { sha: 'e'.repeat(40), why: 'renames a helper core never sees' }
+    const reviewed = { ...contract, upstream: { ...contract.upstream!, reviewed_commits: [read] } }
+    const rename = { sha: read.sha, subject: 'mtmd: rename a helper (#2)', files: ['common/arg.cpp'] }
+    const findings = checkReleaseNotes(reviewed, upstream({ commits: [rename] }))
+    expect(findings.map((f) => `${f.severity} ${f.id} ${f.message}`)).toEqual([
+      'info upstream.release_notes/eeeeeeeeee mtmd: rename a helper (#2) (/rename/): reviewed, renames a helper core never sees',
+    ])
+    // Only the full sha counts: another commit with the same subject still warns.
+    const other = { ...rename, sha: 'f'.repeat(40) }
+    expect(ids(checkReleaseNotes(reviewed, upstream({ commits: [other] })), 'warn')).toEqual([
+      'upstream.release_notes/ffffffffff',
+    ])
+  })
 })
 
 describe('the watched paths', () => {

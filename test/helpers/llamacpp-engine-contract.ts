@@ -85,6 +85,11 @@ export interface EngineContract {
     repo: string
     watched_paths: Array<{ path: string; why: string }>
     release_note_keywords: Array<{ pattern: string; severity: 'warn' | 'info' }>
+    /**
+     * Commits a release-note keyword flags that someone has read and found harmless to core: full
+     * sha and why. The check reports them as info; drop an entry once the pin is past its commit.
+     */
+    reviewed_commits: Array<{ sha: string; why: string }>
   }
 }
 
@@ -485,6 +490,13 @@ export function deriveLlamaEngineContract(): EngineContract {
         { pattern: 'rename', severity: 'warn' },
         { pattern: 'breaking', severity: 'warn' },
         { pattern: '^(args|server|common)[:(]', severity: 'info' },
+      ],
+      reviewed_commits: [
+        {
+          // b12283: `mtmd: fix string format, rename to mtmd_format (#32040)`.
+          sha: '7c2653acc749258dc62067da62d07024d971ccd2',
+          why: 'renames the string_format helper to mtmd_format and drops the NUL it left at the end of messages; `unknown projector type` is still thrown',
+        },
       ],
     },
   }

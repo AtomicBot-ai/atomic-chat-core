@@ -322,7 +322,8 @@ const short = (sha) => sha.slice(0, 10)
  * Commits between the pin and the candidate whose subject announces a removal, a rename or a
  * deprecation (the contract's `release_note_keywords`; each ggml-org build's release note is its
  * commit). A `warn` keyword stays a warn only for a commit that touches a watched path, when the
- * commit's files are known; everything below a warn is summed up in one finding.
+ * commit's files are known, and that nobody has read yet (the contract's `reviewed_commits`, by full
+ * sha: an info naming why it leaves core alone); everything below a warn is summed up in one finding.
  */
 export function checkReleaseNotes(contract, upstream) {
   const keywords = (contract.upstream?.release_note_keywords ?? []).map((k) => ({
@@ -330,6 +331,7 @@ export function checkReleaseNotes(contract, upstream) {
     re: new RegExp(k.pattern, 'i'),
   }))
   const watched = new Set((contract.upstream?.watched_paths ?? []).map((w) => w.path))
+  const reviewed = new Map((contract.upstream?.reviewed_commits ?? []).map((r) => [r.sha, r.why]))
   const findings = []
   const others = []
   for (const commit of upstream.commits) {
@@ -338,7 +340,18 @@ export function checkReleaseNotes(contract, upstream) {
       keywords.find((k) => k.re.test(commit.subject))
     if (!keyword) continue
     const touched = Array.isArray(commit.files) ? commit.files.filter((f) => watched.has(f)) : null
-    if (keyword.severity === 'warn' && (touched === null || touched.length > 0))
+    const why = reviewed.get(commit.sha)
+    if (keyword.severity === 'warn' && why !== undefined && (touched === null || touched.length > 0))
+      findings.push(
+        finding(
+          'upstream.release_notes',
+          short(commit.sha),
+          'info',
+          `${commit.subject} (/${keyword.pattern}/): reviewed, ${why}`,
+          { sha: commit.sha, ...(touched ? { watched_files: touched } : {}) }
+        )
+      )
+    else if (keyword.severity === 'warn' && (touched === null || touched.length > 0))
       findings.push(
         finding(
           'upstream.release_notes',

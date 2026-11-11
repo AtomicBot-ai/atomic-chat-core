@@ -25,6 +25,8 @@ export interface SurfaceContract extends ContractLike {
     repo?: string
     watched_paths: Array<{ path: string; why: string }>
     release_note_keywords: Array<{ pattern: string; severity: 'warn' | 'info' }>
+    /** Commits whose release-note warn someone has read: full sha and why core is unaffected. */
+    reviewed_commits?: Array<{ sha: string; why: string }>
   }
   /** What core matches in llama-server's output (PR5). */
   strings?: Array<{

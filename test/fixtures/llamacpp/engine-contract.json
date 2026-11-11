@@ -2502,6 +2502,12 @@
         "pattern": "^(args|server|common)[:(]",
         "severity": "info"
       }
+    ],
+    "reviewed_commits": [
+      {
+        "sha": "7c2653acc749258dc62067da62d07024d971ccd2",
+        "why": "renames the string_format helper to mtmd_format and drops the NUL it left at the end of messages; `unknown projector type` is still thrown"
+      }
     ]
   }
 }

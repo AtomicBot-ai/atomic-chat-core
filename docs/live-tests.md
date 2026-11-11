@@ -657,7 +657,8 @@ the update orchestrator through the API — never on a schedule, a push or a pul
   (`test/fixtures/llamacpp/engine-contract.json`) and against the pin's `-h`, the invocations core makes
   (`-h`, `--version`, `--list-devices`), the build `--version` names, the release's archives against what
   core installs and what the mirror requires, and the upstream history between the two commits (watched
-  paths, commits announcing a removal or a deprecation). `report.json` / `report.md`; severities `break`
+  paths, commits announcing a removal or a deprecation; a commit in the contract's
+  `upstream.reviewed_commits` was read already and stays info). `report.json` / `report.md`; severities `break`
   (a launch fails or a feature is lost), `warn`, `info`, `error` (a check could not run).
 - **core** (`suites=all`) — unit, contract and e2e suites and both builds at `core_ref`, on the platforms
   of the engine's config (five OS for llama.cpp).
