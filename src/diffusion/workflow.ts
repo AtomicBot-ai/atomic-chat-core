@@ -56,8 +56,8 @@ export function isQwenImage21(family: string): boolean {
 /**
  * img2img and masking are generic in sd.cpp (the init image is VAE-encoded and noised to `strength`,
  * a mask blends latents), so the established base families get them; a distilled model such as
- * Krea 2 Turbo keeps to its verified Create, and so does FLUX.3 Klein until its edits are measured
- * (sd.cpp runs them). Reference-guided generation and instruction edits need
+ * Krea 2 Turbo keeps to its verified Create, and so do FLUX.3 Klein and MiniMax-H3-Image until their
+ * edits are measured (sd.cpp runs them). Reference-guided generation and instruction edits need
  * a model trained on reference images: FLUX.2 Klein and Qwen Image 2.1 (Turbo included, which the
  * official checkpoint trains for editing), which also needs its vision projector loaded
  * (`workflowsForSpec`). Anything else, video families included, only creates.
@@ -69,6 +69,7 @@ export function workflowsForFamily(family: string): ImageWorkflowId[] {
       return ['create', 'transform', 'inpaint', 'extend', 'upscale', 'reference', 'edit']
     case 'krea-2-turbo':
     case 'flux.3-klein':
+    case 'minimax-h3-image':
       return ['create']
     case 'z-image':
     case 'qwen-image':
