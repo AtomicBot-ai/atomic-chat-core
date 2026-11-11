@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
+import {
+  ARGUMENT_REJECTED_MESSAGE,
+  GENERIC_PROCESS_ERROR_MESSAGE,
+  classifyProcessOutput,
+} from '../runtime/llamacpp/errors.js'
 import { classifyFailure, diagnosticTags, failureObserver } from './diagnostics.js'
 
 const context = { component: 'http', operation: 'request' } as const
@@ -138,6 +143,91 @@ describe('GenieX host load bounded diagnostics', () => {
       expect.objectContaining({
         source: 'operation',
         error: hostError,
+        level: 'error',
+      })
+    )
+  })
+})
+
+describe('llama.cpp process error bounded diagnostics', () => {
+  const loadContext = { component: 'runtime', operation: 'load' } as const
+
+  it('tags llama.cpp generic process load errors with a finite diagnostic code', () => {
+    const genericError = classifyProcessOutput(
+      { code: 1, signal: null },
+      '/private/fixture/model.gguf: unclassified vulkan error',
+      '',
+      'linux'
+    )
+    const genericDiag = classifyFailure(genericError, loadContext)
+    const genericTags = diagnosticTags(genericError, genericDiag)
+    expect(genericTags).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'runtime',
+      operation: 'load',
+      failure_stage: 'ready',
+      failure_category: 'unknown',
+      failure_reason: 'unknown',
+      exit_code: 1,
+      cause_code: 'LLAMA_CPP_PROCESS_ERROR',
+      diagnostic_code: 'LLAMA_CPP_GENERIC_PROCESS_ERROR',
+    })
+    expect(genericTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(genericTags)).not.toContain('/private')
+    expect(JSON.stringify(genericTags)).not.toContain(GENERIC_PROCESS_ERROR_MESSAGE)
+    expect(genericError.toJSON()).toEqual({
+      code: 'LLAMA_CPP_PROCESS_ERROR',
+      message: GENERIC_PROCESS_ERROR_MESSAGE,
+      details: '/private/fixture/model.gguf: unclassified vulkan error',
+    })
+
+    const argError = classifyProcessOutput(
+      { code: 1, signal: null },
+      'error: invalid argument: --private-flag /private/fixture/model.gguf',
+      '',
+      'linux'
+    )
+    const argTags = diagnosticTags(argError, classifyFailure(argError, loadContext))
+    expect(argTags['diagnostic_code']).toBeUndefined()
+    expect(argError.message).toBe(ARGUMENT_REJECTED_MESSAGE)
+    expect(JSON.stringify(argTags)).not.toContain('/private')
+
+    const epermCause = Object.assign(new Error('/private/fixture/dev/dri/renderD128'), { code: 'EPERM' })
+    const withCause = new AtomicCoreError(
+      'LLAMA_CPP_PROCESS_ERROR',
+      GENERIC_PROCESS_ERROR_MESSAGE,
+      '/private/fixture/stderr',
+      { cause: epermCause }
+    )
+    const causeTags = diagnosticTags(withCause, classifyFailure(withCause, loadContext))
+    expect(causeTags).toMatchObject({
+      diagnostic_code: 'LLAMA_CPP_GENERIC_PROCESS_ERROR',
+      diagnostic_cause_code: 'EPERM',
+    })
+    expect(JSON.stringify(causeTags)).not.toContain('/private')
+
+    const cycleA = new Error('/private/fixture/outer')
+    const cycleB = Object.assign(new Error(GENERIC_PROCESS_ERROR_MESSAGE), {
+      code: 'PRIVATE_ENGINE_CODE',
+      cause: cycleA,
+    })
+    cycleA.cause = cycleB
+    const cycleTags = diagnosticTags(cycleA, classifyFailure(cycleA, loadContext))
+    expect(cycleTags).toMatchObject({
+      diagnostic_code: 'LLAMA_CPP_GENERIC_PROCESS_ERROR',
+    })
+    expect(cycleTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(cycleTags)).not.toContain('/private')
+    expect(JSON.stringify(cycleTags)).not.toContain('PRIVATE_ENGINE_CODE')
+
+    const capture = vi.fn()
+    const observe = failureObserver({ capture })
+    observe(genericError, loadContext)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'operation',
+        error: genericError,
         level: 'error',
       })
     )

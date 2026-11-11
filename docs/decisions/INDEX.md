@@ -231,3 +231,4 @@ add a new one that says which record it supersedes.
 - [Tag GenieX host load failure modes with finite diagnostic codes](2026-11-05-bound-geniex-host-load-diagnostics.md)
 - [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
 - [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)
+- [2026-11-06 — Tag generic llama.cpp process load errors with a finite diagnostic code](2026-11-06-bound-llamacpp-process-error-load-diagnostics.md)
