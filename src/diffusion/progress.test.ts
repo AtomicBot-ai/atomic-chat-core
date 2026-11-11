@@ -162,6 +162,13 @@ describe('classifyExit', () => {
         undefined
       )
     ).toBe('OUT_OF_MEMORY')
+    // From build 1084 (leejet/stable-diffusion.cpp#2321) the execution engine prints the same refusal.
+    expect(
+      classifyExit(
+        '[WARN   ] execution_engine.cpp:939 - execution engine cannot make enough memory available on MTL0: need 27600.43 MB device / 27600.43 MB budget, available 14907.70 MB device / 14907.70 MB budget',
+        undefined
+      )
+    ).toBe('OUT_OF_MEMORY')
     expect(classifyExit("unsupported op 'RMS_NORM'\nGGML_ABORT", -6)).toBe('ENGINE_CRASHED')
     expect(classifyExit('', undefined)).toBe('ENGINE_CRASHED')
   })

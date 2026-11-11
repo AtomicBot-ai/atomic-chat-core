@@ -196,7 +196,7 @@
       "source": "src/diffusion/progress.ts",
       "upstream_text": "cannot make enough memory available",
       "severity_if_lost": "warn",
-      "note": "classifyExit: OUT_OF_MEMORY instead of ENGINE_CRASHED, and the offload fallback."
+      "note": "classifyExit: OUT_OF_MEMORY instead of ENGINE_CRASHED, and the offload fallback. Up to build 1083 sd.cpp prints it from src/model_manager.cpp ('model manager cannot make enough memory available ...'); from 1084 (leejet/stable-diffusion.cpp#2321) from src/core/execution_engine.cpp ('execution engine cannot make enough memory available ...')."
     },
     {
       "id": "oom.out-of-memory",
@@ -391,7 +391,8 @@
       { "path": "src/pipeline/image.cpp", "why": "`generating image:`" },
       { "path": "src/pipeline/video.cpp", "why": "video generation and its log lines" },
       { "path": "src/runtime/tiling.cpp", "why": "`processing N tiles`" },
-      { "path": "src/model_manager.cpp", "why": "`cannot make enough memory available`" },
+      { "path": "src/model_manager.cpp", "why": "`cannot make enough memory available` up to build 1083" },
+      { "path": "src/core/execution_engine.cpp", "why": "`cannot make enough memory available`, the execution-engine OOM warning core matches, from build 1084 (#2321)" },
       { "path": "CMakeLists.txt", "why": "the version and commit --version prints, build options" }
     ],
     "release_note_keywords": [
