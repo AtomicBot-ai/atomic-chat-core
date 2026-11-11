@@ -31,10 +31,15 @@ describe('workflowsForFamily', () => {
     expect(workflowsForFamily('flux.3-klein')).toEqual(['create'])
     // MiniMax-H3-Image creates and edits with one checkpoint (up to 16 pictures in sd.cpp); its
     // encoder carries the vision tower, so no llmVision file is needed for the references.
-    expect(workflowsForFamily('minimax-h3-image')).toEqual(['create', 'reference', 'edit'])
-    expect(
-      workflowsForSpec({ family: 'minimax-h3-image', files: { diffusionModel: '/m/dit.gguf' } })
-    ).toEqual(['create', 'reference', 'edit'])
+    // P-H3-Image likewise (up to 8 pictures); Pruna's encoder also carries the text connector.
+    for (const family of ['minimax-h3-image', 'p-h3-image']) {
+      expect(workflowsForFamily(family), family).toEqual(['create', 'reference', 'edit'])
+      expect(workflowsForSpec({ family, files: { diffusionModel: '/m/dit.gguf' } }), family).toEqual([
+        'create',
+        'reference',
+        'edit',
+      ])
+    }
     expect(workflowsForFamily('wan2.2-ti2v-5b')).toEqual(['create'])
     expect(workflowsForFamily('unknown')).toEqual(['create'])
   })

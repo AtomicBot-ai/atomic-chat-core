@@ -54,21 +54,30 @@ describe('checkEngineCompatibility', () => {
     }
   })
 
-  it('holds MiniMax-H3-Image to build 1088, the one that added it upstream', () => {
-    for (const tag of ['unknown', 'master-968-8cd731e', 'master-1079-a3c49b1', 'master-1087-f8417d0'])
-      expect(
-        codeOf(() => checkEngineCompatibility('minimax-h3-image', tag)),
-        tag
-      ).toBe('ENGINE_UPDATE_REQUIRED')
-    for (const tag of ['master-1088-32d516c', 'master-1088-32d516c-a1234567', 'master-1100-abcdef0'])
-      expect(() => checkEngineCompatibility('minimax-h3-image', tag), tag).not.toThrow()
-    try {
-      checkEngineCompatibility('minimax-h3-image', 'master-1028-37bc88b-a5f9a63b')
-      expect.unreachable()
-    } catch (error) {
-      expect((error as { details?: string }).details).toBe(
-        'installed=master-1028-37bc88b-a5f9a63b; required=master-1088-32d516c or newer'
-      )
+  it('holds MiniMax-H3-Image and P-H3-Image to build 1088, the one that added MiniMax upstream', () => {
+    // P-H3-Image arrived in 1048 (#2272) but shares the H3 floor: 1088 is the build it was checked on.
+    for (const family of ['minimax-h3-image', 'p-h3-image']) {
+      for (const tag of [
+        'unknown',
+        'master-968-8cd731e',
+        'master-1048-3e92bf9',
+        'master-1079-a3c49b1',
+        'master-1087-f8417d0',
+      ])
+        expect(
+          codeOf(() => checkEngineCompatibility(family, tag)),
+          `${family} ${tag}`
+        ).toBe('ENGINE_UPDATE_REQUIRED')
+      for (const tag of ['master-1088-32d516c', 'master-1088-32d516c-a1234567', 'master-1100-abcdef0'])
+        expect(() => checkEngineCompatibility(family, tag), `${family} ${tag}`).not.toThrow()
+      try {
+        checkEngineCompatibility(family, 'master-1028-37bc88b-a5f9a63b')
+        expect.unreachable()
+      } catch (error) {
+        expect((error as { details?: string }).details).toBe(
+          'installed=master-1028-37bc88b-a5f9a63b; required=master-1088-32d516c or newer'
+        )
+      }
     }
   })
 

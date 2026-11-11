@@ -1,7 +1,7 @@
 /**
  * Which installed engine build may serve a model family. `check_engine_compatibility` and
  * `select_model_install` in `session.rs` of `tauri-plugin-atomic-diffusion` (app commit
- * `ec1fd3ea7`); messages verbatim. The FLUX.3 Klein and MiniMax-H3-Image floors came after the plugin.
+ * `ec1fd3ea7`); messages verbatim. The FLUX.3 Klein and H3 image floors came after the plugin.
  */
 
 import type { DiffusionBackendInstallRecord, DiffusionEngineId } from '../contracts/index.js'
@@ -14,14 +14,19 @@ type EngineFloor = { build: number; tag: string }
 const MODERN: EngineFloor = { build: MIN_MODERN_FAMILY_BUILD, tag: 'master-883-137f740' }
 /** The first upstream build that runs FLUX.3 Image Klein (leejet/stable-diffusion.cpp#2143). */
 const FLUX3: EngineFloor = { build: 968, tag: 'master-968-8cd731e' }
-/** The first upstream build that runs MiniMax-H3-Image (leejet/stable-diffusion.cpp#2324). */
-const MINIMAX_H3_IMAGE: EngineFloor = { build: 1088, tag: 'master-1088-32d516c' }
+/**
+ * The first upstream build that runs MiniMax-H3-Image (leejet/stable-diffusion.cpp#2324). P-H3-Image
+ * (#2272) arrived in 1048, but the H3 transformer's buffer-limit chunking (#2286, #2292) came later,
+ * so it shares this floor: the build both were checked against.
+ */
+const H3_IMAGE: EngineFloor = { build: 1088, tag: 'master-1088-32d516c' }
 const ENGINE_FLOORS: ReadonlyMap<string, EngineFloor> = new Map([
   ['qwen-image-2.1', MODERN],
   ['qwen-image-2.1-turbo', MODERN],
   ['krea-2-turbo', MODERN],
   ['flux.3-klein', FLUX3],
-  ['minimax-h3-image', MINIMAX_H3_IMAGE],
+  ['minimax-h3-image', H3_IMAGE],
+  ['p-h3-image', H3_IMAGE],
 ])
 
 /** `master-<build>-<hash>` → the build number; anything else → undefined. */
@@ -35,8 +40,9 @@ function buildOf(tag: string): number | undefined {
 }
 
 /**
- * Qwen Image 2.1 and Krea 2 Turbo need build 883 or newer, FLUX.3 Klein 968, MiniMax-H3-Image 1088;
- * a tag that does not parse fails closed. Every other family keeps whatever engine it has.
+ * Qwen Image 2.1 and Krea 2 Turbo need build 883 or newer, FLUX.3 Klein 968, MiniMax-H3-Image and
+ * P-H3-Image 1088; a tag that does not parse fails closed. Every other family keeps whatever engine
+ * it has.
  */
 export function checkEngineCompatibility(family: string, tag: string): void {
   const floor = ENGINE_FLOORS.get(family)
