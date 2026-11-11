@@ -891,14 +891,29 @@ describe.skipIf(!existsSync(BIN) || FOUNDRY_HOST === null)(
       })
       const afterSecondCheck = await probes()
       expect(afterSecondCheck).toBe(busyFree + 1)
+      const upgraded = await accelerators()
+      expect(upgraded).toMatchObject({
+        build: `v2.2.0/${platform}`,
+        accelerators: [
+          { name: 'WebGpuExecutionProvider', prepared: false },
+          { name: 'CUDAExecutionProvider', prepared: false },
+        ],
+      })
+      expect(upgraded.accelerators[1]).not.toHaveProperty('reason')
+      expect(await probes()).toBe(afterSecondCheck + 1)
+
+      await json(
+        await post(ready, '/runtimes/foundry-local/accelerators/prepare', {
+          accelerators: ['WebGpuExecutionProvider'],
+        })
+      )
       expect(await accelerators()).toMatchObject({
         build: `v2.2.0/${platform}`,
         accelerators: [
-          expect.objectContaining({ name: 'WebGpuExecutionProvider', prepared: true }),
-          expect.anything(),
+          { name: 'WebGpuExecutionProvider', prepared: true },
+          { name: 'CUDAExecutionProvider', prepared: false },
         ],
       })
-      expect(await probes()).toBe(afterSecondCheck + 1)
     }, 120_000)
   }
 )
