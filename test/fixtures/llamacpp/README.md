@@ -28,7 +28,10 @@ What real ggml-org `llama-server` builds print, for the engine contract checks
   release list), with the `-h`/`--version` text left out (it is `help/` and `version/` here) and each
   commit's files cut down to the watched paths. `surface/b11463-b11617.report.{json,md}` are the golden
   report built from it (`test/contract/engine-surface.test.ts`; regenerate with `-u` and review the
-  diff when the contract or the checks change).
+  diff when the contract or the checks change). The contract now watches `tools/mtmd/mtmd-model.cpp`,
+  which upstream #31865 made out of `tools/mtmd/clip.cpp` after b11617: its watched entry and the
+  `unknown projector type` count are what the gatherer reads for a file neither build has (absent,
+  0), so this report warns about that one path.
 
 Captured on macOS arm64 (Apple M4 Pro) on 2026-10-14 with
 `node scripts/fetch-live-fixtures.mjs --out <dir> --tag <tag> --skip-model --capture`, from these

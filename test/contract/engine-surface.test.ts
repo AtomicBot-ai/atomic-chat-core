@@ -16,6 +16,7 @@ import {
   checkReleaseNotes,
   checkStrings,
   checkVersion,
+  checkWatched,
   countStrings,
   invocationKey,
   MIRROR_WHITELIST,
@@ -274,6 +275,56 @@ describe('H2: the release notes between the pin and the candidate', () => {
       ids(checkReleaseNotes(contract, upstream({ method: 'compare-api', commits: [unknown] })), 'warn')
     ).toEqual(['upstream.release_notes/dddddddddd'])
   })
+
+  it('keeps a commit someone has read to information, with why', () => {
+    const read = { sha: 'e'.repeat(40), why: 'renames a helper core never sees' }
+    const reviewed = { ...contract, upstream: { ...contract.upstream!, reviewed_commits: [read] } }
+    const rename = { sha: read.sha, subject: 'mtmd: rename a helper (#2)', files: ['common/arg.cpp'] }
+    const findings = checkReleaseNotes(reviewed, upstream({ commits: [rename] }))
+    expect(findings.map((f) => `${f.severity} ${f.id} ${f.message}`)).toEqual([
+      'info upstream.release_notes/eeeeeeeeee mtmd: rename a helper (#2) (/rename/): reviewed, renames a helper core never sees',
+    ])
+    // Only the full sha counts: another commit with the same subject still warns.
+    const other = { ...rename, sha: 'f'.repeat(40) }
+    expect(ids(checkReleaseNotes(reviewed, upstream({ commits: [other] })), 'warn')).toEqual([
+      'upstream.release_notes/ffffffffff',
+    ])
+  })
+})
+
+describe('the watched paths', () => {
+  // upstream #31865 moved tools/mtmd/clip.cpp, where `unknown projector type` was thrown, to
+  // tools/mtmd/mtmd-model.cpp.
+  const clip = { path: 'tools/mtmd/clip.cpp', why: 'unknown projector type' }
+  const watching = { ...contract, upstream: { ...contract.upstream!, watched_paths: [clip] } }
+  const check = (over: Partial<Upstream>) =>
+    checkWatched(watching, upstream(over)).map((f) => `${f.severity} ${f.message}`)
+  const consolidate = {
+    sha: '7d7f028753'.padEnd(40, '0'),
+    subject: 'mtmd: refactoring: remove clip.h, consolidate code into mtmd (#31865)',
+    files: ['tools/mtmd/clip.cpp', 'tools/mtmd/mtmd-model.cpp'],
+  }
+
+  it('warns when the range removes a watched file', () => {
+    expect(
+      check({
+        commits: [consolidate],
+        watched: [{ path: clip.path, exists: false, additions: 0, deletions: 120 }],
+      })
+    ).toEqual([
+      'warn tools/mtmd/clip.cpp is gone from the candidate (watched for: unknown projector type); see where it went',
+    ])
+  })
+
+  it('warns that the contract is stale when neither build has the file', () => {
+    expect(check({ watched: [{ path: clip.path, exists: false, additions: 0, deletions: 0 }] })).toEqual([
+      'warn tools/mtmd/clip.cpp is in neither build (watched for: unknown projector type); the contract names a path this range does not have',
+    ])
+  })
+
+  it('says nothing about a watched file the range left alone', () => {
+    expect(check({ watched: [{ path: clip.path, exists: true, additions: 0, deletions: 0 }] })).toEqual([])
+  })
 })
 
 describe('H5: the strings core matches, counted in both trees', () => {
@@ -470,9 +521,12 @@ function goldenInputs(): SurfaceInputs {
 describe('golden: b11463 → b11617', () => {
   const report = buildReport(contract, goldenInputs(), { now: '2026-10-15T00:00:00.000Z' })
 
-  it('passes with information only, now that core no longer sends --defrag-thold', () => {
-    expect(report.status).toBe('pass')
-    expect(ids(report.findings, 'warn')).toEqual([])
+  // The contract watches tools/mtmd/mtmd-model.cpp, which upstream #31865 made out of clip.cpp long
+  // after b11617, so this range has neither the file nor `unknown projector type` in the watched files.
+  it('warns only about the watched file this range predates, now that core no longer sends --defrag-thold', () => {
+    expect(report.status).toBe('warn')
+    expect(ids(report.findings, 'warn')).toEqual(['upstream.watched_paths/tools/mtmd/mtmd-model.cpp'])
+    expect(ids(report.findings, 'info')).toContain('upstream.contract_strings/error.projector.unknown-type')
     expect(report.counts).toMatchObject({ break: 0, error: 0 })
     expect(ids(report.findings, 'info')).toEqual(
       expect.arrayContaining([
@@ -507,16 +561,16 @@ describe('report.md for each engine the check knows', () => {
 
   it('names the engine and where its pin came from', () => {
     expect(heading('llamacpp-upstream', 'list')).toEqual([
-      '# llama.cpp surface: b11617 against b11463 — PASS',
+      '# llama.cpp surface: b11617 against b11463 — WARN',
       '- Pin: the release list',
     ])
     expect(heading('atomic-prism', 'prism-manifest')[1]).toBe('- Pin: prism-manifest')
     expect(heading('sd-cpp', 'sdcpp-manifest')).toEqual([
-      '# stable-diffusion.cpp surface: b11617 against b11463 — PASS',
+      '# stable-diffusion.cpp surface: b11617 against b11463 — WARN',
       "- Pin: conf's sd.cpp manifest",
     ])
     expect(heading('audio-cpp', 'audiocpp-manifest')).toEqual([
-      '# audio.cpp surface: b11617 against b11463 — PASS',
+      '# audio.cpp surface: b11617 against b11463 — WARN',
       "- Pin: conf's audio.cpp manifest",
     ])
     expect(heading(undefined, 'override')[1]).toBe('- Pin: given')

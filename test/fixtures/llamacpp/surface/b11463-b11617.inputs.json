@@ -2360,10 +2360,10 @@
         "deletions": 0
       },
       {
-        "path": "tools/mtmd/clip.cpp",
-        "exists": true,
-        "additions": 128,
-        "deletions": 16
+        "path": "tools/mtmd/mtmd-model.cpp",
+        "exists": false,
+        "additions": 0,
+        "deletions": 0
       },
       {
         "path": "src/llama-model.cpp",
@@ -2504,8 +2504,8 @@
         "candidate": 6
       },
       "error.projector.unknown-type": {
-        "pin": 4,
-        "candidate": 4
+        "pin": 0,
+        "candidate": 0
       },
       "error.corrupt.incomplete": {
         "pin": 1,

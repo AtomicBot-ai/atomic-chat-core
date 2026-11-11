@@ -239,7 +239,7 @@ export const CONTRACT_STRINGS: ContractString[] = [
   log('error.projector.unknown-type', 'unknown projector type', CASCADE, {
     severity_if_lost: 'warn',
     live_expectation: 'unobservable',
-    note: 'MULTIMODAL_PROJECTOR_LOAD_FAILED: a projector this build does not know (tools/mtmd/clip.cpp).',
+    note: 'MULTIMODAL_PROJECTOR_LOAD_FAILED: a projector this build does not know (tools/mtmd/mtmd-model.cpp; tools/mtmd/clip.cpp before upstream #31865).',
   }),
   log('error.corrupt.incomplete', 'corrupted or incomplete', CASCADE, {
     severity_if_lost: 'break',
