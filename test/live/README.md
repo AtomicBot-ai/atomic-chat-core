@@ -57,7 +57,17 @@ Stage 5 providers, each opt-in on its own:
   red square nearer "red" than "blue", audio with an audio encoder (400 without), a link refused, `dimensions` refused,
   `/v1/models`, and another name left to the sessions.
 - MLX (`test/live/mlx.test.ts`, macOS): `ATOMIC_LIVE_MLX_RESOURCES` (folder with `mlx-server`), `ATOMIC_LIVE_MLX_MODEL`
-  (an MLX model folder).
+  (an MLX model folder). Holds `mlx-server --help` to every flag and choice the core passes, loads the folder and answers
+  through the public API, and asks for a json_schema `response_format`, which has to come back as JSON that follows the
+  schema (a frozen build without its structured-output engine answers prose). `test/live/mlx-install.test.ts` takes
+  `ATOMIC_LIVE_MLX_MANIFEST` (a conf-shaped MLX manifest, a path or an `https://` URL such as conf's
+  `backends/mlx-manifest.json` on raw.githubusercontent.com; Apple Silicon only) and installs its build the way a user
+  gets it: picked, downloaded, size and sha256 checked, unpacked and probed (`--help`), ordered by the manifest's
+  `published_at`; a tampered sha256 refused. About 210 MB downloaded twice. A manifest naming a fork release by its
+  upstream tag (`v0.7.12`) skips it: cores install only `mlxvlm-macos-arm64-<hex>`, conf's mirror's name.
+  `node scripts/fetch-live-fixtures.mjs --engine mlx --tag <tag> [--repo …] --out .live-mlx` fetches a release, its
+  manifest, SmolLM2-135M-Instruct 8-bit (141 MB, every file pinned by revision and sha256) and `help.txt`, and writes
+  `live.json` for the config's `live_env`; `npm run engine:check -- --engine mlx --tag <tag>` runs the whole check.
 - Foundation Models (`test/live/foundation-models.test.ts`, macOS 26): `ATOMIC_LIVE_FM_RESOURCES` (folder with
   `foundation-models-server`, e.g. `swift build -c release` in the app's `foundation-models-server`). Without Apple
   Intelligence it asserts the classified refusal; with it, a real answer.

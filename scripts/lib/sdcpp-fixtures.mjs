@@ -5,7 +5,8 @@
 // builds and cached apart from them, and a manifest of the release for the install test
 // (ATOMIC_SDCPP_MANIFEST_URL). The manifest and the archive choice are pure; `fetchSdcppFixtures`
 // does the downloads. Each takes sd.cpp's release spec; audio.cpp's fetch
-// (scripts/lib/audiocpp-fixtures.mjs) is the same with its own.
+// (scripts/lib/audiocpp-fixtures.mjs) and MLX's (scripts/lib/mlx-fixtures.mjs) are the same with
+// their own.
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs'
@@ -14,7 +15,7 @@ import { basename, dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { releaseBackendArchives, SDCPP_RELEASE } from './sdcpp-surface.mjs'
-import { digestMatches } from './live-fixtures.mjs'
+import { digestMatches, liveModelDigest } from './live-fixtures.mjs'
 
 /** `sha256:<hex>` → `<hex>`; `undefined` for anything else. */
 const digestHex = (digest) => (/^sha256:[0-9a-f]{64}$/.test(digest ?? '') ? digest.slice(7) : undefined)
@@ -86,9 +87,28 @@ export function sdcppInstallManifest(input) {
   return releaseInstallManifest(input, SDCPP_RELEASE)
 }
 
-/** Where a live model lives under the models folder: by its sha256, so two models never collide. */
+/**
+ * Where a live model lives under the models folder: by its digest, so two models never collide. A
+ * model that is a folder of files (`files`) is the folder `<digest>/<id>`, its files under it.
+ */
 export const liveModelPath = (modelsDir, model) =>
-  join(modelsDir, model.sha256.slice(0, 16), basename(new URL(model.url).pathname))
+  Array.isArray(model.files)
+    ? join(modelsDir, liveModelDigest(model).slice(0, 16), model.id)
+    : join(modelsDir, model.sha256.slice(0, 16), basename(new URL(model.url).pathname))
+
+/** A file of a folder model: a relative path of plain segments, never `..`, so it stays in the folder. */
+const MODEL_FILE_RE = /^(?!.*(?:^|\/)\.\.?(?:\/|$))[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/
+
+/** The files of a live model, each `{url, path, sha256}`: the model itself, or each file of a folder under its `url`. */
+export function liveModelFiles(modelsDir, model) {
+  const path = liveModelPath(modelsDir, model)
+  if (!Array.isArray(model.files)) return [{ url: model.url, path, sha256: model.sha256 }]
+  if (!model.url.endsWith('/')) throw new Error(`live model ${model.id}: a folder's url ends with /`)
+  return model.files.map((file) => {
+    if (!MODEL_FILE_RE.test(file.path)) throw new Error(`live model ${model.id}: bad file path ${file.path}`)
+    return { url: new URL(file.path, model.url).href, path: join(path, file.path), sha256: file.sha256 }
+  })
+}
 
 async function sha256Of(path) {
   const hash = createHash('sha256')
@@ -155,9 +175,12 @@ async function findFile(dir, wanted) {
  * matches the release digest), its tree unpacked into `engine-<tag>/`, the models under `modelsDir`
  * (skipped with `skipModel`), `manifest.json`, and the files the live step and the cell read:
  * `bin-path.txt`, `model-path.txt`, `tag.txt`, `live.json` (the values `live_env` names) and
- * `fixture.json`. `engine` is the release spec plus the server's name, the executables to mark
- * runnable, the env the engine folder is printed as and what to capture of the server (`captures`:
- * a file under `out` per argv, stdout, a newline, stderr).
+ * `fixture.json` (with `archive_entries`, what the archive unpacked to). `engine` is the release spec
+ * plus the server's name, the executables to mark runnable, the env the engine folder is printed as
+ * and what to capture of the server (`captures`: a file under `out` per argv, stdout, a newline,
+ * stderr); optionally the argv that prints its version (`versionArgv`, `null` for none), how long a
+ * capture may take (`captureTimeoutMs`, 60 s) and the manifest writer (`installManifest`, conf's
+ * ggml manifest by default).
  */
 export async function fetchReleaseFixtures(
   { out, tag, repo, config, contract, modelsDir, skipModel, token, platform },
@@ -201,33 +224,44 @@ export async function fetchReleaseFixtures(
     for (const name of engine.executables)
       if (existsSync(join(engineDir, name))) await chmod(join(engineDir, name), 0o755)
   const printed = (argv) => {
-    const r = spawnSync(server, argv, { cwd: engineDir, encoding: 'utf8', timeout: 60_000 })
+    const r = spawnSync(server, argv, {
+      cwd: engineDir,
+      encoding: 'utf8',
+      timeout: engine.captureTimeoutMs ?? 60_000,
+    })
     return `${r.stdout ?? ''}\n${r.stderr ?? ''}`
   }
-  const versionOutput = printed(['--version']).trim()
+  // An engine without a version flag (MLX: argparse refuses `--version`) records none.
+  const versionArgv = engine.versionArgv === undefined ? ['--version'] : engine.versionArgv
+  const versionOutput = versionArgv ? printed(versionArgv).trim() : null
   for (const { file, argv } of engine.captures ?? []) await writeFile(join(out, file), printed(argv))
 
   const models = {}
   const records = []
   if (!skipModel)
     for (const model of config.live_models ?? []) {
-      const path = liveModelPath(modelsDir, model)
-      const { reused } = await fetchChecked(model.url, path, model.sha256, token)
-      models[model.id] = path
-      records.push({
-        id: model.id,
-        url: model.url,
-        sha256: model.sha256,
-        bytes: (await stat(path)).size,
-        reused,
-      })
+      let reused = true
+      let bytes = 0
+      for (const file of liveModelFiles(modelsDir, model)) {
+        reused = (await fetchChecked(file.url, file.path, file.sha256, token)).reused && reused
+        bytes += (await stat(file.path)).size
+      }
+      models[model.id] = liveModelPath(modelsDir, model)
+      records.push({ id: model.id, url: model.url, sha256: liveModelDigest(model), bytes, reused })
     }
 
   const manifest = join(out, 'manifest.json')
-  await writeFile(
-    manifest,
-    `${JSON.stringify(releaseInstallManifest({ contract, tag: release.tag_name, repo, assets: release.assets ?? [], updatedAt: release.published_at }, engine), null, 2)}\n`
-  )
+  const manifestInput = {
+    contract,
+    tag: release.tag_name,
+    repo,
+    assets: release.assets ?? [],
+    updatedAt: release.published_at,
+  }
+  const doc = engine.installManifest
+    ? engine.installManifest(manifestInput)
+    : releaseInstallManifest(manifestInput, engine)
+  await writeFile(manifest, `${JSON.stringify(doc, null, 2)}\n`)
   const main = records[0]
   await writeFile(join(out, 'bin-path.txt'), server)
   if (main) await writeFile(join(out, 'model-path.txt'), models[main.id])
@@ -255,6 +289,8 @@ export async function fetchReleaseFixtures(
         model: main ? { url: main.url, sha256: main.sha256, verified: true } : null,
         models: records,
         version_output: versionOutput,
+        // What the archive unpacked to: the install runs the server from the root of it.
+        archive_entries: (await readdir(unpacked)).sort(),
       },
       null,
       2

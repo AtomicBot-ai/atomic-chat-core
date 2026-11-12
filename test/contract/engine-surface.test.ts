@@ -26,6 +26,7 @@ import {
   parseNumstat,
   renderMarkdown,
   versionCommit,
+  watches,
 } from '../../scripts/lib/engine-surface.mjs'
 import type { SurfaceContract, SurfaceInputs, SurfaceUpstream } from '../../scripts/lib/engine-surface.mjs'
 import { parseBinaryVersion as parseBinaryVersionTs } from '../../src/backend/version.js'
@@ -325,6 +326,28 @@ describe('the watched paths', () => {
   it('says nothing about a watched file the range left alone', () => {
     expect(check({ watched: [{ path: clip.path, exists: true, additions: 0, deletions: 0 }] })).toEqual([])
   })
+
+  it('watches a folder (`dir/`) as every file under it, and never a file that only shares its prefix', () => {
+    expect(watches('mlx_vlm/server/', 'mlx_vlm/server/cli.py')).toBe(true)
+    expect(watches('mlx_vlm/server/', 'mlx_vlm/server/sub/x.py')).toBe(true)
+    expect(watches('mlx_vlm/server/', 'mlx_vlm/server.py')).toBe(false)
+    expect(watches('mlx_vlm/server.py', 'mlx_vlm/server.py')).toBe(true)
+    expect(watches('mlx_vlm/server.py', 'mlx_vlm/server.pyc')).toBe(false)
+    const server = { path: 'mlx_vlm/server/', why: 'the server' }
+    const folder = { ...contract, upstream: { ...contract.upstream!, watched_paths: [server] } }
+    const cli = { sha: 'a'.repeat(40), subject: 'server: rename --kv-bits', files: ['mlx_vlm/server/cli.py'] }
+    const docs = { sha: 'b'.repeat(40), subject: 'docs: remove the server page', files: ['docs/server.md'] }
+    const watched = [{ path: server.path, exists: true, additions: 3, deletions: 1 }]
+    expect(
+      checkWatched(folder, upstream({ commits: [cli, docs], watched })).map(
+        (f) => `${f.severity} ${f.message}`
+      )
+    ).toEqual(['info 1 commit(s), +3 −1 (watched for: the server)'])
+    // A removal in a file under the folder warns; one outside it does not.
+    expect(ids(checkReleaseNotes(folder, upstream({ commits: [cli, docs] })), 'warn')).toEqual([
+      'upstream.release_notes/aaaaaaaaaa',
+    ])
+  })
 })
 
 describe('H5: the strings core matches, counted in both trees', () => {
@@ -572,6 +595,10 @@ describe('report.md for each engine the check knows', () => {
     expect(heading('audio-cpp', 'audiocpp-manifest')).toEqual([
       '# audio.cpp surface: b11617 against b11463 — WARN',
       "- Pin: conf's audio.cpp manifest",
+    ])
+    expect(heading('mlx', 'mlx-manifest')).toEqual([
+      '# mlx-server surface: b11617 against b11463 — WARN',
+      "- Pin: conf's MLX manifest",
     ])
     expect(heading(undefined, 'override')[1]).toBe('- Pin: given')
     expect(heading(undefined, 'legacy')[1]).toBe('- Pin: the legacy manifest')

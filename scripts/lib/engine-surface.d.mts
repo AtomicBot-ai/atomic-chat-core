@@ -71,6 +71,8 @@ export interface SurfaceSide {
   /** sd.cpp: the leejet tag the build is cut from, its commit and when leejet published it. */
   upstream?: { tag: string; commit: string | null; published_at: string | null } | null
   invocations?: Invocation[]
+  /** MLX: what the release's archive unpacked to, the names at its root. */
+  archive_entries?: string[]
   /** The release's archive names; absent for a local binary. */
   assets?: string[] | null
   assets_error?: string
@@ -186,6 +188,8 @@ export declare function checkReleaseNotes(
   contract: SurfaceContract,
   upstream: Extract<SurfaceUpstream, { available: true }>
 ): Finding[]
+/** A watched path covers a file: the file itself, or every file under a watched folder (`dir/`). */
+export declare function watches(watched: string, file: string): boolean
 export declare function checkWatched(
   contract: SurfaceContract,
   upstream: Extract<SurfaceUpstream, { available: true }>

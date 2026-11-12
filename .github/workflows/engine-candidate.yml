@@ -2,7 +2,8 @@ name: engine-candidate
 run-name: engine-candidate ${{ inputs.engine }} ${{ inputs.tag || 'newest' }} [cid:${{ inputs.candidate_id }}] core@${{ inputs.core_ref }}
 
 # Is an engine build compatible with a core: upstream llama.cpp (`llamacpp-upstream`), PrismML's fork
-# (`atomic-prism`), stable-diffusion.cpp (`sd-cpp`) or audio.cpp (`audio-cpp`)? Started only by hand
+# (`atomic-prism`), stable-diffusion.cpp (`sd-cpp`), audio.cpp (`audio-cpp`) or MLX's `mlx-server`
+# (`mlx`)? Started only by hand
 # or by the update orchestrator through the API: no schedule, no push or pull_request trigger, never
 # called from ci.yml (ADR 2026-10-15-check-an-engine-candidate-only-when-asked). Each engine's tags,
 # repo, pin source, platforms and live tests are in .github/engine-candidate/<engine>.json, and the
@@ -14,10 +15,10 @@ on:
       engine:
         description: Engine to check
         type: choice
-        options: [llamacpp-upstream, atomic-prism, sd-cpp, audio-cpp]
+        options: [llamacpp-upstream, atomic-prism, sd-cpp, audio-cpp, mlx]
         default: llamacpp-upstream
       tag:
-        description: Candidate tag (b11617, prism-b10787-73bfe6c, master-975-95b3090, v0.9.3-a1b2c3d4); empty takes the newest one with every archive up
+        description: Candidate tag (b11617, prism-b10787-73bfe6c, master-975-95b3090, v0.9.3-a1b2c3d4, v0.7.12 or mlxvlm-macos-arm64-1a2b3c4 for mlx); empty takes the newest one with every archive up
         type: string
         default: ''
       repo:
@@ -66,6 +67,7 @@ jobs:
       core_matrix: ${{ steps.resolve.outputs.core_matrix }}
       live_timeout_minutes: ${{ steps.resolve.outputs.live_timeout_minutes }}
       live_models_key: ${{ steps.resolve.outputs.live_models_key }}
+      surface_runner: ${{ steps.resolve.outputs.surface_runner }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -94,10 +96,11 @@ jobs:
           name: resolve
           path: ${{ runner.temp }}/resolve/
 
+  # The candidate's own archive runs here: a Linux one, unless the engine has none (MLX: macOS arm64).
   surface:
     needs: resolve
     if: needs.resolve.outputs.complete == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.resolve.outputs.surface_runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:

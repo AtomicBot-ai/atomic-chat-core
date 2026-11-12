@@ -474,3 +474,93 @@ export function resolveAudiocppPins({ manifest, coreVersion }) {
     source: 'audiocpp-manifest',
   })
 }
+
+// --- MLX (mlx) -------------------------------------------------------------------------------------
+//
+// conf's `backends/mlx-manifest.json` names one build of `mlx-server` for every core, macOS on Apple
+// Silicon only: `tag_name` (`mlxvlm-macos-arm64-<hex>`, the only form released cores accept), the
+// repository whose release holds the archive (`upstream_repo`: conf's mirror, or the mlx-vlm fork for
+// builds before it), `published_at` (the only order MLX builds have) and, optionally, `upstream_tag`
+// (the Neywa-Labs/mlx-vlm release the build is based on; cores ignore it). `parseMlxPinManifest`
+// mirrors `parseMlxManifest` in src/engine-builds/manifest.ts.
+
+/** Where the core installs MLX (`mlxHostChoice`): Apple Silicon only. */
+export const MLX_PIN_PLATFORMS = [
+  { platform: 'macos-arm64', os: 'macos', arch: 'arm64', backend: 'macos-arm64' },
+]
+
+/** The tags released cores install by name. */
+export const MLX_TAG_RE = /^mlxvlm-macos-arm64-([0-9a-f]{7,40})$/
+/** A fork release named by the upstream tag it builds: no core installs it under this name. */
+const MLX_UPSTREAM_TAG_RE = /^v(\d+)\.(\d+)\.(\d+)$/
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const DATE_TIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/
+
+/** RFC 3339 with a zone and a real calendar day, as the core's `isDateTime`. */
+function isDateTime(value) {
+  if (typeof value !== 'string' || !DATE_TIME_RE.test(value) || !Number.isFinite(Date.parse(value)))
+    return false
+  const [y, m, d] = value.slice(0, 10).split('-').map(Number)
+  const day = new Date(Date.UTC(y, m - 1, d))
+  return day.getUTCFullYear() === y && day.getUTCMonth() === m - 1 && day.getUTCDate() === d
+}
+
+/**
+ * `mlxvlm-macos-arm64-<hex>` → the fork commit it was built at (`atomic_rev`), no upstream tag (a
+ * conf manifest may name it); `vX.Y.Z` (the fork's release of that upstream tag) → its version and
+ * the upstream tag. `null` for any other shape.
+ */
+export function mlxTagParts(tag) {
+  const mirror = MLX_TAG_RE.exec(tag)
+  if (mirror) return { version: null, upstream_tag: null, atomic_rev: mirror[1] }
+  const upstream = MLX_UPSTREAM_TAG_RE.exec(tag)
+  if (!upstream) return null
+  const [, major, minor, patch] = upstream
+  return { version: `${major}.${minor}.${patch}`, upstream_tag: tag, atomic_rev: null }
+}
+
+/** conf's MLX manifest as the core reads it (`parseMlxManifest`), or `null` for anything it would refuse. */
+export function parseMlxPinManifest(value) {
+  if (!isRecord(value)) return null
+  const { tag_name: tag, upstream_repo: repo, published_at: published } = value
+  if (typeof tag !== 'string' || !MLX_TAG_RE.test(tag)) return null
+  if (typeof repo !== 'string' || !REPO_RE.test(repo)) return null
+  if (!isDateTime(published)) return null
+  // The core's asset rules are the ggml manifests'; it drops `companion`.
+  const ggml = parseGgmlPinManifest({ tag_name: tag, assets: value.assets }, MLX_TAG_RE)
+  if (!ggml) return null
+  const assets = ggml.assets.map(({ companion: _companion, ...asset }) => asset)
+  return { upstream_repo: repo, tag_name: tag, published_at: published, assets }
+}
+
+/** The Neywa-Labs/mlx-vlm tag a conf MLX manifest says its build is based on; `null` when it names none. */
+export function mlxManifestUpstreamTag(value) {
+  const tag = isRecord(value) ? value.upstream_tag : undefined
+  return typeof tag === 'string' && MLX_UPSTREAM_TAG_RE.test(tag) ? tag : null
+}
+
+/**
+ * The MLX pin from conf's `backends/mlx-manifest.json`: its `tag_name` on macOS arm64 when the
+ * manifest pins the archive with a sha256 and a size, from `repo` (the manifest's `upstream_repo`,
+ * where the core downloads it). The same shape as `resolvePins`, plus `repo` and `upstream_tag`.
+ */
+export function resolveMlxPins({ manifest, coreVersion }) {
+  const parsed = manifest === undefined ? null : parseMlxPinManifest(manifest)
+  const pins = Object.fromEntries(
+    MLX_PIN_PLATFORMS.map((p) => {
+      const asset = parsed?.assets.find((a) => a.backend === p.backend)
+      return [p.platform, asset?.sha256 && asset.size ? parsed.tag_name : null]
+    })
+  )
+  return {
+    source: parsed ? 'mlx-manifest' : 'none',
+    core_version: coreVersion,
+    per_platform: Object.fromEntries(
+      MLX_PIN_PLATFORMS.map((p) => [p.platform, { backend: p.backend, tag: pins[p.platform] }])
+    ),
+    list: { readable: parsed !== null, per_platform: parsed ? pins : null },
+    legacy: { tag: null },
+    repo: parsed?.upstream_repo ?? null,
+    upstream_tag: parsed ? mlxManifestUpstreamTag(manifest) : null,
+  }
+}

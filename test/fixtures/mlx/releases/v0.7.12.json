@@ -1,0 +1,19 @@
+{
+  "repo": "AtomicBot-ai/mlx-vlm",
+  "tag": "v0.7.12",
+  "published_at": "2026-11-12T12:26:38Z",
+  "target_commitish": "7230940302cbe602054650f18a2f77db945bc57a",
+  "prerelease": true,
+  "assets": [
+    {
+      "digest": "sha256:47390a4470c7e35f9233481485362429db7ca3fe860bb962b5cee61f646d709a",
+      "name": "mlxvlm-mlx-server-macos-arm64.tar.gz",
+      "size": 254933851
+    },
+    {
+      "digest": "sha256:247415283539ace1315d5aec132a3fcc105bc29a6d18397d3ab650fc3e5e16af",
+      "name": "requirements.lock.txt",
+      "size": 1257
+    }
+  ]
+}

@@ -5,17 +5,22 @@ export declare const CANDIDATE_ID_RE: RegExp
 
 export interface EngineCandidateConfig {
   engine: string
-  /** `sdcpp`, `audiocpp`: stable-diffusion.cpp's or audio.cpp's resolve, surface and fetch; absent: llama.cpp's. */
+  /** `sdcpp`, `audiocpp`, `mlx`: that engine's resolve, surface and fetch; absent: llama.cpp's. */
   kind?: string
   contract: string
   default_repo: string
   /** `core_runner`: where the core suites run when the live runner is another. */
   platforms: Array<{ platform: string; runner: string; core_runner?: string }>
   live_files: string[]
-  /** `platforms`: the platforms the test runs on; absent, every one. */
-  required_live_tests: Array<{ file: string; name: string; platforms?: string[] }>
+  /**
+   * `platforms`: the platforms the test runs on; absent, every one. `tag_pattern`: the builds it runs
+   * on, by tag; absent, every one.
+   */
+  required_live_tests: Array<{ file: string; name: string; platforms?: string[]; tag_pattern?: string }>
   core_suites: string[]
   protected_paths: string[]
+  /** What a passing live run proves (`cpu` when absent). */
+  verified?: string[]
   not_verified: string[]
 }
 
@@ -162,7 +167,8 @@ export declare function coreMatrix(
 ): Array<{ platform: string; os: string; shard?: string; part?: string }>
 export declare function requiredLiveTests(
   required: EngineCandidateConfig['required_live_tests'] | undefined,
-  platform: string
+  platform: string,
+  tag?: string | null
 ): EngineCandidateConfig['required_live_tests']
 export declare function liveCell(input: {
   platform: string
@@ -192,7 +198,7 @@ export declare function coreCell(input: {
 export declare function mergeCoreShards(cells: readonly CoreCell[]): CoreCell[]
 export declare function buildResults(input: {
   run?: Record<string, unknown> | null
-  config?: Pick<EngineCandidateConfig, 'engine' | 'not_verified'> | null
+  config?: Pick<EngineCandidateConfig, 'engine' | 'not_verified' | 'verified'> | null
   resolve?: ResolveResult
   surface?: {
     status: string

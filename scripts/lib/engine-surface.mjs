@@ -330,7 +330,7 @@ export function checkReleaseNotes(contract, upstream) {
     ...k,
     re: new RegExp(k.pattern, 'i'),
   }))
-  const watched = new Set((contract.upstream?.watched_paths ?? []).map((w) => w.path))
+  const watched = (contract.upstream?.watched_paths ?? []).map((w) => w.path)
   const reviewed = new Map((contract.upstream?.reviewed_commits ?? []).map((r) => [r.sha, r.why]))
   const findings = []
   const others = []
@@ -339,7 +339,9 @@ export function checkReleaseNotes(contract, upstream) {
       keywords.find((k) => k.severity === 'warn' && k.re.test(commit.subject)) ??
       keywords.find((k) => k.re.test(commit.subject))
     if (!keyword) continue
-    const touched = Array.isArray(commit.files) ? commit.files.filter((f) => watched.has(f)) : null
+    const touched = Array.isArray(commit.files)
+      ? commit.files.filter((f) => watched.some((w) => watches(w, f)))
+      : null
     const why = reviewed.get(commit.sha)
     if (keyword.severity === 'warn' && why !== undefined && (touched === null || touched.length > 0))
       findings.push(
@@ -389,9 +391,17 @@ export function checkReleaseNotes(contract, upstream) {
 }
 
 /**
+ * Whether a watched path covers a file: the file itself, or, for a watched folder (a path ending in
+ * `/`, such as MLX's `mlx_vlm/server/`), every file under it.
+ */
+export const watches = (watched, file) =>
+  watched.endsWith('/') ? file.startsWith(watched) : file === watched
+
+/**
  * What changed in each watched path, and a watched path the candidate does not have: gone in this
  * range, or in neither build (no diff, no commit touched it), where the contract names a stale path
- * and the strings counted in the watched files go blind for it.
+ * and the strings counted in the watched files go blind for it. A watched folder counts every file
+ * under it.
  */
 export function checkWatched(contract, upstream) {
   const findings = []
@@ -401,7 +411,9 @@ export function checkWatched(contract, upstream) {
       findings.push(finding('upstream.watched_paths', path, 'error', `${path} was not compared`))
       continue
     }
-    const commits = upstream.commits.filter((c) => Array.isArray(c.files) && c.files.includes(path))
+    const commits = upstream.commits.filter(
+      (c) => Array.isArray(c.files) && c.files.some((f) => watches(path, f))
+    )
     if (stat.exists === false) {
       const neither = commits.length === 0 && stat.additions === 0 && stat.deletions === 0
       findings.push(
@@ -666,7 +678,7 @@ const cell = (v) => (v === null || v === undefined || v === '' ? '—' : String(
 const code = (v) => (v === null || v === undefined || v === '' ? '—' : `\`${v}\``)
 
 /** The engine as report.md names it: upstream llama.cpp and PrismML's fork both run llama.cpp. */
-const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp', 'audio-cpp': 'audio.cpp' }
+const ENGINE_TITLES = { 'sd-cpp': 'stable-diffusion.cpp', 'audio-cpp': 'audio.cpp', 'mlx': 'mlx-server' }
 
 /** Where the pin came from, as report.md says it. */
 const PIN_SOURCES = {
@@ -674,6 +686,7 @@ const PIN_SOURCES = {
   'legacy': 'the legacy manifest',
   'sdcpp-manifest': "conf's sd.cpp manifest",
   'audiocpp-manifest': "conf's audio.cpp manifest",
+  'mlx-manifest': "conf's MLX manifest",
 }
 
 /** `report.md`: the same report for a human, rendered from the JSON alone. */
