@@ -11,6 +11,29 @@ const textChunk = (content: string, finish: string | null = null): JsonValue => 
 const types = (events: JsonValue[]): string[] => events.map((e) => (e as { type: string }).type)
 
 describe('anthropicRequestToChat', () => {
+  it.each([
+    [
+      { type: 'auto', disable_parallel_tool_use: true },
+      { tool_choice: 'auto', parallel_tool_calls: false },
+    ],
+    [
+      { type: 'any', disable_parallel_tool_use: false },
+      { tool_choice: 'required', parallel_tool_calls: true },
+    ],
+    [{ type: 'none' }, { tool_choice: 'none' }],
+    [{ type: 'tool', name: 'read' }, { tool_choice: { type: 'function', function: { name: 'read' } } }],
+  ] as const)('translates Foundry tool choice %j and preserves the default shim', (toolChoice, expected) => {
+    const body = {
+      model: 'demo',
+      messages: [{ role: 'user', content: 'Read a file.' }],
+      tool_choice: toolChoice,
+    }
+    const translated = anthropicRequestToChat(body, { forwardToolChoice: true })
+    expect(translated).toMatchObject(expected)
+    if (!('parallel_tool_calls' in expected)) expect(translated).not.toHaveProperty('parallel_tool_calls')
+    expect(anthropicRequestToChat(body)).not.toHaveProperty('tool_choice')
+  })
+
   it('turns a plain conversation into a chat request with the system prompt first', () => {
     expect(
       anthropicRequestToChat({

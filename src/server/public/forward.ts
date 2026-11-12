@@ -625,7 +625,9 @@ async function messagesFallback(
   )
     return
   trace.anthropicFallback = true
-  const chat = anthropicRequestToChat(json)
+  const chat = anthropicRequestToChat(json, {
+    forwardToolChoice: backend.kind === 'local' && backend.session.provider === 'foundry-local',
+  })
   if (isJsonObject(chat) && noThinking !== undefined) chat['chat_template_kwargs'] = noThinking
   // llama.cpp's own `/v1/messages` stops at the request's `max_tokens`; the translation keeps that
   // cap, or an engine started with `n_predict -1` writes until its context is full. Other engines

@@ -61,8 +61,35 @@ function stopReason(reason: string): string {
 
 // ── request ──────────────────────────────────────────────────────────────────────────────────────
 
+function applyToolChoice(result: JsonObject, choice: JsonValue | undefined): void {
+  const type = get(choice, 'type')
+  switch (type) {
+    case 'auto':
+    case 'none':
+      result['tool_choice'] = type
+      break
+    case 'any':
+      result['tool_choice'] = 'required'
+      break
+    case 'tool': {
+      const name = asStr(get(choice, 'name'))
+      if (!name) return
+      result['tool_choice'] = { type: 'function', function: { name } }
+      break
+    }
+    default:
+      return
+  }
+
+  const disableParallel = get(choice, 'disable_parallel_tool_use')
+  if (typeof disableParallel === 'boolean') result['parallel_tool_calls'] = !disableParallel
+}
+
 /** `transform_anthropic_to_openai`; `null` where the Rust returns `None`. */
-export function anthropicRequestToChat(body: JsonValue): JsonValue | null {
+export function anthropicRequestToChat(
+  body: JsonValue,
+  options: { forwardToolChoice?: boolean } = {}
+): JsonValue | null {
   const model = asStr(get(body, 'model'))
   if (model === undefined) return null
   const messages = get(body, 'messages')
@@ -95,6 +122,8 @@ export function anthropicRequestToChat(body: JsonValue): JsonValue | null {
     }
     if (chatTools.length > 0) result['tools'] = chatTools
   }
+
+  if (options.forwardToolChoice) applyToolChoice(result, get(body, 'tool_choice'))
 
   // `max_tokens` is deliberately not forwarded (commented out in the Rust).
   for (const key of ['temperature', 'top_p', 'top_k', 'frequency_penalty', 'presence_penalty']) {

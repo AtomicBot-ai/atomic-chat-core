@@ -207,63 +207,86 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
     }
   })
 
-  it('forwards Claude tool results to Foundry in one contiguous group even with text between user messages', async () => {
-    const model = 'parallel-tools'
-    await variant(model, { execution_provider: 'cpu', device: 'cpu', tools: true })
-    const { rt } = runtime({ mode: 'echo-chat-request' })
-    const session = await rt.load(model)
-    try {
-      const policy = rt.routePolicy(model)
-      if (!policy) throw new Error('Missing Foundry route policy')
-      const server = await startPublic({
-        sessions: [
-          localSession(session.port, {
-            provider: 'foundry-local',
-            modelId: model,
-            apiKey: session.api_key,
-            policy,
-          }),
-        ],
-      })
-      const response = await postJson(server, '/messages', {
-        model,
-        messages: [
-          { role: 'user', content: 'Read both files.' },
-          {
-            role: 'assistant',
-            content: [
-              { type: 'tool_use', id: 'call_a', name: 'read', input: { path: 'a.txt' } },
-              { type: 'tool_use', id: 'call_b', name: 'read', input: { path: 'b.txt' } },
-            ],
-          },
-          {
-            role: 'user',
-            content: [
-              { type: 'tool_result', tool_use_id: 'call_b', content: 'second file' },
-              { type: 'text', text: 'Include both names.' },
-            ],
-          },
-          { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_a', content: 'first file' }] },
-        ],
-      })
+  it.each(['fragmented', 'interrupted'])(
+    'forwards %s Claude tool results to Foundry in one contiguous group',
+    async (scenario) => {
+      const interrupted = scenario === 'interrupted'
+      const model = 'parallel-tools'
+      await variant(model, { execution_provider: 'cpu', device: 'cpu', tools: true })
+      const { rt } = runtime({ mode: 'echo-chat-request' })
+      const session = await rt.load(model)
+      try {
+        const policy = rt.routePolicy(model)
+        if (!policy) throw new Error('Missing Foundry route policy')
+        const server = await startPublic({
+          sessions: [
+            localSession(session.port, {
+              provider: 'foundry-local',
+              modelId: model,
+              apiKey: session.api_key,
+              policy,
+            }),
+          ],
+        })
+        const response = await postJson(server, '/messages', {
+          model,
+          tools: [{ name: 'read', input_schema: { type: 'object' } }],
+          tool_choice: { type: 'tool', name: 'read', disable_parallel_tool_use: true },
+          messages: [
+            { role: 'user', content: 'Read both files.' },
+            {
+              role: 'assistant',
+              content: [{ type: 'tool_use', id: 'call_a', name: 'read', input: { path: 'a.txt' } }],
+            },
+            {
+              role: 'assistant',
+              content: [{ type: 'tool_use', id: 'call_b', name: 'read', input: { path: 'b.txt' } }],
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'tool_result', tool_use_id: 'call_b', content: 'second file' },
+                { type: 'text', text: 'Include both names.' },
+              ],
+            },
+            ...(interrupted
+              ? []
+              : [
+                  {
+                    role: 'user',
+                    content: [{ type: 'tool_result', tool_use_id: 'call_a', content: 'first file' }],
+                  },
+                ]),
+          ],
+        })
 
-      expect(response.status).toBe(200)
-      const body = (await response.json()) as { content: [{ text: string }] }
-      expect(JSON.parse(body.content[0].text)).toMatchObject({
-        model: `${model}:1`,
-        messages: [
-          { role: 'user', content: 'Read both files.' },
-          { role: 'assistant', tool_calls: [{ id: 'call_a' }, { id: 'call_b' }] },
-          { role: 'tool', tool_call_id: 'call_b', content: 'second file' },
-          { role: 'tool', tool_call_id: 'call_a', content: 'first file' },
-          { role: 'user', content: 'Include both names.' },
-        ],
-      })
-    } finally {
-      await closeAll()
-      await rt.unload(model)
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as { content: [{ text: string }] }
+        expect(JSON.parse(body.content[0].text)).toMatchObject({
+          model: `${model}:1`,
+          tool_choice: { type: 'function', function: { name: 'read' } },
+          parallel_tool_calls: false,
+          messages: [
+            { role: 'user', content: 'Read both files.' },
+            { role: 'assistant', tool_calls: [{ id: 'call_a' }] },
+            { role: 'assistant', tool_calls: [{ id: 'call_b' }] },
+            { role: 'tool', tool_call_id: 'call_b', content: 'second file' },
+            {
+              role: 'tool',
+              tool_call_id: 'call_a',
+              content: interrupted
+                ? 'No tool result was provided for this call in the conversation history.'
+                : 'first file',
+            },
+            { role: 'user', content: 'Include both names.' },
+          ],
+        })
+      } finally {
+        await closeAll()
+        await rt.unload(model)
+      }
     }
-  })
+  )
 
   it('keeps cuDNN flash attention as the person set it in the environment', async () => {
     await variant('phi-4-cuda-gpu', { execution_provider: 'webgpu', device: 'gpu' })
