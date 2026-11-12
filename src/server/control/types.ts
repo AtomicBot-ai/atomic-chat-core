@@ -187,6 +187,12 @@ export interface PublicServerControl {
   selection: () => ServedModelSelection[]
   /** Replace the whole selection; an empty list routes every id by the rules without one. */
   setSelection: (models: ServedModelSelection[]) => void
+  /**
+   * Replace the whole list of extra client keys (`PUT /atomic/v1/server/client-keys`): keys the
+   * public listener accepts next to its own `api_key`, never instead of it. In memory only; there
+   * is deliberately no getter, so the keys never leave the core through the control API.
+   */
+  setClientKeys: (keys: readonly string[]) => void
 }
 
 /**

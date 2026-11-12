@@ -195,6 +195,12 @@ export interface PublicServerDeps {
    * keeps `server.api_key`. The keys never appear in a snapshot or the server state.
    */
   apiKeys?: () => readonly string[] | undefined
+  /**
+   * Extra client keys (`PUT /atomic/v1/server/client-keys`), read for every request: accepted next
+   * to the listener's own `apiKey`, never instead of it. Ignored while `apiKeys` answers a list, and
+   * on a listener without a key — they never close an open server. Never shown in any state.
+   */
+  clientKeys?: () => readonly string[]
   /** The session `provider` serves for `modelId`, matched with the proxy's `.`/`_` rule. */
   findLocal: (provider: LocalProvider, modelId: string) => LocalTarget | undefined
   /** Every loaded session, in `LOCAL_SEARCH_ORDER` provider order. */
@@ -250,7 +256,11 @@ export interface PublicServerDeps {
 }
 
 export interface PublicServerConfig {
-  /** This request's keyring, when the host keeps one (`PublicServerDeps.apiKeys`); see `HostAndKeyConfig`. */
+  /**
+   * The keys this request may present, when they are more than `apiKey`: the host's keyring
+   * (`PublicServerDeps.apiKeys`), or `apiKey` plus the extra client keys (`clientKeys`). See
+   * `HostAndKeyConfig`.
+   */
   apiKeys?: readonly string[]
   host: string
   port: number

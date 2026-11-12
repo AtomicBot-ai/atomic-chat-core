@@ -134,14 +134,27 @@ function requestPath(url: string | undefined): string {
   return q >= 0 ? target.slice(0, q) : target
 }
 
+/**
+ * The keys one request may present, read for every request so a revoked key is refused on the next
+ * one; `undefined` leaves the listener's own `apiKey` as the only check. The host's keyring wins
+ * outright. Otherwise the extra client keys join a keyed listener's own key, and are ignored on an
+ * open listener: adding keys must never start refusing clients that needed none.
+ */
+function acceptedKeys(listener: PublicServerConfig, deps: PublicServerDeps): readonly string[] | undefined {
+  const keyring = deps.apiKeys?.()
+  if (keyring !== undefined) return keyring
+  if (listener.apiKey === '') return undefined
+  const extra = deps.clientKeys?.() ?? []
+  return extra.length === 0 ? undefined : [listener.apiKey, ...extra]
+}
+
 /** The configuration one request is checked against: the listener's, plus what is trusted just for it. */
 function configFor(
   req: IncomingMessage,
   listener: PublicServerConfig,
   deps: PublicServerDeps
 ): PublicServerConfig {
-  // The host's keyring is read for every request: a key it revokes is refused on the next one.
-  const keys = deps.apiKeys?.()
+  const keys = acceptedKeys(listener, deps)
   const keyed = keys === undefined ? listener : { ...listener, apiKeys: keys }
   const dynamic = deps.dynamicTrustedHosts?.(req.socket.localAddress) ?? []
   return dynamic.length === 0 ? keyed : { ...keyed, trustedHosts: [...keyed.trustedHosts, ...dynamic] }

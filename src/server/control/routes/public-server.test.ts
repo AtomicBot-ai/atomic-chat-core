@@ -97,3 +97,68 @@ describe('selection route', () => {
     expect(h.selection).toEqual([{ model: 'qwen', provider: 'mlx' }])
   })
 })
+
+describe('client keys route', () => {
+  const key = (fill: string, length = 24) => fill.repeat(length)
+  const put = (body: unknown) =>
+    h.get('/atomic/v1/server/client-keys', { method: 'PUT', body: JSON.stringify(body) })
+
+  it('replaces the whole list and answers only the count', async () => {
+    const first = await put({ keys: [key('a'), key('b')] })
+    expect(first.status).toBe(200)
+    expect(await first.json()).toEqual({ count: 2 })
+    expect(h.clientKeys).toEqual([key('a'), key('b')])
+
+    const replaced = await put({ keys: [`Az09._~-${key('c', 12)}`] })
+    expect(await replaced.json()).toEqual({ count: 1 })
+    expect(h.clientKeys).toEqual([`Az09._~-${key('c', 12)}`])
+
+    const cleared = await put({ keys: [] })
+    expect(await cleared.json()).toEqual({ count: 0 })
+    expect(h.clientKeys).toEqual([])
+    expect(h.calls).toEqual(['client-keys 2', 'client-keys 1', 'client-keys 0'])
+  })
+
+  it('accepts the bounds: 200 keys, 20 and 256 characters', async () => {
+    const many = Array.from({ length: 200 }, (_, i) => `${key('k', 20)}${i}`)
+    expect(await (await put({ keys: many })).json()).toEqual({ count: 200 })
+    expect(await (await put({ keys: [key('s', 20), key('l', 256)] })).json()).toEqual({ count: 2 })
+  })
+
+  it('refuses anything else with 400, keeps the list, and never echoes a key', async () => {
+    await put({ keys: [key('a')] })
+    for (const body of [
+      null,
+      {},
+      { keys: key('a') },
+      { keys: { 0: key('a') } },
+      { keys: [null] },
+      { keys: [42] },
+      { keys: [key('a'), 7] },
+      { keys: Array.from({ length: 201 }, (_, i) => `${key('k', 20)}${i}`) },
+      { keys: [key('t', 19)] },
+      { keys: [key('l', 257)] },
+      { keys: [`${key('a', 20)} `] },
+      { keys: [`${key('a', 20)}/`] },
+      { keys: [`${key('a', 20)}+`] },
+      { keys: [`${key('a', 20)}é`] },
+      { keys: [`${key('a', 20)}\n`] },
+      { keys: [''] },
+    ]) {
+      const res = await put(body)
+      expect(res.status, JSON.stringify(body)).toBe(400)
+      const answer = (await res.json()) as { error: { code: string } }
+      expect(answer.error.code).toBe('INVALID_ARGUMENT')
+      expect(JSON.stringify(answer)).not.toContain(key('a', 20))
+    }
+    expect(h.clientKeys).toEqual([key('a')])
+  })
+
+  it('has no read-back', async () => {
+    await put({ keys: [key('a')] })
+    const read = await h.get('/atomic/v1/server/client-keys')
+    expect(read.status).toBe(405)
+    expect(await read.text()).not.toContain(key('a'))
+    expect(JSON.stringify(await (await h.get('/atomic/v1/server')).json())).not.toContain(key('a'))
+  })
+})
