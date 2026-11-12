@@ -25,6 +25,18 @@ export interface ModelClaimHandle {
   release(): Promise<void>
 }
 
+const isEexist = (e: unknown) => (e as NodeJS.ErrnoException).code === 'EEXIST'
+
+/** Every filesystem failure leaves the core as a coded error, keeping the errno as its cause. */
+function claimIoError(action: string, path: string, cause: unknown): AtomicCoreError {
+  return new AtomicCoreError(
+    'IO_ERROR',
+    `Cannot ${action} the model claim at ${path}`,
+    (cause as Error).message,
+    { cause }
+  )
+}
+
 export function modelClaimKey(provider: string, modelId: string): string {
   return createHash('sha256').update(provider).update('\0').update(modelId).digest('hex')
 }
@@ -35,7 +47,9 @@ export async function acquireModelClaim(
   modelId: string,
   ownerInstanceId: string
 ): Promise<ModelClaimHandle> {
-  await mkdir(layout.core.modelClaims, { recursive: true })
+  await mkdir(layout.core.modelClaims, { recursive: true }).catch((cause: unknown) => {
+    throw claimIoError('create the claims folder for', layout.core.modelClaims, cause)
+  })
   const path = join(layout.core.modelClaims, modelClaimKey(provider, modelId))
   const claim: ModelClaim = {
     claim_id: randomUUID(),
@@ -50,11 +64,16 @@ export async function acquireModelClaim(
   }
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await mkdir(path)
+      // A claim directory owned by someone else is the only expected `EEXIST`; anything else (a file
+      // where the folder belongs, a full volume) is a filesystem failure, not claim contention.
+      await mkdir(path).catch((cause: unknown) => {
+        if (isEexist(cause)) throw cause
+        throw claimIoError('create', path, cause)
+      })
       await writeClaim(path, claim)
       return handle(path, claim)
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      if (!isEexist(e)) throw e
       const existing = await readClaim(path)
       if (existing?.owner_kind === 'core' && existing.owner_instance_id === ownerInstanceId)
         return handle(path, existing)
@@ -91,8 +110,12 @@ async function readClaim(path: string): Promise<ModelClaim | undefined> {
 async function writeClaim(path: string, claim: ModelClaim): Promise<void> {
   const target = join(path, 'claim.json')
   const temp = join(path, `claim.${claim.claim_id}.${randomUUID()}.tmp`)
-  await writeFile(temp, `${JSON.stringify(claim, null, 2)}\n`)
-  await rename(temp, target)
+  try {
+    await writeFile(temp, `${JSON.stringify(claim, null, 2)}\n`)
+    await rename(temp, target)
+  } catch (cause) {
+    throw claimIoError('write', target, cause)
+  }
 }
 
 function handle(path: string, claim: ModelClaim): ModelClaimHandle {

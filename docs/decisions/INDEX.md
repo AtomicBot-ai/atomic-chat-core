@@ -242,4 +242,5 @@ add a new one that says which record it supersedes.
 - [Preserve error cause on llama.cpp engine update install failures](2026-11-06-preserve-cause-on-llamacpp-engine-install-errors.md)
 - [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)
 - [Tag MLX install probe failures with finite diagnostic codes](2026-11-12-extend-bounded-diagnostics-to-mlx-install-probe.md)
+- [Wrap model-claim filesystem failures as coded IO errors](2026-11-12-wrap-model-claim-filesystem-failures-as-coded-io-errors.md)
 - [Accept the app's client keys next to the server key](2026-11-12-accept-app-client-keys-next-to-the-server-key.md) — `PUT /atomic/v1/server/client-keys`: in-memory extra keys next to a non-empty `api_key`; keyring wins, keyless stays open
