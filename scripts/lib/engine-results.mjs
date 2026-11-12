@@ -30,9 +30,17 @@ export function coreMatrix(platforms) {
   })
 }
 
-/** The live tests a cell on `platform` has to pass: those without `platforms`, or naming it. */
-export const requiredLiveTests = (required, platform) =>
-  (required ?? []).filter((r) => !r.platforms || r.platforms.includes(platform))
+/**
+ * The live tests a cell on `platform` for the build `tag` has to pass: those without `platforms`, or
+ * naming it, and without `tag_pattern`, or one `tag` matches (MLX's install test: only a build named
+ * the way cores install it can be installed by its name).
+ */
+export const requiredLiveTests = (required, platform, tag) =>
+  (required ?? []).filter(
+    (r) =>
+      (!r.platforms || r.platforms.includes(platform)) &&
+      (!r.tag_pattern || new RegExp(r.tag_pattern).test(tag ?? ''))
+  )
 
 /** A Vitest JSON report → `[{file, name, status}]`, `name` being the test's full name. */
 export function vitestOutcomes(report) {
@@ -238,7 +246,8 @@ export function buildResults({ run, config, resolve, surface, cells, platforms, 
     drift: [],
     verified_assets: [],
     unverified_assets: [],
-    coverage: { verified: ['cpu'], not_verified: config?.not_verified ?? [] },
+    // What a passing live run proves: the CPU builds, unless the engine says (MLX: Metal).
+    coverage: { verified: config?.verified ?? ['cpu'], not_verified: config?.not_verified ?? [] },
   }
 
   for (const platform of platforms) {

@@ -3,8 +3,8 @@
  * fail or stay incomplete, and whose fault a red test is — the candidate's (the pin passes it) or
  * core's (the pin fails it too). Plus the configuration the workflow and `npm run engine:check`
  * read: every required live test it names has to exist, or a renamed test would silently stop
- * counting (`.github/engine-candidate/llamacpp-upstream.json`, `audio-cpp.json`), and an audio.cpp
- * run's results.json carries what conf's approval gate reads.
+ * counting (`.github/engine-candidate/llamacpp-upstream.json`, `audio-cpp.json`, `mlx.json`), and an
+ * audio.cpp or MLX run's results.json carries what conf's approval gate reads.
  */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -26,10 +26,10 @@ import type {
   ResolveResult,
   VitestReport,
 } from '../../scripts/lib/engine-results.mjs'
-import { AUDIOCPP_PIN_PLATFORMS, PIN_PLATFORMS } from '../../scripts/lib/engine-pin.mjs'
+import { AUDIOCPP_PIN_PLATFORMS, MLX_PIN_PLATFORMS, PIN_PLATFORMS } from '../../scripts/lib/engine-pin.mjs'
 import { liveModelPath } from '../../scripts/lib/sdcpp-fixtures.mjs'
-import { expandLiveEnv, liveModelsKey } from '../../scripts/lib/live-fixtures.mjs'
-import { parseAudiocppManifest } from '../../src/engine-builds/index.js'
+import { expandLiveEnv, liveModelDigest, liveModelsKey } from '../../scripts/lib/live-fixtures.mjs'
+import { parseAudiocppManifest, parseMlxManifest } from '../../src/engine-builds/index.js'
 
 const root = new URL('../../', import.meta.url)
 const config = JSON.parse(
@@ -427,6 +427,14 @@ describe('the llamacpp-upstream configuration', () => {
     ]
     expect(requiredLiveTests(only, 'linux-x64').map((t) => t.name)).toEqual(['everywhere'])
     expect(requiredLiveTests(only, 'macos-arm64').map((t) => t.name)).toEqual(['everywhere', 'macOS only'])
+    // A test that applies to some builds only, by tag: required of those, of no other.
+    const byTag = [...only, { file: 'a', name: 'mirror builds', tag_pattern: '^mirror-' }]
+    expect(requiredLiveTests(byTag, 'linux-x64', 'mirror-1').map((t) => t.name)).toEqual([
+      'everywhere',
+      'mirror builds',
+    ])
+    expect(requiredLiveTests(byTag, 'linux-x64', 'v1.2.3').map((t) => t.name)).toEqual(['everywhere'])
+    expect(requiredLiveTests(byTag, 'linux-x64', null).map((t) => t.name)).toEqual(['everywhere'])
   })
 
   it('takes candidate ids an orchestrator can find in run-name', () => {
@@ -589,5 +597,197 @@ describe('the audio-cpp configuration', () => {
       'no-pin',
       'no-pin',
     ])
+  })
+})
+
+describe('the mlx configuration', () => {
+  const mlx = JSON.parse(
+    readFileSync(new URL('.github/engine-candidate/mlx.json', root), 'utf8')
+  ) as EngineCandidateConfig & {
+    tag_pattern: string
+    pins: string
+    pin_repo?: string
+    surface_runner: string
+    candidate_manifests: { conf: string }
+    upstream: { repo: string; branch: string }
+    live_models: Array<{
+      id: string
+      url: string
+      files: Array<{ path: string; sha256: string; bytes: number }>
+    }>
+    live_env: Record<string, string>
+    verified: string[]
+  }
+  const MLX_PLATFORMS = mlx.platforms.map((p) => p.platform)
+  const live = JSON.parse(
+    readFileSync(new URL('test/fixtures/mlx/conf/mlx-manifest.json', root), 'utf8')
+  ) as object
+  const INSTALL = 'test/live/mlx-install.test.ts'
+
+  it('reads the fork’s releases and the builds cores install by name; cores install only the latter', () => {
+    const re = new RegExp(mlx.tag_pattern)
+    for (const tag of [
+      'mlxvlm-macos-arm64-07ba5a1',
+      'mlxvlm-macos-arm64-89acca55b02b78b9fd0fd517995cba040b5386a8',
+    ]) {
+      expect(re.test(tag), tag).toBe(true)
+      expect(() => parseMlxManifest({ ...live, tag_name: tag }), tag).not.toThrow()
+    }
+    // The fork's release of an upstream tag: a candidate, but no core installs it under this name.
+    expect(re.test('v0.7.12')).toBe(true)
+    expect(() => parseMlxManifest({ ...live, tag_name: 'v0.7.12' })).toThrow('tag_name')
+    for (const tag of ['mlxvlm-macos-arm64-07ba5a', 'mlxvlm-linux-x64-07ba5a1', '0.7.12', 'v0.7', 'b11617'])
+      expect(re.test(tag), tag).toBe(false)
+    expect(mlx).toMatchObject({
+      engine: 'mlx',
+      kind: 'mlx',
+      default_repo: 'AtomicBot-ai/mlx-vlm',
+      pins: 'mlx-manifest',
+      candidate_manifests: { conf: 'backends/mlx-manifest.staging.json' },
+      upstream: { repo: 'Neywa-Labs/mlx-vlm', branch: 'main' },
+    })
+    // The pin comes from where the live manifest says the core downloads it: the fork, then conf.
+    expect(mlx.pin_repo).toBeUndefined()
+  })
+
+  it('names a required live test only if the live file has it; the install tests only of installable names', () => {
+    for (const { file, name } of mlx.required_live_tests) {
+      const text = readFileSync(new URL(file, root), 'utf8')
+      const suites = [...text.matchAll(/describe(?:\.skipIf\([^)]*\))?\(\s*'([^']+)'/g)].map((m) => m[1])
+      const tests = [...text.matchAll(/\bit\(\s*'([^']+)'/g)].map((m) => m[1])
+      const names = suites.flatMap((suite) => tests.map((t) => `${suite} ${t}`))
+      expect(names, `${file} has no test named "${name}"`).toContain(name)
+      expect(mlx.live_files).toContain(file)
+    }
+    const install = mlx.required_live_tests.filter((t) => t.file === INSTALL)
+    expect(install).toHaveLength(3)
+    for (const t of install) expect(t.tag_pattern, t.name).toBe('^mlxvlm-macos-arm64-[0-9a-f]{7,40}$')
+    expect(requiredLiveTests(mlx.required_live_tests, 'macos-arm64', 'mlxvlm-macos-arm64-1f48deb')).toEqual(
+      mlx.required_live_tests
+    )
+    expect(requiredLiveTests(mlx.required_live_tests, 'macos-arm64', 'v0.7.12').map((t) => t.file)).toEqual([
+      'test/live/mlx.test.ts',
+      'test/live/mlx.test.ts',
+      'test/live/mlx.test.ts',
+    ])
+  })
+
+  it('runs everything on Apple Silicon, the surface too: there is no other build to run', () => {
+    expect(MLX_PLATFORMS).toEqual(MLX_PIN_PLATFORMS.map((p) => p.platform))
+    expect(coreMatrix(mlx.platforms)).toEqual([{ platform: 'macos-arm64', os: 'macos-15' }])
+    expect(mlx.platforms[0]?.runner).toBe('macos-15')
+    expect(mlx.surface_runner).toBe('macos-15')
+  })
+
+  it('fills its live env from what the fetch leaves: the build’s folder, its manifest, the model folder', () => {
+    const [model] = mlx.live_models
+    const models = { [model?.id as string]: liveModelPath('/models', model as (typeof mlx.live_models)[0]) }
+    const env = expandLiveEnv(mlx.live_env, { engine_dir: '/e', tag: 't', manifest: '/m.json', models })
+    expect(env).toEqual({
+      ATOMIC_LIVE_MLX_RESOURCES: '/e',
+      ATOMIC_LIVE_MLX_TAG: 't',
+      ATOMIC_LIVE_MLX_MANIFEST: '/m.json',
+      ATOMIC_LIVE_MLX_MODEL: join(
+        '/models',
+        liveModelDigest(model as (typeof mlx.live_models)[0]).slice(0, 16),
+        'smollm2-135m'
+      ),
+    })
+    // SmolLM2-135M-Instruct 8-bit, pinned by Hugging Face revision, every file by its sha256.
+    expect(model?.url).toBe(
+      'https://huggingface.co/mlx-community/SmolLM2-135M-Instruct-8bit/resolve/0f0d9b8218915bc34d401e1a340b8c049d300d5e/'
+    )
+    expect(model?.files.map((f) => f.path)).toContain('model.safetensors')
+    expect(model?.files.map((f) => f.path)).toContain('config.json')
+    for (const f of model?.files ?? []) expect(f.sha256, f.path).toMatch(/^[0-9a-f]{64}$/)
+    expect(model?.files.reduce((n, f) => n + f.bytes, 0)).toBeLessThan(160_000_000)
+    expect(liveModelsKey(mlx.live_models)).toMatch(/^[0-9a-f]{16}$/)
+  })
+
+  it('protects paths that exist', () => {
+    for (const path of [...mlx.protected_paths, ...mlx.live_files, mlx.contract]) {
+      if (!path.endsWith('*')) {
+        expect(existsSync(new URL(path, root)), path).toBe(true)
+        continue
+      }
+      const dir = path.slice(0, path.lastIndexOf('/') + 1)
+      const prefix = path.slice(dir.length, -1)
+      expect(
+        readdirSync(new URL(dir, root)).some((name) => name.startsWith(prefix)),
+        path
+      ).toBe(true)
+    }
+  })
+
+  it('passes the fork’s v0.7.12 without the install tests no core can run on it, Metal verified', () => {
+    const tag = 'v0.7.12'
+    const repo = 'AtomicBot-ai/mlx-vlm'
+    const pinTag = 'mlxvlm-macos-arm64-07ba5a1'
+    const r = resolved({
+      engine: 'mlx',
+      candidate: { repo, tag, source: 'release', complete: true, missing: [], core_assets: [] },
+      pin: {
+        source: 'mlx-manifest',
+        tag: pinTag,
+        repo,
+        per_platform: { 'macos-arm64': { tag: pinTag } },
+      },
+      platforms: mlx.platforms,
+      live_matrix: [
+        { platform: 'macos-arm64', os: 'macos-15', role: 'candidate' as const, tag, repo },
+        { platform: 'macos-arm64', os: 'macos-15', role: 'pin' as const, tag: pinTag, repo },
+      ],
+    })
+    const run = (skippedInstall: boolean): VitestReport => ({
+      testResults: [
+        {
+          name: '/runner/atomic-chat-core/test/live/mlx.test.ts',
+          assertionResults: mlx.required_live_tests
+            .filter((t) => t.file !== INSTALL)
+            .map((t) => ({ fullName: t.name, status: 'passed' })),
+        },
+        {
+          name: `/runner/atomic-chat-core/${INSTALL}`,
+          assertionResults: mlx.required_live_tests
+            .filter((t) => t.file === INSTALL)
+            .map((t) => ({ fullName: t.name, status: skippedInstall ? 'skipped' : 'passed' })),
+        },
+      ],
+    })
+    const out = buildResults({
+      run: { mode: 'ci' },
+      config: mlx,
+      resolve: r,
+      surface: surface('pass'),
+      cells: [
+        ...r.live_matrix.map((m) =>
+          liveCell({
+            ...m,
+            fixture: null,
+            vitest: run(m.role === 'candidate'),
+            required: requiredLiveTests(mlx.required_live_tests, m.platform, m.tag),
+          })
+        ),
+        coreCell({
+          platform: 'macos-arm64',
+          steps: { unit: 'success', build: 'success', build_bin: 'success', e2e: 'success' },
+          expected: mlx.core_suites,
+        }),
+      ],
+      platforms: MLX_PLATFORMS,
+      now: 'x',
+    })
+    expect(out).toMatchObject({ status: 'pass', engine: 'mlx', candidate: { repo, tag } })
+    expect(out.verdict.coverage).toEqual({ verified: ['metal'], not_verified: mlx.not_verified })
+    // On a build named the way cores install it, a skipped install test holds the run.
+    const mirror = liveCell({
+      platform: 'macos-arm64',
+      role: 'candidate',
+      tag: 'mlxvlm-macos-arm64-1f48deb',
+      vitest: run(true),
+      required: requiredLiveTests(mlx.required_live_tests, 'macos-arm64', 'mlxvlm-macos-arm64-1f48deb'),
+    })
+    expect(mirror.status).toBe('incomplete')
+    expect(mirror.missing_required).toHaveLength(3)
   })
 })

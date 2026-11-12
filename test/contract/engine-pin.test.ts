@@ -4,14 +4,18 @@
  * scripts, so it is held here to the same answers as `upstreamRemoteBackends` — on the bundled
  * baseline and on lists with a withdrawn release, a release for newer cores, and candidates only —
  * and, for PrismML, as `prismCatalogToBackends`; for sd.cpp, as `parseSdcppManifest` and the host
- * ladder of `sdcppHostChoice`; for audio.cpp, as `parseAudiocppManifest` and `audiocppHostChoice`.
+ * ladder of `sdcppHostChoice`; for audio.cpp, as `parseAudiocppManifest` and `audiocppHostChoice`; for
+ * MLX, as `parseMlxManifest` and `mlxHostChoice`.
  */
 import { describe, expect, it } from 'vitest'
 import {
   AUDIOCPP_PIN_PLATFORMS,
   audiocppTagParts,
   engineTagBuild,
+  MLX_PIN_PLATFORMS,
+  mlxTagParts,
   parseAudiocppPinManifest,
+  parseMlxPinManifest,
   PIN_PLATFORMS,
   PRISM_PIN_PLATFORMS,
   parsePrismManifest as parsePrismMjs,
@@ -19,6 +23,7 @@ import {
   parseUpstreamReleases as parseMjs,
   prismCatalogToBackends as prismBackendsMjs,
   resolveAudiocppPins,
+  resolveMlxPins,
   resolvePins,
   resolvePrismPins,
   resolveSdcppPins,
@@ -42,7 +47,9 @@ import {
   assetInstallable,
   audiocppBuildKey,
   audiocppHostChoice,
+  mlxHostChoice,
   parseAudiocppManifest,
+  parseMlxManifest,
   parseSdcppManifest,
   sdcppHostChoice,
 } from '../../src/engine-builds/index.js'
@@ -52,6 +59,8 @@ import sdcppStaging from '../fixtures/sdcpp/conf/sdcpp-manifest.staging.json' wi
 import prismBaseline from '../../src/backend/catalog/prism-manifest-baseline.json' with { type: 'json' }
 import audiocppMirror from '../fixtures/audiocpp/conf/audiocpp-manifest.json' with { type: 'json' }
 import audiocppBootstrap from '../fixtures/audiocpp/conf/audiocpp-manifest.staging.json' with { type: 'json' }
+import mlxLive from '../fixtures/mlx/conf/mlx-manifest.json' with { type: 'json' }
+import mlxStaging from '../fixtures/mlx/conf/mlx-manifest.staging.json' with { type: 'json' }
 
 const sha = (n: number) => n.toString(16).padStart(64, '0')
 const asset = (tag: string, infix: string, validation: 'approved' | 'candidate' = 'approved') => ({
@@ -463,5 +472,91 @@ describe('engine-pin.mjs reads the audio.cpp manifest as the core does', () => {
     }
     // audio.cpp has no build number: llama.cpp's build gates never apply to it.
     expect(engineTagBuild('v0.9.3')).toBeNull()
+  })
+})
+
+describe('engine-pin.mjs reads conf’s MLX manifest as the core does', () => {
+  const manifests: Record<string, unknown> = {
+    'conf main: the fork’s 07ba5a1': mlxLive,
+    'conf’s mirror of v0.7.12, with upstream_tag': mlxStaging,
+    'a full commit hash': {
+      ...mlxLive,
+      tag_name: 'mlxvlm-macos-arm64-07ba5a19a22b688de3f45bc7a7636e0210a84558',
+    },
+    'no size on the archive': {
+      ...mlxLive,
+      assets: mlxLive.assets.map(({ size: _size, ...a }) => a),
+    },
+    'a companion flag the core drops, and a second archive for the backend': {
+      ...mlxLive,
+      assets: [
+        { ...mlxLive.assets[0], companion: true },
+        { ...mlxLive.assets[0], name: 'other.tar.gz' },
+      ],
+    },
+    'the fork’s release named by its upstream tag': { ...mlxStaging, tag_name: 'v0.7.12' },
+    'a short hash': { ...mlxLive, tag_name: 'mlxvlm-macos-arm64-07ba5a' },
+    'no published_at': { ...mlxLive, published_at: undefined },
+    'a date that does not exist': { ...mlxLive, published_at: '2026-02-30T00:00:00Z' },
+    'a path for a repository': { ...mlxLive, upstream_repo: '../conf' },
+    'an archive that is not one': { ...mlxLive, assets: [{ ...mlxLive.assets[0], name: 'mlx-server' }] },
+    'no assets': { ...mlxLive, assets: [] },
+    'not an object': 'mlxvlm-macos-arm64-07ba5a1',
+  }
+  const ts = (raw: unknown) => {
+    try {
+      return parseMlxManifest(raw)
+    } catch {
+      return null
+    }
+  }
+
+  for (const [name, raw] of Object.entries(manifests))
+    it(`${name}: the same document, the pin the core would install on Apple Silicon`, () => {
+      const core = ts(raw)
+      expect(parseMlxPinManifest(raw)).toEqual(core)
+      const pins = resolveMlxPins({ manifest: raw, coreVersion: '0.23.0' })
+      expect(pins.source).toBe(core ? 'mlx-manifest' : 'none')
+      expect(pins.repo).toBe(core?.upstream_repo ?? null)
+      for (const p of MLX_PIN_PLATFORMS) {
+        const choice = core ? mlxHostChoice({ os: p.os, arch: p.arch }, core) : null
+        const archive = core?.assets.find((a) => a.backend === choice?.backend_id)
+        expect(pins.per_platform[p.platform], p.platform).toEqual({
+          backend: p.backend,
+          tag: archive && assetInstallable(archive) ? core?.tag_name : null,
+        })
+      }
+    })
+
+  it('pins Apple Silicon only, from where the manifest says the core downloads it, with its upstream tag', () => {
+    expect(MLX_PIN_PLATFORMS.map((p) => p.platform)).toEqual(['macos-arm64'])
+    expect(resolveMlxPins({ manifest: mlxLive, coreVersion: '0.23.0' })).toMatchObject({
+      per_platform: { 'macos-arm64': { tag: 'mlxvlm-macos-arm64-07ba5a1' } },
+      repo: 'AtomicBot-ai/mlx-vlm',
+      upstream_tag: null,
+    })
+    expect(resolveMlxPins({ manifest: mlxStaging, coreVersion: '0.23.0' })).toMatchObject({
+      per_platform: { 'macos-arm64': { tag: 'mlxvlm-macos-arm64-1f48deb' } },
+      repo: 'AtomicBot-ai/atomic-chat-conf',
+      upstream_tag: 'v0.7.12',
+    })
+    expect(resolveMlxPins({ manifest: undefined, coreVersion: '0.23.0' })).toMatchObject({
+      source: 'none',
+      repo: null,
+      per_platform: { 'macos-arm64': { tag: null } },
+    })
+  })
+
+  it('splits a tag into the fork commit or the upstream tag it names', () => {
+    expect(mlxTagParts('mlxvlm-macos-arm64-07ba5a1')).toEqual({
+      version: null,
+      upstream_tag: null,
+      atomic_rev: '07ba5a1',
+    })
+    expect(mlxTagParts('v0.7.12')).toEqual({ version: '0.7.12', upstream_tag: 'v0.7.12', atomic_rev: null })
+    for (const tag of ['mlxvlm-macos-arm64-07ba5a', 'v0.7', '0.7.12', 'b11617', 'v0.9.3-a1b2c3d4'])
+      expect(mlxTagParts(tag), tag).toBeNull()
+    // MLX builds have no build number: llama.cpp's build gates never apply to them.
+    expect(engineTagBuild('mlxvlm-macos-arm64-07ba5a1')).toBeNull()
   })
 })

@@ -44,11 +44,7 @@ function service(downloader: FakeDownloader, busyDirs: string[] = []) {
 
 describe('install', () => {
   it('refuses to replace a pack a session is running from', async () => {
-    const busyDir = join(
-      data.layout.provider('llamacpp-upstream').backendsDir,
-      'b6325',
-      'macos-arm64'
-    )
+    const busyDir = join(data.layout.provider('llamacpp-upstream').backendsDir, 'b6325', 'macos-arm64')
     const downloader = fakeDownloader()
 
     const refusal = service(downloader, [busyDir]).install('b6325', 'macos-arm64', {
@@ -62,9 +58,9 @@ describe('install', () => {
   it('installs when nothing runs from the pack', async () => {
     const downloader = fakeDownloader()
 
-    await expect(
-      service(downloader, []).install('b6325', 'macos-arm64', { taskId: 'test' })
-    ).rejects.toThrow('network went away')
+    await expect(service(downloader, []).install('b6325', 'macos-arm64', { taskId: 'test' })).rejects.toThrow(
+      'network went away'
+    )
     expect(downloader.download).toHaveBeenCalled()
   })
 })

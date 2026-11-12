@@ -20,7 +20,10 @@
 // history between the two tags the builds are cut from; `audio-cpp`: audio.cpp's in
 // scripts/lib/audiocpp-surface.mjs — the flags and routes of `audiocpp_server --help`, `--version`
 // naming the tag's version, the archives by backend — with the pin from conf's audio.cpp manifest and
-// 0xShug0's history between the two tags). --repo: any repo publishing the engine's
+// 0xShug0's history between the two tags; `mlx`: MLX's in scripts/lib/mlx-surface.mjs — the flags and
+// choices of `mlx-server --help`, the install probe on it, what the archive unpacks to, the one
+// archive — with the pin from conf's MLX manifest and Neywa-Labs/mlx-vlm's history between the
+// upstream tags the two builds are based on, when both are known). --repo: any repo publishing the engine's
 // asset names (AtomicBot-ai/atomic-chat-conf for the signed mirror). --pin auto takes conf's list for the engine
 // (the newest approved release this core version runs, on linux-x64); the pin's binary comes from
 // --pin-repo, by default the candidate's repo when it has the tag, else the engine's. A local --candidate-bin is tagged b<build> from its --version;
@@ -36,6 +39,7 @@ import {
   buildReport,
   countStrings,
   invocationKey,
+  watches,
   MIRROR_WHITELIST,
   parseBinaryVersion,
   parseGitLog,
@@ -46,6 +50,7 @@ import {
   versionCommit,
 } from './lib/engine-surface.mjs'
 import {
+  CONF_FILES,
   coreIdentity,
   engineConfig,
   engineContract,
@@ -63,19 +68,27 @@ import {
   sha256File,
   upstreamTagCommit,
 } from './lib/engine-io.mjs'
-import { audiocppTagParts, sdcppTagBuild, sdcppTagParts } from './lib/engine-pin.mjs'
+import { audiocppTagParts, mlxTagParts, sdcppTagBuild, sdcppTagParts } from './lib/engine-pin.mjs'
 import { buildSdcppReport, notInArchive, parseSdVersion } from './lib/sdcpp-surface.mjs'
 import { buildAudiocppReport, parseAudioVersionOutput } from './lib/audiocpp-surface.mjs'
+import { buildMlxReport, mlxManifestUpstreamTagFor } from './lib/mlx-surface.mjs'
 
 const SEVERITY_ORDER = ['warn', 'error', 'break']
 
 /**
  * The engines whose builds are a ggml project's release cut from an upstream tag (`kind` in the
- * config): their own report, and how a tag names the upstream tag it is cut from.
+ * config), and MLX's: their own report, how a tag names the upstream tag it is cut from, and, where a
+ * tag does not (MLX's `mlxvlm-macos-arm64-<hex>`), conf's manifests that may.
  */
 const RELEASE_KINDS = {
   sdcpp: { report: buildSdcppReport, tagParts: sdcppTagParts },
   audiocpp: { report: buildAudiocppReport, tagParts: audiocppTagParts },
+  mlx: {
+    report: buildMlxReport,
+    tagParts: mlxTagParts,
+    confUpstreamTag: (conf, tag) =>
+      mlxManifestUpstreamTagFor([conf.docs?.[CONF_FILES.mlxStaging], conf.docs?.[CONF_FILES.mlx]], tag),
+  },
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -165,7 +178,7 @@ async function gather(contract, opts, config) {
         : { source: 'core-copy', entries: MIRROR_WHITELIST }
 
   const capture = (side, bin) => {
-    const invocations = runInvocations(bin, contract.invocations ?? [])
+    const invocations = runInvocations(bin, contract.invocations ?? [], contract.invocation_timeout_ms)
     const ran = (key) => invocations.find((i) => invocationKey(i) === key)
     const output = (key) => ran(key)?.output
     side.invocations = invocations.map(({ output: text, ...rest }) =>
@@ -186,6 +199,13 @@ async function gather(contract, opts, config) {
       // audio.cpp versions are X.Y.Z, not build numbers.
       side.build = null
       side.commit = parseAudioVersionOutput(contract, side.version_output ?? '')?.commit ?? null
+      return
+    }
+    if (config.kind === 'mlx') {
+      // mlx-server prints neither a version nor a commit: only the release ties it to a tag.
+      side.help_text = output('mlx-server --help')
+      side.build = null
+      side.commit = null
       return
     }
     side.help_text = output('-h')
@@ -211,14 +231,16 @@ async function gather(contract, opts, config) {
   const upstreamRepo = contract.upstream?.repo ?? config.default_repo
   const releaseSide = async (tag, repo) => {
     const side = { tag, repo, source: 'release', platform }
-    // sd.cpp's and audio.cpp's builds are cut from an upstream tag: its commit and date place them in
-    // upstream's history.
-    const parts = RELEASE_KINDS[config.kind]?.tagParts(tag) ?? null
-    if (parts) {
-      const upstreamRelease = await githubRelease(upstreamRepo, parts.upstream_tag).catch(() => null)
+    // sd.cpp's, audio.cpp's and MLX's builds are cut from an upstream tag: its commit and date place
+    // them in upstream's history. An MLX build named by the fork commit has it from conf's manifest
+    // naming the build, or not at all.
+    const kind = RELEASE_KINDS[config.kind]
+    const upstreamTag = kind?.tagParts(tag)?.upstream_tag ?? kind?.confUpstreamTag?.(conf, tag) ?? null
+    if (upstreamTag) {
+      const upstreamRelease = await githubRelease(upstreamRepo, upstreamTag).catch(() => null)
       side.upstream = {
-        tag: parts.upstream_tag,
-        commit: upstreamTagCommit(upstreamRepo, parts.upstream_tag),
+        tag: upstreamTag,
+        commit: upstreamTagCommit(upstreamRepo, upstreamTag),
         published_at: upstreamRelease?.published_at ?? null,
       }
     }
@@ -245,6 +267,7 @@ async function gather(contract, opts, config) {
       })
       const asset = build.fixture.asset
       side.binary = { name: asset.name, sha256: asset.sha256, digest_verified: asset.digest_verified }
+      if (Array.isArray(build.fixture.archive_entries)) side.archive_entries = build.fixture.archive_entries
       capture(side, build.bin)
     } catch (error) {
       side.capture_error = error.message
@@ -278,6 +301,7 @@ async function gather(contract, opts, config) {
       const candidateRepo = candidate.repo ?? config.default_repo
       const repo =
         opts['pin-repo'] ??
+        resolution.repo ??
         config.pin_repo ??
         (candidateRepo !== config.default_repo && (await githubRelease(candidateRepo, tag).catch(() => null))
           ? candidateRepo
@@ -430,11 +454,12 @@ function gitDiff(contract, { base, head, candidate, pin, upstreamRepo, gitDir })
     git(gitDir, ['log', '--format=%x1e%H%x09%s', '--name-only', `${baseSha}..${headSha}`])
   )
   const stats = parseNumstat(git(gitDir, ['diff', '--numstat', baseSha, headSha, '--', ...watched]))
-  const present = new Set(
-    git(gitDir, ['ls-tree', '-r', '--name-only', headSha, '--', ...watched])
+  // The watched files each end has; a watched folder (`dir/`) stands for every file under it.
+  const filesAt = (rev) =>
+    git(gitDir, ['ls-tree', '-r', '--name-only', rev, '--', ...watched])
       .split('\n')
       .filter(Boolean)
-  )
+  const present = filesAt(headSha)
   const upstream = {
     available: true,
     method: 'git',
@@ -442,12 +467,12 @@ function gitDiff(contract, { base, head, candidate, pin, upstreamRepo, gitDir })
     head: headSha,
     commits,
     watched: watched.map((path) => {
-      const stat = stats.find((s) => s.path === path)
+      const changed = stats.filter((s) => watches(path, s.path))
       return {
         path,
-        exists: present.has(path),
-        additions: stat?.additions ?? 0,
-        deletions: stat?.deletions ?? 0,
+        exists: present.some((f) => watches(path, f)),
+        additions: changed.reduce((n, s) => n + s.additions, 0),
+        deletions: changed.reduce((n, s) => n + s.deletions, 0),
       }
     }),
   }
@@ -455,7 +480,7 @@ function gitDiff(contract, { base, head, candidate, pin, upstreamRepo, gitDir })
     // The watched files at both ends (their blobs are here already), counted the way core matches.
     const files = (rev) =>
       Object.fromEntries(
-        watched
+        filesAt(rev)
           .map((path) => [path, run('git', ['show', `${rev}:${path}`], { cwd: gitDir })])
           .filter(([, r]) => r.status === 0)
           .map(([path, r]) => [path, r.stdout])
@@ -483,12 +508,16 @@ async function compareApi(contract, base, head, upstreamRepo) {
     total_commits: data.total_commits ?? commits.length,
     commits: commits.reverse(),
     watched: (contract.upstream?.watched_paths ?? []).map(({ path }) => {
-      const file = files.find((f) => f.filename === path)
+      const changed = files.filter((f) => watches(path, f.filename))
       return {
         path,
-        exists: file?.status !== 'removed',
-        additions: file?.additions ?? 0,
-        deletions: file?.deletions ?? 0,
+        // A file the range does not touch is there; a folder, unless every file of it the range
+        // touches was removed (as far as the API lists them).
+        exists: path.endsWith('/')
+          ? changed.length === 0 || changed.some((f) => f.status !== 'removed')
+          : changed[0]?.status !== 'removed',
+        additions: changed.reduce((n, f) => n + (f.additions ?? 0), 0),
+        deletions: changed.reduce((n, f) => n + (f.deletions ?? 0), 0),
       }
     }),
   }

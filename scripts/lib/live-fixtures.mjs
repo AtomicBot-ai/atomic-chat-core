@@ -70,11 +70,22 @@ export function expandLiveEnv(template, values) {
 }
 
 /**
- * The cache key of an engine's live models (`live_models`): their sha256 hashes, so a new model is a
- * new key and the same models share one entry across platforms. Empty when the engine names none.
+ * What pins a live model's bytes: its `sha256`, or for a model that is a folder of files (`files`,
+ * an MLX model) the sha256 of its sorted `<path> <sha256>` lines, so another file or other bytes are
+ * another model.
+ */
+export function liveModelDigest(model) {
+  if (!Array.isArray(model.files)) return model.sha256
+  const lines = model.files.map((f) => `${f.path} ${f.sha256}`).sort()
+  return createHash('sha256').update(lines.join('\n')).digest('hex')
+}
+
+/**
+ * The cache key of an engine's live models (`live_models`): their digests, so a new model is a new
+ * key and the same models share one entry across platforms. Empty when the engine names none.
  */
 export function liveModelsKey(models) {
   if (!Array.isArray(models) || models.length === 0) return ''
-  const hashes = models.map((m) => m.sha256).sort()
+  const hashes = models.map(liveModelDigest).sort()
   return createHash('sha256').update(hashes.join('\n')).digest('hex').slice(0, 16)
 }

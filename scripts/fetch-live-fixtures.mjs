@@ -18,7 +18,10 @@
 // <out>/models; shared between builds), and manifest.json and live.json for the live env
 // (scripts/lib/sdcpp-fixtures.mjs). --engine audio-cpp (`kind: audiocpp`) does the same for audio.cpp
 // (scripts/lib/audiocpp-fixtures.mjs: MOSS-TTS-Nano as the model) and also writes what the build prints for
-// --help, --version and --list-devices into help.txt, version.txt and list-devices.txt.
+// --help, --version and --list-devices into help.txt, version.txt and list-devices.txt. --engine mlx
+// (`kind: mlx`, scripts/lib/mlx-fixtures.mjs) fetches the release's one `mlx-server` archive (macOS
+// arm64 only), the model folder of `live_models` (SmolLM2-135M-Instruct 8-bit, file by file), conf's
+// MLX manifest of the release as manifest.json, and what `mlx-server --help` prints as help.txt.
 //
 // Writes into <out>: bin-path.txt and model-path.txt (exported as ATOMIC_LIVE_UPSTREAM_BIN /
 // ATOMIC_LIVE_UPSTREAM_MODEL, or the engine's own prefix such as ATOMIC_LIVE_PRISM_*), tag.txt
@@ -45,6 +48,7 @@ import { assetPatternFor, DEFAULT_RELEASE_REPO, digestMatches, pickRelease } fro
 import { engineContract, hostPlatform } from './lib/engine-io.mjs'
 import { fetchSdcppFixtures } from './lib/sdcpp-fixtures.mjs'
 import { fetchAudiocppFixtures } from './lib/audiocpp-fixtures.mjs'
+import { fetchMlxFixtures } from './lib/mlx-fixtures.mjs'
 
 const arg = (name) => {
   const index = process.argv.indexOf(name)
@@ -78,8 +82,8 @@ const CAPTURE = process.argv.includes('--capture')
 
 mkdirSync(OUT, { recursive: true })
 
-/** The engines whose builds are a ggml project's release (`kind` in the config), by their fetch. */
-const RELEASE_FETCHES = { sdcpp: fetchSdcppFixtures, audiocpp: fetchAudiocppFixtures }
+/** The engines whose builds are a ggml project's release (`kind` in the config), and MLX, by their fetch. */
+const RELEASE_FETCHES = { sdcpp: fetchSdcppFixtures, audiocpp: fetchAudiocppFixtures, mlx: fetchMlxFixtures }
 const releaseFetch = RELEASE_FETCHES[engineConfig?.kind]
 
 if (releaseFetch) {

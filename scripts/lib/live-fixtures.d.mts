@@ -41,4 +41,10 @@ export declare function expandLiveEnv(
   values: LiveValues
 ): Record<string, string>
 
-export declare function liveModelsKey(models: ReadonlyArray<{ sha256: string }> | undefined): string
+/** One file pinned by its sha256, or a folder of them (`files`, under `url` + `path`). */
+export type LiveModelPin =
+  | { sha256: string; files?: undefined }
+  | { sha256?: undefined; files: ReadonlyArray<{ path: string; sha256: string }> }
+
+export declare function liveModelDigest(model: LiveModelPin): string
+export declare function liveModelsKey(models: ReadonlyArray<LiveModelPin> | undefined): string

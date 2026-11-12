@@ -58,9 +58,10 @@ export declare function upstreamRemoteBackends(
 export interface Pins {
   /**
    * Which conf file decided: the release list when this core reads it, else the legacy manifest;
-   * the PrismML manifest for `atomic-prism`, conf's sd.cpp and audio.cpp manifests for theirs.
+   * the PrismML manifest for `atomic-prism`, conf's sd.cpp, audio.cpp and MLX manifests for theirs.
    */
-  source: 'list' | 'legacy' | 'prism-manifest' | 'sdcpp-manifest' | 'audiocpp-manifest' | 'none'
+  source:
+    'list' | 'legacy' | 'prism-manifest' | 'sdcpp-manifest' | 'audiocpp-manifest' | 'mlx-manifest' | 'none'
   core_version: string
   per_platform: Record<string, { backend: string; tag: string | null }>
   list: { readable: boolean; per_platform: Record<string, string | null> | null }
@@ -152,3 +153,32 @@ export type AudiocppPinManifest = SdcppPinManifest
 
 export declare function parseAudiocppPinManifest(value: unknown): AudiocppPinManifest | null
 export declare function resolveAudiocppPins(input: { manifest: unknown; coreVersion: string }): Pins
+
+export declare const MLX_PIN_PLATFORMS: readonly PinPlatform[]
+/** `mlxvlm-macos-arm64-<hex>`: the tags released cores install by name. */
+export declare const MLX_TAG_RE: RegExp
+
+export interface MlxTagParts {
+  /** `X.Y.Z` of a fork release named by its upstream tag; `null` on `mlxvlm-macos-arm64-<hex>`. */
+  version: string | null
+  /** `vX.Y.Z`, the Neywa-Labs/mlx-vlm tag; `null` when the tag does not say (a conf manifest may). */
+  upstream_tag: string | null
+  /** The fork commit an `mlxvlm-macos-arm64-<hex>` build was made at; `null` on `vX.Y.Z`. */
+  atomic_rev: string | null
+}
+
+export declare function mlxTagParts(tag: string): MlxTagParts | null
+
+export interface MlxPinManifest {
+  upstream_repo: string
+  tag_name: string
+  published_at: string
+  assets: Array<{ backend: string; name: string; sha256?: string; size?: number }>
+}
+
+export declare function parseMlxPinManifest(value: unknown): MlxPinManifest | null
+export declare function mlxManifestUpstreamTag(value: unknown): string | null
+export declare function resolveMlxPins(input: {
+  manifest: unknown
+  coreVersion: string
+}): Pins & { repo: string | null; upstream_tag: string | null }

@@ -1,0 +1,159 @@
+{
+  "schema": "atomic-engine-contract",
+  "schema_version": 1,
+  "engine": "mlx",
+  "generated_by": "by hand; test/contract/mlx-engine-contract.test.ts holds every part to the mlx-server --help of the fork's builds (help/), src/runtime/mlx and src/engine-builds",
+  "invocation_timeout_ms": 120000,
+  "invocations": [
+    {
+      "bin": "mlx-server",
+      "argv": ["--help"],
+      "source": "src/engine-builds/builds.ts",
+      "expect": "exit-0",
+      "severity": "break",
+      "note": "The install probe (probeMlxServer) needs exit 0: a build whose --help fails installs on no Mac. The check also reads the flags from it."
+    }
+  ],
+  "probe": {
+    "argv": ["--help"],
+    "pattern": "usage:\\s*mlx-server",
+    "source": "src/engine-builds/builds.ts",
+    "note": "mlxProbePassed: exit 0 and argparse's usage line, case-insensitive. mlx-server has no --version (argparse exits 2): nothing ties the binary to its tag but the release it came from."
+  },
+  "archive": {
+    "entries": ["mlx-server"],
+    "source": "src/engine-builds/builds.ts",
+    "note": "probeMlxServer runs <unpacked archive>/mlx-server. The fork's release-atomic.yml packs exactly that file, and conf's mirror-mlx.yml refuses an archive holding anything else."
+  },
+  "flags": [
+    { "flag": "--model", "severity": "break", "source": "src/runtime/mlx/args.ts" },
+    { "flag": "--host", "severity": "break", "source": "src/runtime/mlx/args.ts" },
+    { "flag": "--port", "severity": "break", "source": "src/runtime/mlx/args.ts" },
+    {
+      "flag": "--max-kv-size",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "note": "Whenever a context size is set, which is every load the core plans."
+    },
+    {
+      "flag": "--draft-model",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "note": "Only with a drafter."
+    },
+    {
+      "flag": "--draft-kind",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "choices": ["dflash", "eagle3", "mtp"],
+      "note": "Only with a drafter; an unknown kind is passed as dflash."
+    },
+    {
+      "flag": "--draft-block-size",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "note": "Only with a drafter and a block size."
+    },
+    {
+      "flag": "--kv-bits",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "note": "Only with KV cache quantization."
+    },
+    {
+      "flag": "--kv-quant-scheme",
+      "severity": "break",
+      "source": "src/runtime/mlx/args.ts",
+      "choices": ["turboquant", "uniform"],
+      "note": "Only with KV cache quantization."
+    }
+  ],
+  "env": [
+    {
+      "name": "MLX_VLM_SINGLE_MODEL",
+      "value": "1",
+      "source": "src/runtime/mlx/runtime.ts",
+      "note": "The fork's patch 0001-server-single-model-mode: the server keeps serving its --model whatever model label a request names. Not in upstream's sources, so it is not searched there; the live test's requests name the core's model id, not the folder."
+    },
+    {
+      "name": "MLX_VLM_MAX_TOKENS",
+      "source": "src/runtime/mlx/runtime.ts",
+      "note": "The answer cap of a request without max_tokens (upstream's default is 2048); searched in upstream's sources below."
+    }
+  ],
+  "ready": {
+    "source": "src/runtime/mlx/errors.ts",
+    "note": "The core reads readiness from uvicorn's own log lines (MLX_STDOUT_READY_MARKERS, MLX_STDERR_READY_MARKERS), which no mlx-vlm source prints: the live tests hold every real load to them instead."
+  },
+  "strings": [
+    {
+      "id": "route.chat-completions",
+      "text": "/v1/chat/completions",
+      "channel": "http-route",
+      "source": "src/server/public/forward.ts",
+      "upstream_text": "\"/v1/chat/completions\"",
+      "severity_if_lost": "break",
+      "note": "Every chat with an MLX model is forwarded here."
+    },
+    {
+      "id": "route.responses",
+      "text": "/v1/responses",
+      "channel": "http-route",
+      "source": "src/server/public/responses.ts",
+      "upstream_text": "\"/v1/responses\"",
+      "severity_if_lost": "warn",
+      "note": "The public /v1/responses passes MLX sessions through to the engine's own; the live tests do not call it."
+    },
+    {
+      "id": "env.max-tokens",
+      "text": "MLX_VLM_MAX_TOKENS",
+      "channel": "env",
+      "source": "src/runtime/mlx/runtime.ts",
+      "upstream_text": "\"MLX_VLM_MAX_TOKENS\"",
+      "severity_if_lost": "warn",
+      "note": "Without it a request that sends no max_tokens stops at upstream's default instead of the core's."
+    }
+  ],
+  "assets": {
+    "source": "the fork's .github/workflows/release-atomic.yml and conf's mirror-mlx.yml (ASSET), src/engine-builds/select.ts (mlxHostChoice)",
+    "note": "One archive whatever the tag: the PyInstaller onefile mlx-server, Developer ID signed and notarized by the fork, copied byte for byte by conf. `cpu` marks the build every host of the platform installs (here the only one, a Metal build); requirements.lock.txt beside it is not an archive.",
+    "core_backends": [
+      {
+        "platform": "macos-arm64",
+        "backend": "macos-arm64",
+        "cpu": true,
+        "required": true,
+        "asset": "mlxvlm-mlx-server-macos-arm64\\.tar\\.gz"
+      }
+    ]
+  },
+  "upstream": {
+    "repo": "Neywa-Labs/mlx-vlm",
+    "branch": "main",
+    "watched_paths": [
+      {
+        "path": "mlx_vlm/server/",
+        "why": "the server mlx-server freezes: its flags and choices (cli.py), the routes core forwards to, model loading, structured outputs, MLX_VLM_MAX_TOKENS"
+      },
+      {
+        "path": "mlx_vlm/version.py",
+        "why": "the version the fork's build checks against the tag"
+      },
+      {
+        "path": "requirements.txt",
+        "why": "the dependencies the frozen binary bundles (mlx, mlx-lm, transformers, llguidance for json_schema response_format)"
+      },
+      {
+        "path": "pyproject.toml",
+        "why": "the package metadata and extras PyInstaller resolves"
+      }
+    ],
+    "release_note_keywords": [
+      { "pattern": "deprecat", "severity": "warn" },
+      { "pattern": "remove", "severity": "warn" },
+      { "pattern": "rename", "severity": "warn" },
+      { "pattern": "breaking", "severity": "warn" },
+      { "pattern": "\\b(server|cli|args?|api|kv|draft|structured|response_format)\\b", "severity": "info" }
+    ]
+  }
+}

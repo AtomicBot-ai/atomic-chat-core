@@ -681,6 +681,7 @@ npm run engine:check -- --tag b10875 --pin b10874 --suites live            # a b
 npm run engine:check -- --engine atomic-prism --tag prism-b10787-73bfe6c   # a PrismML build
 npm run engine:check -- --engine sd-cpp --tag master-883-137f740           # a stable-diffusion.cpp build
 npm run engine:check -- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3   # an audio.cpp build
+npm run engine:check -- --engine mlx --tag v0.7.12                         # an mlx-server build (Apple Silicon)
 ```
 
 Without `--tag` or `--bin` it takes the newest complete b-tag of `--repo` (default `ggml-org/llama.cpp`).
@@ -715,8 +716,8 @@ gh run download <run-id> -n engine-candidate-results
 
 | input | default | |
 |---|---|---|
-| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork, `sd-cpp` stable-diffusion.cpp, `audio-cpp` audio.cpp (below) |
-| `tag` | newest complete | the candidate tag: `b11617`, `prism-b10787-73bfe6c` for `atomic-prism`, `master-975-95b3090` or `master-975-95b3090-a<rev>` for `sd-cpp`, `v0.9.3` or `v0.9.3-a<rev>` for `audio-cpp` |
+| `engine` | `llamacpp-upstream` | `.github/engine-candidate/<engine>.json` names the contract, the live files, the required live tests and the protected paths; `atomic-prism` checks PrismML's fork, `sd-cpp` stable-diffusion.cpp, `audio-cpp` audio.cpp, `mlx` MLX's `mlx-server` (below) |
+| `tag` | newest complete | the candidate tag: `b11617`, `prism-b10787-73bfe6c` for `atomic-prism`, `master-975-95b3090` or `master-975-95b3090-a<rev>` for `sd-cpp`, `v0.9.3` or `v0.9.3-a<rev>` for `audio-cpp`, `v0.7.12` or `mlxvlm-macos-arm64-<rev>` for `mlx` |
 | `repo` | the engine's | any repo with ggml-org's asset names; `AtomicBot-ai/atomic-chat-conf` tests the signed mirror |
 | `candidate_id` | `manual` | `[A-Za-z0-9._:-]{1,80}`, shown as `[cid:<id>]` in the run title so a caller can find its run |
 | `core_ref` | `main` | the core to check, e.g. an agent's fix branch |
@@ -873,3 +874,49 @@ fetches the archive into `.live-audio/engine-<tag>/` and MOSS-TTS-Nano into `<di
 `manifest.json`, `live.json`, and `help.txt`, `version.txt` and `list-devices.txt` (the shape of
 `test/fixtures/audiocpp/v<version>/`). A core release without `.github/engine-candidate/audio-cpp.json` cannot check
 audio.cpp.
+
+### MLX builds (`mlx`)
+
+The check covers `mlx-server`, the frozen mlx-vlm server the MLX provider runs
+([ADR 2026-11-12](decisions/2026-11-12-check-mlx-builds-with-the-engine-candidate.md)).
+`.github/engine-candidate/mlx.json` (`kind: mlx`) and `scripts/lib/mlx-{surface,fixtures}.mjs` hold what differs; the
+completeness, report and fetch logic is sd.cpp's, with MLX's release spec. One build, one platform: macOS on Apple
+Silicon, so every job of the check runs on `macos-15`, the surface too (`surface_runner`).
+
+- **Three kinds of candidate.** The mlx-vlm fork's build of a Neywa-Labs tag (`vX.Y.Z`, from `AtomicBot-ai/mlx-vlm`,
+  the default `repo`); conf's mirror of it (`mlxvlm-macos-arm64-<rev>`, `repo=AtomicBot-ai/atomic-chat-conf`, `<rev>` the
+  fork commit the build ran at), complete once `backends/mlx-manifest.staging.json` at the run's conf commit (or the live
+  manifest, when that is the one naming the tag) names the tag, downloads from conf and pins exactly the release's size
+  and sha256; and the fork's older releases (`mlxvlm-macos-arm64-<hex>`). The archive is always
+  `mlxvlm-mlx-server-macos-arm64.tar.gz` (`requirements.lock.txt` beside it is ignored). A conf build's upstream tag is
+  the manifest's `upstream_tag`; an older fork build has none, and the upstream history is then not compared.
+- **The pin** is the live manifest's `tag_name` (`backends/mlx-manifest.json`), fetched from the repository the manifest
+  downloads from (`upstream_repo`: the fork for builds before conf's mirror, conf after it).
+- **The surface** reads `mlx-server --help` (argparse: every flag core passes as a whole token, and every value it
+  passes to `--draft-kind` and `--kv-quant-scheme` among the listed choices), the install probe on it (exit 0 and
+  `usage: mlx-server`), what the archive unpacks to (`mlx-server` alone), the archive, and Neywa-Labs/mlx-vlm's history
+  between the pin's and the candidate's upstream tags: `mlx_vlm/server/` as a watched folder, the version and the
+  dependencies, the routes core forwards to (`/v1/chat/completions`, `/v1/responses`) and `MLX_VLM_MAX_TOKENS`, and
+  commits announcing a removal. `mlx-server` has no `--version`: nothing but the release ties a binary to its tag. The
+  contract is `test/fixtures/mlx/engine-contract.json`.
+- **Live** is `test/live/mlx.test.ts` and `test/live/mlx-install.test.ts` on Metal, candidate and pin, with
+  SmolLM2-135M-Instruct 8-bit (`live_models`: a model folder, every file pinned by Hugging Face revision and sha256,
+  141 MB). The runtime test holds `--help` to the flags and choices, loads the folder through the core with the build
+  as its resources dir, chats, and asks for a json_schema `response_format` (JSON that follows the schema, or the bundle
+  lost its structured-output engine). The install test installs the build through a manifest `fetch-live-fixtures`
+  writes from the release (`ATOMIC_MLX_MANIFEST_URL`), refuses a tampered sha256 and keeps the manifest's
+  `published_at`. A fork build named `vX.Y.Z` cannot be installed by that name (cores accept only
+  `mlxvlm-macos-arm64-<hex>`), so the install tests skip on it and are required only of `mlxvlm-macos-arm64-<hex>`
+  builds (`tag_pattern`): conf's mirror, which the approval checks, runs them.
+- Draft models, KV quantization and vision models are not run (`not_verified`).
+
+```bash
+gh workflow run engine-candidate.yml -f engine=mlx -f tag=v0.7.12 -f candidate_id=mlx-smoke -f core_ref=main
+# conf's mirror on a core release, as the pipeline checks it before approval:
+gh workflow run engine-candidate.yml --ref <core release> -f engine=mlx -f tag=mlxvlm-macos-arm64-<rev> \
+  -f repo=AtomicBot-ai/atomic-chat-conf -f candidate_id=mlx-verify -f core_ref=<core release> -f suites=live
+```
+
+`node scripts/fetch-live-fixtures.mjs --engine mlx --tag <tag> [--repo …] --out .live-mlx [--models <dir>]` fetches
+the archive into `.live-mlx/engine-<tag>/` and the model folder into `<dir>` (default `.live-mlx/models`), and writes
+`manifest.json`, `live.json` and `help.txt`. A core release without `.github/engine-candidate/mlx.json` cannot check MLX.

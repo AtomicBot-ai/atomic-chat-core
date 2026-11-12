@@ -2,16 +2,20 @@
  * The release-picking rules of `scripts/fetch-live-fixtures.mjs`, which decide what llama.cpp build
  * the live suites run: the platform's CPU asset, the newest release that has it (ggml-org's builds
  * are prereleases and its `latest` carries no binaries), and a digest check on the bytes; and for an
- * engine with several model files (sd.cpp), the live env its config describes and the models' cache key.
+ * engine with several model files (sd.cpp), the live env its config describes and the models' cache key,
+ * and for a model that is a folder of files (MLX), where each file lands and what pins the folder.
  */
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   assetPatternFor,
   digestMatches,
   expandLiveEnv,
+  liveModelDigest,
   liveModelsKey,
   pickRelease,
 } from '../../scripts/lib/live-fixtures.mjs'
+import { liveModelFiles, liveModelPath } from '../../scripts/lib/sdcpp-fixtures.mjs'
 
 const names = (tag: string) => [
   `llama-${tag}-bin-macos-arm64.tar.gz`,
@@ -129,5 +133,51 @@ describe('the live env of an engine with several files', () => {
     expect(liveModelsKey([a])).toMatch(/^[0-9a-f]{16}$/)
     expect(liveModelsKey(undefined)).toBe('')
     expect(liveModelsKey([])).toBe('')
+  })
+})
+
+describe('a live model that is a folder of files', () => {
+  const folder = {
+    id: 'tiny',
+    url: 'https://huggingface.co/org/tiny/resolve/0123456789abcdef0123456789abcdef01234567/',
+    files: [
+      { path: 'config.json', sha256: 'c'.repeat(64) },
+      { path: 'model.safetensors', sha256: 'd'.repeat(64) },
+    ],
+  }
+
+  it('is pinned by its files: their order does not matter, another file or other bytes do', () => {
+    const [config, weights] = folder.files as [(typeof folder.files)[0], (typeof folder.files)[0]]
+    const digest = liveModelDigest(folder)
+    expect(digest).toMatch(/^[0-9a-f]{64}$/)
+    expect(liveModelDigest({ ...folder, files: [weights, config] })).toBe(digest)
+    expect(liveModelDigest({ ...folder, files: [config] })).not.toBe(digest)
+    expect(liveModelDigest({ ...folder, files: [{ ...config, sha256: 'e'.repeat(64) }, weights] })).not.toBe(
+      digest
+    )
+    // A single file is its own sha256, as before.
+    expect(liveModelDigest({ sha256: 'a'.repeat(64) })).toBe('a'.repeat(64))
+    expect(liveModelsKey([folder])).toMatch(/^[0-9a-f]{16}$/)
+    expect(liveModelsKey([folder])).not.toBe(liveModelsKey([{ sha256: 'a'.repeat(64) }]))
+  })
+
+  it('lands in a folder of its own, each file under the revision it is pinned to', () => {
+    const dir = join('/models', liveModelDigest(folder).slice(0, 16), 'tiny')
+    expect(liveModelPath('/models', folder)).toBe(dir)
+    expect(liveModelFiles('/models', folder)).toEqual([
+      { url: `${folder.url}config.json`, path: join(dir, 'config.json'), sha256: 'c'.repeat(64) },
+      { url: `${folder.url}model.safetensors`, path: join(dir, 'model.safetensors'), sha256: 'd'.repeat(64) },
+    ])
+  })
+
+  it('refuses a file path that would leave the folder, and a base URL that is not a folder', () => {
+    for (const path of ['../x', 'a/../../b', '/etc/passwd', './x'])
+      expect(
+        () => liveModelFiles('/models', { ...folder, files: [{ path, sha256: 'c'.repeat(64) }] }),
+        path
+      ).toThrow('bad file path')
+    expect(() => liveModelFiles('/models', { ...folder, url: folder.url.slice(0, -1) })).toThrow(
+      'ends with /'
+    )
   })
 })

@@ -7,7 +7,9 @@
 // builds of the Atomic fork and their signed mirror master-<N>-<sha7>-a<rev> in conf, pinned by conf's
 // sd.cpp manifest, live tests on FLUX.2 Klein) or audio.cpp (`audio-cpp`, vX.Y.Z builds of the Atomic
 // fork or of 0xShug0 and their signed mirror vX.Y.Z[-a<rev>] in conf, pinned by conf's audio.cpp
-// manifest, live tests installing the build from a manifest).
+// manifest, live tests installing the build from a manifest) or MLX (`mlx`, the mlx-vlm fork's
+// `mlx-server` of a Neywa-Labs tag, vX.Y.Z, its older mlxvlm-macos-arm64-<hex> builds and conf's
+// mirror of them under that name, pinned by conf's MLX manifest, live tests on macOS arm64 only).
 //
 //   resolve  fix core and conf to one commit each, pick the candidate (the newest complete tag of
 //            --repo unless --tag), check its archives are all up, compute the pin per platform and
@@ -23,7 +25,8 @@
 //            `-- --tag b10875 --pin b10874 --suites live`,
 //            `-- --engine atomic-prism --tag prism-b10787-73bfe6c`,
 //            `-- --engine sd-cpp --tag master-883-137f740`,
-//            `-- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`. Writes results.json, results.md,
+//            `-- --engine audio-cpp --repo 0xShug0/audio.cpp --tag v0.9.3`,
+//            `-- --engine mlx --tag mlxvlm-macos-arm64-89acca5`. Writes results.json, results.md,
 //            report.json and report.md into --out (default .engine-check/); exit 0 only on pass.
 //
 // CI passes its inputs as env (ENGINE, TAG, REPO, CANDIDATE_ID, CORE_REF, PIN, CONF_REF, SUITES);
@@ -78,10 +81,11 @@ import {
   sha256File,
   upstreamTagCommit,
 } from './lib/engine-io.mjs'
-import { audiocppTagParts, sdcppTagParts } from './lib/engine-pin.mjs'
+import { audiocppTagParts, mlxManifestUpstreamTag, mlxTagParts, sdcppTagParts } from './lib/engine-pin.mjs'
 import { expandLiveEnv, liveModelsKey } from './lib/live-fixtures.mjs'
 import { sdcppCompleteness, sdcppCoreAssets } from './lib/sdcpp-surface.mjs'
 import { audiocppCompleteness, audiocppCoreAssets } from './lib/audiocpp-surface.mjs'
+import { mlxCompleteness, mlxCoreAssets } from './lib/mlx-surface.mjs'
 
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const readJsonIf = (path) => (path && existsSync(path) ? readJson(path) : undefined)
@@ -117,8 +121,9 @@ function protectedChanges(config, sha) {
 
 /**
  * The engines whose builds are a ggml project's release, one archive per backend id cut from an
- * upstream tag (`kind` in the config): how a tag reads, when a release is complete, the archives core
- * installs and conf's live manifest of the engine.
+ * upstream tag (`kind` in the config), and MLX's one archive: how a tag reads, when a release is
+ * complete, the archives core installs, conf's live manifest of the engine and, where the tag does
+ * not name the upstream tag (MLX's `mlxvlm-macos-arm64-<hex>`), how conf's manifest names it.
  */
 const RELEASE_KINDS = {
   sdcpp: {
@@ -133,14 +138,23 @@ const RELEASE_KINDS = {
     coreAssets: audiocppCoreAssets,
     liveManifest: CONF_FILES.audiocpp,
   },
+  mlx: {
+    tagParts: mlxTagParts,
+    completeness: mlxCompleteness,
+    coreAssets: mlxCoreAssets,
+    liveManifest: CONF_FILES.mlx,
+    manifestUpstreamTag: mlxManifestUpstreamTag,
+  },
 }
 
 /**
- * A release of an sd.cpp or audio.cpp build as the candidate (`--tag`, else the newest complete one of
- * `repo`): complete when every archive core and conf's mirror need is up with its digest, and on
- * conf's signed mirror when the staging manifest (`candidate_manifests.conf`, or the live manifest
+ * A release of an sd.cpp, audio.cpp or MLX build as the candidate (`--tag`, else the newest complete
+ * one of `repo`): complete when every archive core and conf's mirror need is up with its digest, and
+ * on conf's signed mirror when the staging manifest (`candidate_manifests.conf`, or the live manifest
  * when that is the one naming the tag) pins exactly those bytes. `commit` is the upstream tag's, from
- * `git ls-remote`; an sd.cpp tag names its first seven characters too.
+ * `git ls-remote`; an sd.cpp tag names its first seven characters too. An MLX build named by the fork
+ * commit has its upstream tag from conf's manifest naming it, or none (the fork's older releases):
+ * then `commit` is `null` and the surface compares no upstream history.
  */
 async function resolveReleaseCandidate({ config, kind, contract, repo, tag, conf, keys, errors }) {
   const isTag = (v) => engineTagRe(config).test(v ?? '')
@@ -171,17 +185,24 @@ async function resolveReleaseCandidate({ config, kind, contract, repo, tag, conf
   }
   const parts = kind.tagParts(release.tag_name)
   const upstreamRepo = contract.upstream?.repo
-  const commit = upstreamTagCommit(upstreamRepo, parts.upstream_tag)
-  if (!commit) errors.push(`${upstreamRepo} has no tag ${parts.upstream_tag} (or git ls-remote failed)`)
-  else if (parts.sha7 && !commit.startsWith(parts.sha7))
-    errors.push(`${upstreamRepo} ${parts.upstream_tag} is ${commit}, not the ${parts.sha7} its name says`)
-  const manifest = manifestFor(release.tag_name).path
+  const { path: manifest, manifest: doc } = manifestFor(release.tag_name)
+  const upstreamTag =
+    parts.upstream_tag ??
+    (doc?.tag_name === release.tag_name ? kind.manifestUpstreamTag?.(doc) : null) ??
+    null
+  let commit = null
+  if (upstreamTag) {
+    commit = upstreamTagCommit(upstreamRepo, upstreamTag)
+    if (!commit) errors.push(`${upstreamRepo} has no tag ${upstreamTag} (or git ls-remote failed)`)
+    else if (parts.sha7 && !commit.startsWith(parts.sha7))
+      errors.push(`${upstreamRepo} ${upstreamTag} is ${commit}, not the ${parts.sha7} its name says`)
+  }
   return {
     repo,
     tag: release.tag_name,
     source: 'release',
     commit,
-    upstream_tag: parts.upstream_tag,
+    upstream_tag: upstreamTag,
     atomic_rev: parts.atomic_rev,
     published_at: release.published_at ?? null,
     ...(manifest ? { manifest } : {}),
@@ -308,9 +329,11 @@ async function resolveRun({
   // The pin's archives from the candidate's repo when it has them (the mirror's signed bytes against
   // the mirror's), else from the engine's own repo.
   // sd.cpp's and audio.cpp's pins live in conf only (`pin_repo`): the forks have no `-a<rev>` tags.
+  // MLX's manifest names where the core downloads its build (`pins.repo`: conf, or the fork before it).
   let pinRepo = null
   if (pinTag)
     pinRepo =
+      pins.repo ??
       config.pin_repo ??
       (candidate.repo &&
       candidate.repo !== defaultRepo &&
@@ -398,6 +421,8 @@ async function cmdResolve(argv) {
     // GitHub's own default when the engine sets none.
     live_timeout_minutes: String(config.live_timeout_minutes ?? 360),
     live_models_key: liveModelsKey(config.live_models),
+    // Where the surface job runs the candidate: a Linux build there, unless the engine has none (MLX).
+    surface_runner: config.surface_runner ?? 'ubuntu-latest',
   })
   console.log(
     `candidate ${resolved.candidate.repo}@${resolved.candidate.tag} (${resolved.candidate.complete ? 'complete' : `incomplete: ${JSON.stringify(resolved.candidate.missing)}`}), ` +
@@ -501,7 +526,7 @@ function cmdCell(argv) {
       fixture: readJsonIf(o.fixtures && join(o.fixtures, 'fixture.json')) ?? null,
       vitest: readJsonIf(o.vitest[0]),
       observed: o.vitest[0] ? readJsonIf(join(observedDir(o.vitest[0]), 'observed.json')) : undefined,
-      required: requiredLiveTests(config.required_live_tests, o.platform),
+      required: requiredLiveTests(config.required_live_tests, o.platform, o.tag),
       ...(o.fixtures && existsSync(join(o.fixtures, 'fixture.json'))
         ? {}
         : { error: 'the build was not fetched' }),
@@ -741,7 +766,7 @@ async function cmdLocal(argv) {
       fixture: readJsonIf(fixtures && join(fixtures, 'fixture.json')) ?? null,
       vitest: readJsonIf(report),
       observed: readJsonIf(join(observedDir(report), 'observed.json')),
-      required: requiredLiveTests(config.required_live_tests, m.platform),
+      required: requiredLiveTests(config.required_live_tests, m.platform, m.tag),
       ...(error ? { error } : {}),
     })
     writeJson(join(out, 'cells', `live-${m.platform}-${m.role}.json`), cell)

@@ -66,12 +66,13 @@ export type SdcppMissing =
 
 /**
  * What differs between the engines whose builds are a ggml project's release, one archive per backend
- * id cut from an upstream tag (sd.cpp, audio.cpp).
+ * id cut from an upstream tag (sd.cpp, audio.cpp), and MLX's one archive.
  */
 export interface ReleaseSpec {
   /** `sd.cpp`, `audio.cpp`: the project in messages. */
   project: string
-  tagParts: (tag: string) => { upstream_tag: string; atomic_rev: string | null } | null
+  /** `upstream_tag` is `null` when the tag does not name it (MLX's `mlxvlm-macos-arm64-<hex>`). */
+  tagParts: (tag: string) => { upstream_tag: string | null; atomic_rev: string | null } | null
   /** The archive a contract pattern names for the build of `tag`. */
   assetRe: (pattern: string, tag: string) => RegExp
   /** The part of an archive's name that says which build it is, without the tag. */
