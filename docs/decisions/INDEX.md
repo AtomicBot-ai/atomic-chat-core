@@ -245,3 +245,4 @@ add a new one that says which record it supersedes.
 - [Wrap model-claim filesystem failures as coded IO errors](2026-11-12-wrap-model-claim-filesystem-failures-as-coded-io-errors.md)
 - [Accept the app's client keys next to the server key](2026-11-12-accept-app-client-keys-next-to-the-server-key.md) — `PUT /atomic/v1/server/client-keys`: in-memory extra keys next to a non-empty `api_key`; keyring wins, keyless stays open
 - [Downloads report the disk reason they already tag](2026-11-11-downloads-report-their-own-disk-reason.md)
+- [Refuse to replace a backend pack a session runs from](2026-11-12-refuse-replacing-in-use-backend-pack.md)

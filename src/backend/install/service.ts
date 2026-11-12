@@ -623,6 +623,14 @@ export class BackendService {
       await this.repairRocmRuntime(version, backend, options)
       return { version, backend, installed: false, path: target }
     }
+    // The final swap deletes the destination pack unconditionally. A session running from it holds
+    // the old files (EPERM on Windows, `disk_file_locked` after the retry ladder) and loses them on
+    // the rename elsewhere — the same refusal `remove()` gives, asked before anything is downloaded.
+    if (await this.inUse(version, backend))
+      throw new AtomicCoreError(
+        'BACKEND_IN_USE',
+        'Unload the model running from this build before installing it again.'
+      )
 
     // Staging directory beside the target, so the move at the end is a rename on the same volume
     // rather than a copy across one.
