@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, FoundryManagerConfig } from './library.js'
@@ -446,6 +449,174 @@ describe('runFoundryHost serve', () => {
     })
     return { ...fake, log }
   }
+
+  it.each([
+    { version: '2.4.0', type: 'qwen3_5', tools: true, ids: {}, repair: true },
+    { version: '2.4.0', type: 'qwen3_5', tools: true, ids: { bot_token_id: 248058 }, repair: true },
+    { version: '2.4.0', type: 'qwen3_5', tools: true, ids: { bot_token_id: 42 }, repair: false },
+    {
+      version: '2.4.0',
+      type: 'qwen3_5',
+      tools: true,
+      ids: { bot_token_id: 248058, eot_token_id: 248059 },
+      repair: false,
+    },
+    { version: '2.4.0', type: 'qwen3_5', tools: true, ids: {}, repair: true, reasoning: true },
+    { version: '2.4.0', type: 'qwen3_5', tools: false, ids: {}, repair: false },
+    { version: '2.1.0', type: 'qwen3_5', tools: true, ids: {}, repair: false },
+    { version: '2.4.0', type: 'phi3', tools: true, ids: {}, repair: false },
+  ])(
+    'publishes missing boundary tokens before registration for $version/$type/$tools/$ids/$reasoning',
+    async ({ version, type, tools, ids, repair, reasoning }) => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-foundry-tool-tokens-'))
+      const path = join(dir, 'genai_config.json')
+      const original = { model: { type, ...ids }, search: { do_sample: false } }
+      const tokens = [
+        { content: '<tool_call>', id: 248058, special: false },
+        { content: '</tool_call>', id: 248059, special: false },
+        { content: '<think>', id: 248068, special: false },
+        { content: '</think>', id: 248069, special: false },
+      ]
+      await writeFile(path, JSON.stringify(original))
+      await writeFile(join(dir, 'tokenizer.json'), JSON.stringify({ added_tokens: tokens }))
+      let beforeRegistration = ''
+      const fake = fakeLibrary({
+        registerLocalModel: (modelPath) => {
+          expect(modelPath).toBe(dir)
+          beforeRegistration = readFileSync(path, 'utf8')
+          return { load: () => {}, unload: () => {}, executionProvider: () => 'CPUExecutionProvider' }
+        },
+      })
+      fake.library.version = version
+      try {
+        const argv = [
+          'serve',
+          ...COMMON,
+          '--model',
+          dir,
+          '--ep',
+          'cpu',
+          '--port',
+          '41987',
+          '--cache',
+          join(dir, 'cache'),
+          '--id',
+          'atomic-qwen3.5-9b:1',
+          ...(tools ? ['--tools'] : []),
+          ...(reasoning ? ['--reasoning-start', '<think>', '--reasoning-end', '</think>'] : []),
+        ]
+        const output = io()
+        const exit = await runFoundryHost(argv, {
+          ...output,
+          loadLibrary: async () => fake.library,
+          watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+        })
+        expect(exit, output.err.join('\n')).toBe(0)
+        expect(JSON.parse(beforeRegistration)).toEqual({
+          ...original,
+          model: repair
+            ? {
+                type,
+                bot_token_id: 248058,
+                eot_token_id: 248059,
+                ...(reasoning ? { bor_token_id: 248068, eor_token_id: 248069 } : {}),
+              }
+            : original.model,
+        })
+        if (!repair) expect(beforeRegistration).toBe(JSON.stringify(original))
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }
+  )
+
+  it.each([
+    { type: 'mistral', start: '[TOOL_CALLS]', end: '</s>', startId: 9, endId: 2 },
+    { type: 'olmo', start: '<function_calls>', end: '</function_calls>', startId: 100268, endId: 100269 },
+    {
+      type: 'decoder-pipeline',
+      start: '<|tool_call|>',
+      end: '<|/tool_call|>',
+      startId: 200025,
+      endId: 200026,
+    },
+    { type: 'new-model', start: '<invoke>', end: '</invoke>', startId: 12, endId: 13, declared: true },
+    {
+      type: 'new-model',
+      start: '<invoke>',
+      end: '</invoke>',
+      startId: 12,
+      endId: 13,
+      unavailable: true,
+      declared: true,
+    },
+    { type: 'gemma4', start: '<|tool_call>', end: '<tool_call|>', startId: 48, endId: 49, gemma: true },
+  ])(
+    'uses only verified boundary IDs for $type ($start)',
+    async ({ type, start, end, startId, endId, declared, unavailable, gemma }) => {
+      const dir = await mkdtemp(join(tmpdir(), 'atomic-foundry-boundaries-'))
+      try {
+        const config = join(dir, 'genai_config.json')
+        const tokenizer = join(dir, 'tokenizer.json')
+        const added = [
+          { content: start, id: startId, special: true },
+          ...(unavailable ? [] : [{ content: end, id: endId, special: true }]),
+          { content: '<|channel>', id: 100, special: true },
+          { content: '<channel|>', id: 101, special: true },
+          { content: '<|think|>', id: 98, special: true },
+        ]
+        await writeFile(config, JSON.stringify({ model: { type } }))
+        await writeFile(tokenizer, JSON.stringify({ added_tokens: added }))
+        const fake = fakeLibrary({
+          registerLocalModel: (_, __, metadata) => {
+            expect(JSON.parse(readFileSync(config, 'utf8')).model).toEqual({
+              type,
+              ...(unavailable ? {} : { bot_token_id: startId, eot_token_id: endId }),
+              ...(gemma ? { bor_token_id: 100, eor_token_id: 101 } : {}),
+            })
+            expect(JSON.parse(readFileSync(tokenizer, 'utf8')).added_tokens).toEqual(
+              added.map((token) => (gemma && token.id !== 98 ? { ...token, special: false } : token))
+            )
+            if (gemma)
+              expect(metadata.strings).toMatchObject({
+                reasoning_start: '<|channel>',
+                reasoning_end: '<channel|>',
+              })
+            return { load: () => {}, unload: () => {}, executionProvider: () => 'CPUExecutionProvider' }
+          },
+        })
+        fake.library.version = '2.4.0'
+        const output = io()
+        const exit = await runFoundryHost(
+          [
+            'serve',
+            ...COMMON,
+            '--model',
+            dir,
+            '--ep',
+            'cpu',
+            '--port',
+            '41987',
+            '--cache',
+            join(dir, 'cache'),
+            '--id',
+            'model:1',
+            '--tools',
+            ...(declared ? [`--tool-call-start=${start}`, `--tool-call-end=${end}`] : []),
+            ...(gemma ? ['--reasoning-start', '<|channel>thought\\n', '--reasoning-end', '<|channel|>'] : []),
+          ],
+          {
+            ...output,
+            loadLibrary: async () => fake.library,
+            watchStop: () => ({ stopped: Promise.resolve(), dispose: () => {} }),
+          }
+        )
+        expect(exit, output.err.join('\n')).toBe(0)
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    }
+  )
 
   it('registers the prepared accelerator, the model with explicit metadata, loads, serves on loopback and says so', async () => {
     const fake = serveLibrary()

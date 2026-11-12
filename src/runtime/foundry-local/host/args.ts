@@ -6,6 +6,7 @@
  *   foundry-host prepare --lib <build> --app-data <dir> --logs <dir> [<ep>…]
  *   foundry-host serve   --lib <build> --app-data <dir> --logs <dir> --model <dir> --ep <ep>
  *                        --port <p> --cache <dir> --id <name>:<version> [--tools]
+ *                        [--tool-call-start <s> --tool-call-end <s>]
  *                        [--reasoning-start <s> --reasoning-end <s>] [--context-length <n>]
  */
 
@@ -38,6 +39,8 @@ export type FoundryHostArgs =
       /** `<name>:<version>`, never one of Microsoft's catalog ids (spike finding 7). */
       id: string
       tools: boolean
+      toolCallStart?: string
+      toolCallEnd?: string
       reasoningStart?: string
       reasoningEnd?: string
       contextLength?: number
@@ -101,6 +104,8 @@ export function parseFoundryHostArgs(argv: readonly string[]): FoundryHostArgs {
           'cache': { type: 'string' },
           'id': { type: 'string' },
           'tools': { type: 'boolean' },
+          'tool-call-start': { type: 'string' },
+          'tool-call-end': { type: 'string' },
           'reasoning-start': { type: 'string' },
           'reasoning-end': { type: 'string' },
           'context-length': { type: 'string' },
@@ -128,6 +133,8 @@ export function parseFoundryHostArgs(argv: readonly string[]): FoundryHostArgs {
         cache: required(values, 'cache'),
         id,
         tools: values.tools === true,
+        ...(values['tool-call-start'] !== undefined ? { toolCallStart: values['tool-call-start'] } : {}),
+        ...(values['tool-call-end'] !== undefined ? { toolCallEnd: values['tool-call-end'] } : {}),
         ...(values['reasoning-start'] !== undefined ? { reasoningStart: values['reasoning-start'] } : {}),
         ...(values['reasoning-end'] !== undefined ? { reasoningEnd: values['reasoning-end'] } : {}),
         ...(contextLength !== undefined ? { contextLength } : {}),

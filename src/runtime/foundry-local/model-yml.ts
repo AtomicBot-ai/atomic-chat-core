@@ -59,6 +59,8 @@ export function readFoundryLocalBlock(doc: Record<string, unknown>): ModelYmlFou
     throw broken('has a context_length that is not a positive whole number')
   const assetId = optionalText(block, 'asset_id')
   const assetVersion = optionalText(block, 'asset_version')
+  const toolCallStart = optionalText(block, 'tool_call_start')
+  const toolCallEnd = optionalText(block, 'tool_call_end')
   const reasoningStart = optionalText(block, 'reasoning_start')
   const reasoningEnd = optionalText(block, 'reasoning_end')
   return {
@@ -71,6 +73,8 @@ export function readFoundryLocalBlock(doc: Record<string, unknown>): ModelYmlFou
     ...(context !== undefined ? { context_length: context } : {}),
     tools: flag(block, 'tools'),
     reasoning: flag(block, 'reasoning'),
+    ...(toolCallStart !== undefined ? { tool_call_start: toolCallStart } : {}),
+    ...(toolCallEnd !== undefined ? { tool_call_end: toolCallEnd } : {}),
     ...(reasoningStart !== undefined ? { reasoning_start: reasoningStart } : {}),
     ...(reasoningEnd !== undefined ? { reasoning_end: reasoningEnd } : {}),
   }

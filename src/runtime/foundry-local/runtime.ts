@@ -335,6 +335,9 @@ export class FoundryLocalRuntime implements LocalRuntime {
       '--id',
       id,
       ...(block.tools ? ['--tools'] : []),
+      ...(block.tool_call_start !== undefined && block.tool_call_end !== undefined
+        ? [`--tool-call-start=${block.tool_call_start}`, `--tool-call-end=${block.tool_call_end}`]
+        : []),
       ...(block.reasoning_start !== undefined && block.reasoning_end !== undefined
         ? ['--reasoning-start', block.reasoning_start, '--reasoning-end', block.reasoning_end]
         : []),
