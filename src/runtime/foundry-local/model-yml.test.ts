@@ -28,8 +28,15 @@ describe('readFoundryLocalBlock', () => {
     expect(readFoundryLocalBlock(doc(BLOCK))).toEqual(BLOCK)
   })
 
-  it('keeps the reasoning markers the host hands the library (operator decision Q1)', () => {
-    const block = { ...BLOCK, reasoning: true, reasoning_start: '<think>', reasoning_end: '</think>' }
+  it('preserves catalog tool and reasoning markers for the host', () => {
+    const block = {
+      ...BLOCK,
+      tool_call_start: '<tool_call>',
+      tool_call_end: '</tool_call>',
+      reasoning: true,
+      reasoning_start: '<think>',
+      reasoning_end: '</think>',
+    }
     expect(readFoundryLocalBlock(doc(block))).toEqual(block)
   })
 

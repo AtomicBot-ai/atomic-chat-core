@@ -91,6 +91,9 @@ export interface ModelYmlFoundryLocal {
   context_length?: number
   tools: boolean
   reasoning: boolean
+  /** The tool delimiters published in the Microsoft catalog. Older installations may omit them. */
+  tool_call_start?: string
+  tool_call_end?: string
   /** The markers the library splits reasoning on; without them `<think>` lands in the text (operator decision Q1). */
   reasoning_start?: string
   reasoning_end?: string

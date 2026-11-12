@@ -7,14 +7,17 @@
  * C API; 4 a library call failed. Errors go to stderr as one line each; stdout carries JSON lines only.
  */
 
+import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { open, readdir, rm, stat } from 'node:fs/promises'
+import { open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { compareVersions } from '../../../backend/index.js'
 import { FoundryHostUsageError, parseFoundryHostArgs } from './args.js'
 import type { FoundryHostArgs } from './args.js'
 import { describeDiscoverable, executionProvider } from './execution-providers.js'
 import { FoundryLibraryError } from './library.js'
 import type { FoundryLibrary, FoundryManager, LoadFoundryLibrary } from './library.js'
+import { repairFoundryToolTemplate } from './tool-template.js'
 
 export interface FoundryHostDeps {
   stdout: (line: string) => void
@@ -300,6 +303,147 @@ async function prepare(
   }
 }
 
+type BoundaryMarkers = readonly [start: string, end: string]
+
+const QWEN_TOOL_MARKERS = ['<tool_call>', '</tool_call>'] as const
+const PHI_TOOL_MARKERS = ['<|tool_call|>', '<|/tool_call|>'] as const
+const MISTRAL_TOOL_MARKERS = ['[TOOL_CALLS]', '</s>'] as const
+const GEMMA_TOOL_MARKERS = ['<|tool_call>', '<tool_call|>'] as const
+const GEMMA_REASONING_MARKERS = ['<|channel>', '<channel|>'] as const
+
+// Microsoft catalog markers for installed revisions whose model.yml predates marker storage.
+const LEGACY_TOOL_MARKERS = new Map<string, readonly BoundaryMarkers[]>([
+  ['qwen3_5', [QWEN_TOOL_MARKERS]],
+  ['qwen3_5_text', [QWEN_TOOL_MARKERS]],
+  ['qwen3_vl', [QWEN_TOOL_MARKERS]],
+  ['smollm3', [QWEN_TOOL_MARKERS]],
+  ['mistral', [MISTRAL_TOOL_MARKERS]],
+  ['mistral3', [MISTRAL_TOOL_MARKERS]],
+  ['gemma4', [GEMMA_TOOL_MARKERS]],
+  ['olmo', [['<function_calls>', '</function_calls>']]],
+  ['decoder-pipeline', [QWEN_TOOL_MARKERS, PHI_TOOL_MARKERS]],
+])
+
+// GenAI 0.19 already publishes these token IDs without explicit model config.
+const GENAI_TOOL_MARKERS = new Map<string, BoundaryMarkers>([
+  ['qwen2', QWEN_TOOL_MARKERS],
+  ['qwen3', QWEN_TOOL_MARKERS],
+  ['phi3', PHI_TOOL_MARKERS],
+])
+
+interface AddedToken {
+  content: string
+  id: number
+  special?: boolean
+}
+
+function sameMarkers(a: BoundaryMarkers, b: BoundaryMarkers | undefined): boolean {
+  return a[0] === b?.[0] && a[1] === b?.[1]
+}
+
+function markers(start: string | undefined, end: string | undefined): BoundaryMarkers | undefined {
+  return start && end && start !== end ? [start, end] : undefined
+}
+
+async function replaceModelFile(path: string, contents: string): Promise<void> {
+  const temporary = `${path}.atomic-${randomUUID()}.tmp`
+  try {
+    const { mode } = await stat(path)
+    await writeFile(temporary, contents, { flag: 'wx', mode })
+    await rename(temporary, path)
+  } finally {
+    await rm(temporary, { force: true })
+  }
+}
+
+/** Publish the model's own single-token boundaries before the native runtime loads it. */
+async function publishModelBoundaries(
+  args: Extract<FoundryHostArgs, { mode: 'serve' }>,
+  reasoning: BoundaryMarkers | undefined
+): Promise<BoundaryMarkers | undefined> {
+  const configPath = join(args.model, 'genai_config.json')
+  const config = JSON.parse(await readFile(configPath, 'utf8')) as { model?: Record<string, unknown> }
+  const model = config.model
+  if (typeof model?.type !== 'string') return reasoning
+
+  if (model.type === 'gemma4' || model.type === 'mistral' || model.type === 'smollm3') {
+    const path = join(args.model, 'chat_template.jinja')
+    const template = await readFile(path, 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined
+      throw error
+    })
+    if (template !== undefined) {
+      const repaired = repairFoundryToolTemplate(model.type, template)
+      if (repaired !== template) await replaceModelFile(path, repaired)
+    }
+  }
+
+  const explicitTools = markers(args.toolCallStart, args.toolCallEnd)
+  const hasToolIds = model.bot_token_id !== undefined && model.eot_token_id !== undefined
+  const builtinTools = GENAI_TOOL_MARKERS.get(model.type)
+  const hasReasoningIds = model.bor_token_id !== undefined && model.eor_token_id !== undefined
+  const gemma = model.type === 'gemma4'
+  const normalizeGemmaReasoning =
+    gemma && reasoning?.[0] === '<|channel>thought\\n' && reasoning[1] === '<|channel|>'
+  const toolCandidates = explicitTools ? [explicitTools] : (LEGACY_TOOL_MARKERS.get(model.type) ?? [])
+  const needToolIds = !hasToolIds && toolCandidates.some((pair) => !sameMarkers(pair, builtinTools))
+  const needReasoningIds =
+    reasoning &&
+    !hasReasoningIds &&
+    !(model.type === 'qwen3' && sameMarkers(reasoning, ['<think>', '</think>']))
+  if (!needToolIds && !needReasoningIds && !gemma) return reasoning
+
+  // Current catalog assets are flat. Leave packages that declare a separate tokenizer to GenAI.
+  if (model.tokenizer_dir) return reasoning
+  const tokenizerPath = join(args.model, 'tokenizer.json')
+  const tokenizer = JSON.parse(await readFile(tokenizerPath, 'utf8')) as { added_tokens?: AddedToken[] }
+  if (!Array.isArray(tokenizer.added_tokens)) return reasoning
+  const tokens = new Map(tokenizer.added_tokens.map((token) => [token.content, token]))
+  const resolvePair = ([start, end]: BoundaryMarkers) => {
+    const a = tokens.get(start)
+    const b = tokens.get(end)
+    const valid = (token: AddedToken | undefined): token is AddedToken =>
+      token !== undefined && Number.isInteger(token.id) && token.id >= 0 && token.id <= 0x7fffffff
+    return valid(a) && valid(b) && a.id !== b.id ? ([a, b] as const) : undefined
+  }
+  const validTools = toolCandidates.map(resolvePair).filter((pair) => pair !== undefined)
+  let configChanged = false
+  let tokenizerChanged = false
+  const publish = (pair: readonly [AddedToken, AddedToken], startKey: string, endKey: string) => {
+    const [start, end] = pair
+    if (model[startKey] !== undefined && model[startKey] !== start.id) return false
+    if (model[endKey] !== undefined && model[endKey] !== end.id) return false
+    if (model[startKey] === undefined || model[endKey] === undefined) {
+      model[startKey] = start.id
+      model[endKey] = end.id
+      configChanged = true
+    }
+    if (gemma) {
+      // ORT Extensions' SentencePiece BPE decoder always hides special added tokens.
+      // Keep the model's IDs and pieces and let Foundry consume the visible boundaries.
+      for (const token of pair) {
+        if (token.special === true) {
+          token.special = false
+          tokenizerChanged = true
+        }
+      }
+    }
+    return true
+  }
+  if ((needToolIds || gemma) && validTools.length === 1 && validTools[0]) {
+    publish(validTools[0], 'bot_token_id', 'eot_token_id')
+  }
+  const reasoningCandidate = normalizeGemmaReasoning ? GEMMA_REASONING_MARKERS : reasoning
+  if (reasoningCandidate && (needReasoningIds || gemma)) {
+    const pair = resolvePair(reasoningCandidate)
+    if (pair && publish(pair, 'bor_token_id', 'eor_token_id')) reasoning = reasoningCandidate
+  }
+
+  if (tokenizerChanged) await replaceModelFile(tokenizerPath, JSON.stringify(tokenizer) + '\n')
+  if (configChanged) await replaceModelFile(configPath, JSON.stringify(config, null, 2) + '\n')
+  return reasoning
+}
+
 /**
  * Task 5.3: register the variant's accelerator (prepared only — nothing is downloaded here), register
  * the folder in this host's own catalog with the accelerator named explicitly, load, start the
@@ -326,14 +470,20 @@ async function serve(
         return 5
       }
     }
-    const reasoning = args.reasoningStart !== undefined && args.reasoningEnd !== undefined
+    let reasoning = markers(args.reasoningStart, args.reasoningEnd)
+    if (args.tools && compareVersions(library.version, '2.4.0') >= 0) {
+      reasoning = await publishModelBoundaries(args, reasoning).catch((error: unknown) => {
+        deps.stderr(
+          `Could not publish Foundry Local boundary tokens: ${error instanceof Error ? error.message : String(error)}`
+        )
+        return reasoning
+      })
+    }
     const model = manager.registerLocalModel(args.model, args.id, {
       strings: {
         task: 'chat-completion',
         execution_provider: ep.metadata,
-        ...(reasoning
-          ? { reasoning_start: args.reasoningStart as string, reasoning_end: args.reasoningEnd as string }
-          : {}),
+        ...(reasoning ? { reasoning_start: reasoning[0], reasoning_end: reasoning[1] } : {}),
       },
       ints: {
         supports_tool_calling: args.tools ? 1 : 0,
