@@ -41,7 +41,7 @@ import { FOUNDRY_LOCAL_C_API_VERSIONS } from './manifest.js'
 import { getSupportedFeatures } from '../backend/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import type { FoundryLocalPlatform, LiteRtLmPlatform } from './manifest.js'
-import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/index.js'
 
 /**
  * Smallest Vulkan device worth moving a Linux host off the CPU build for.

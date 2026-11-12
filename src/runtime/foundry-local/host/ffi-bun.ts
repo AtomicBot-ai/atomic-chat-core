@@ -1,6 +1,7 @@
 /**
- * `FoundryLibrary` over `bun:ffi` — the only file in `src/` that may import `bun:*` (operator decision
- * Q2 of change `add-foundry-local`; allow-listed in `scripts/check-runtime-agnostic.mjs`). It is
+ * `FoundryLibrary` over `bun:ffi` — allow-listed to import `bun:*` (operator decision Q2 of change
+ * `add-foundry-local`, ADR 2026-10-15-foundry-local-runs-in-a-host-mode-of-the-core-binary;
+ * allow-listed in `scripts/check-runtime-agnostic.mjs`). It is
  * imported dynamically by the `foundry-host` mode alone, so the npm package still loads under Node.
  *
  * The library exports three symbols; everything else is a table of function pointers (`flApi` and its

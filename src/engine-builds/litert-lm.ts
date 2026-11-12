@@ -9,7 +9,7 @@
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
+import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/index.js'
 import { isDateTime } from './manifest.js'
 
 /** The wheel's package; everything else in it is Python metadata. */

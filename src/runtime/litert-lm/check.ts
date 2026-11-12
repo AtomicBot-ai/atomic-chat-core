@@ -15,7 +15,7 @@ import type {
   LiteRtLmFileMetadata,
   LiteRtLmNpu,
 } from '../../contracts/index.js'
-import type { LiteRtLmPlatform } from '../../engine-builds/manifest.js'
+import type { LiteRtLmPlatform } from '../../engine-builds/index.js'
 import type { ModelRegistry } from '../../models/index.js'
 import { compareVersions } from '../../backend/index.js'
 import { readLiteRtLmBlock } from './model-yml.js'

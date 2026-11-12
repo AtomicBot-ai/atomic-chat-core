@@ -5,7 +5,6 @@ import {
   audioErrorBody,
   audioInternalError,
   audioIoError,
-  isAudioDiskFull,
   isAudioErrorCode,
   toAudioError,
 } from './errors.js'
@@ -22,19 +21,24 @@ describe('audio errors', () => {
     expect(audioInternalError('oops').code).toBe('INTERNAL')
   })
 
-  it('tells a full disk from any other I/O failure', () => {
-    expect(isAudioDiskFull(enospc)).toBe(true)
-    expect(isAudioDiskFull(new Error('x'))).toBe(false)
-    expect(audioIoError('Could not write the clip.', enospc).toJSON()).toEqual({
+  it('tells a full disk from any other I/O failure, the cause kept', () => {
+    const full = audioIoError('Could not write the clip.', enospc)
+    expect(full.toJSON()).toEqual({
       code: 'DISK_FULL',
-      message: 'The disk is full.',
+      message: '[disk_full] The disk is full.',
       details: 'Could not write the clip.: no space left on device',
     })
-    expect(audioIoError('Could not write the clip.', 'EACCES').toJSON()).toEqual({
+    expect(full.cause).toBe(enospc)
+    const edquot = Object.assign(new Error('disk quota exceeded'), { code: 'EDQUOT' })
+    expect(audioIoError('Could not write the clip.', edquot).code).toBe('DISK_FULL')
+    expect(audioIoError('Could not write the clip.', edquot).message).toBe('[disk_full] The disk is full.')
+    const denied = audioIoError('Could not write the clip.', 'EACCES')
+    expect(denied.toJSON()).toEqual({
       code: 'INTERNAL',
       message: 'Could not write the clip.',
       details: 'EACCES',
     })
+    expect(denied.cause).toBe('EACCES')
   })
 
   it('knows its own codes', () => {

@@ -4,10 +4,10 @@ import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
 import { MANAGED_TEXT_ADAPTER_CONTRACT_VERSION } from '../managed-text/index.js'
 import type { ManagedLaunchContext } from '../managed-text/index.js'
+import { reasoningIntoContent } from '../managed-text/index.js'
 import { readTensorrtLlmLogFixture } from '../../../test/helpers/tensorrt-llm-log-fixtures.js'
 import {
   mapTensorrtLlmContextLengthError,
-  tensorrtLlmReasoningIntoContent,
   tensorrtLlmRewriteRequestBody,
   tensorrtLlmRewriteResponseFor,
   TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
@@ -1339,7 +1339,7 @@ describe('rewriteResponseFor: a reasoning-at-start parser with thinking off (qwe
 
   it('moves the answer the parser filed as reasoning back into content, in a whole reply and a stream delta', () => {
     const rewrite = tensorrtLlmRewriteResponseFor('/v1/chat/completions', { messages: [] }, qwen35)
-    expect(rewrite).toBe(tensorrtLlmReasoningIntoContent)
+    expect(rewrite).toBe(reasoningIntoContent)
     expect(
       rewrite?.({
         choices: [
@@ -1371,8 +1371,8 @@ describe('rewriteResponseFor: a reasoning-at-start parser with thinking off (qwe
 
   it('keeps choices that carry no reasoning, and a body with no choices, as they are', () => {
     const untouched = { choices: [{ message: { content: 'hi', reasoning_content: '' } }, null] }
-    expect(tensorrtLlmReasoningIntoContent(structuredClone(untouched))).toEqual(untouched)
-    expect(tensorrtLlmReasoningIntoContent({ error: 'x' })).toEqual({ error: 'x' })
+    expect(reasoningIntoContent(structuredClone(untouched))).toEqual(untouched)
+    expect(reasoningIntoContent({ error: 'x' })).toEqual({ error: 'x' })
   })
 })
 

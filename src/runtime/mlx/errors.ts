@@ -7,7 +7,7 @@
 
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { FailureDiagnostic } from '../../contracts/index.js'
-import type { ExitInfo } from '../llamacpp/errors.js'
+import type { ExitInfo } from '../llamacpp/index.js'
 
 const OOM_PATTERNS = [
   'out of memory',

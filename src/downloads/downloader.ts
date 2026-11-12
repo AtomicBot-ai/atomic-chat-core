@@ -94,7 +94,6 @@ type StageReport = (kind: DownloadStage['kind'], attempt: number) => void
 
 interface Task {
   controller: AbortController
-  superseded: boolean
   /** The last combined progress this task reported, for `snapshot()`. */
   progress?: DownloadProgress
 }
@@ -295,11 +294,8 @@ export class Downloader {
    */
   async download(taskId: string, items: DownloadItem[], options: DownloadOptions = {}): Promise<void> {
     const existing = this.tasks.get(taskId)
-    if (existing) {
-      existing.superseded = true
-      existing.controller.abort()
-    }
-    const task: Task = { controller: new AbortController(), superseded: false }
+    if (existing) existing.controller.abort()
+    const task: Task = { controller: new AbortController() }
     this.tasks.set(taskId, task)
     try {
       await this.run(taskId, items, options, task.controller.signal)
@@ -343,7 +339,7 @@ export class Downloader {
       if (limit) throw preflightFailure(limit, 'disk_path_too_long')
       if (!isInside(await canonicalizeExistingPrefix(savePath), resolvedRoot)) {
         throw preflightFailure(
-          `Path ${savePath} is outside of Jan data folder ${dataFolder}`,
+          `Path ${savePath} is outside of the Atomic Chat data folder ${dataFolder}`,
           'invalid_request'
         )
       }

@@ -33,7 +33,7 @@ import type {
 } from '../contracts/index.js'
 import type { DiffusionPaths } from '../config/index.js'
 import type { BackendOutputSink } from '../runtime/shared/index.js'
-import type { EngineHost } from '../engine-builds/service.js'
+import type { EngineHost } from '../engine-builds/index.js'
 import type { ImagesBackend, VideosBackend } from '../server/index.js'
 import { selectModelInstall } from './compat.js'
 import { samePath } from './containment.js'

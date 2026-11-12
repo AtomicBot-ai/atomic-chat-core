@@ -15,23 +15,12 @@ import { createHash } from 'node:crypto'
 import { AtomicCoreError, MEDIA_DIALECT_KIND, MEDIA_DIALECTS } from '../contracts/index.js'
 import type { CloudProviderMedia, CloudProviderMediaModel, MediaDialect } from '../contracts/index.js'
 import type { ApiKeyStore } from '../credentials/index.js'
+import { LOCAL_SEARCH_ORDER } from '../router/index.js'
 import type { RemoteProvider } from '../router/index.js'
 import type { SettingsStore } from '../settings/index.js'
 
 /** Engines the core runs itself; registering one as a cloud provider would shadow its sessions. */
-const LOCAL_PROVIDERS = new Set([
-  'llamacpp',
-  'llamacpp-upstream',
-  'atomic-prism',
-  'mlx',
-  'foundation-models',
-  'tensorrt-llm',
-  'vllm',
-  'sglang',
-  'foundry-local',
-  'litert-lm',
-  'geniex',
-])
+const LOCAL_PROVIDERS: ReadonlySet<string> = new Set([...LOCAL_SEARCH_ORDER, 'foundation-models'])
 
 export interface CustomHeader {
   header: string

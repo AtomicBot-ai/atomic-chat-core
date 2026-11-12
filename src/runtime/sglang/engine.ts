@@ -5,7 +5,7 @@
  * unsupported, design D9).
  */
 import { defaultDescriptorUrl } from '../environment/index.js'
-import type { ManagedEngineSpec } from '../managed-engines/spec.js'
+import type { ManagedEngineSpec } from '../managed-engines/index.js'
 import type { ManagedTextCapabilities } from '../managed-text/index.js'
 import type { SessionRoutePolicy } from '../shared/index.js'
 import {

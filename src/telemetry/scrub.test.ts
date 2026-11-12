@@ -18,6 +18,9 @@ describe('scrubText', () => {
     ['mail me at a.b+c@example.co.uk', 'mail me at <email>'],
     ['https://quiet-owl-bird.trycloudflare.com/v1', 'https://<tunnel>.trycloudflare.com/v1'],
     ['LAN 192.168.1.23:1337, loop 127.0.0.1, any 0.0.0.0', 'LAN <ip>:1337, loop 127.0.0.1, any 0.0.0.0'],
+    ['link-local fe80::1 via http://[fe80::1]:1337', 'link-local <ip> via http://[<ip>]:1337'],
+    ['full form 2001:db8:0:1:1:1:1:1', 'full form <ip>'],
+    ['compressed 2001:db8::85a3:0:0:8a2e and 2a00:1450:4001:82b::200e', 'compressed <ip> and <ip>'],
   ])('%s', (input, expected) => {
     expect(scrubText(input)).toBe(expected)
   })
@@ -25,6 +28,12 @@ describe('scrubText', () => {
   it('leaves versions and build numbers alone', () => {
     expect(scrubText('Windows 10.0.22631.4317, CUDA 12.4.1, b6795')).toBe(
       'Windows 10.0.22631.4317, CUDA 12.4.1, b6795'
+    )
+  })
+
+  it('leaves MAC addresses, clock times and the IPv6 loopback alone', () => {
+    expect(scrubText('mac aa:bb:cc:dd:ee:ff started 12:34:56, listening on ::1')).toBe(
+      'mac aa:bb:cc:dd:ee:ff started 12:34:56, listening on ::1'
     )
   })
 

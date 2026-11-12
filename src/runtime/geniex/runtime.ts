@@ -25,7 +25,7 @@ import type {
   UnloadResult,
 } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
-import type { EngineHost } from '../../engine-builds/service.js'
+import type { EngineHost } from '../../engine-builds/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
 import { generateGatewayKey, startManagedGateway } from '../managed-text/index.js'
@@ -304,7 +304,7 @@ export class GeniexRuntime implements LocalRuntime {
     if (!deviceFound(device, build.devices))
       throw new AtomicCoreError(
         'GENIEX_VARIANT_UNSUPPORTED',
-        deviceMissingReason(device),
+        deviceMissingReason(device, build.devices),
         build.devices.join(', ') || 'no devices'
       )
     const { modelPath, mmprojPath: declared } = registry.resolvePaths(yml)

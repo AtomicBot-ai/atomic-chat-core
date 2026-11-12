@@ -3,6 +3,7 @@
  * `ec1fd3ea7`): an HTTP stub speaks `/sdcpp/v1/*`, a fake server handle stands in for the process.
  */
 import { createServer } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -709,6 +710,81 @@ describe('cancelling', () => {
     expect(await cancelJob(h.deps, id)).toEqual({ cancelled: true, serverStopped: false })
     expect(h.state.session).toBeDefined()
     expect(failure(await done).code).toBe('CANCELLED')
+  })
+
+  it('arriving while the outputs are being saved waits the save out and keeps the server', async () => {
+    const port = await stub((method, path) => {
+      if (method === 'POST' && path === '/sdcpp/v1/img_gen')
+        return json(202, { id: 'job_save', kind: 'img_gen', status: 'queued', poll_url: '/sdcpp/v1/jobs/job_save' })
+      if (method === 'GET' && path === '/sdcpp/v1/jobs/job_save')
+        return json(200, {
+          id: 'job_save',
+          status: 'completed',
+          result: { images: [{ index: 0, b64_json: pngB64 }] },
+          error: null,
+        })
+      return json(404, {})
+    })
+    const h = harness(port)
+    // Hold the gallery write so the runner sits in the `saving` phase.
+    // (Executor form: the repo's lib is ES2023, without `Promise.withResolvers`.)
+    let releaseSave: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => (releaseSave = resolve))
+    const realSave = h.deps.gallery.save.bind(h.deps.gallery)
+    h.deps.gallery.save = async (...args: Parameters<Gallery['save']>) => {
+      await gate
+      return realSave(...args)
+    }
+    const { id, done } = await startImageJob(h.deps, sampleRequest())
+    for (let i = 0; i < 200 && h.state.anyJob(id)?.progress?.phase !== 'saving'; i++) await sleep(5)
+    expect(h.state.anyJob(id)?.progress?.phase).toBe('saving')
+
+    // The cancel waits the save out, so release the save while it is in flight.
+    const before = h.server
+    const cancelled = cancelJob(h.deps, id)
+    await sleep(100)
+    expect(h.state.session).toBeDefined()
+    releaseSave?.()
+    expect(await cancelled).toEqual({ cancelled: false, serverStopped: false })
+    expect(before.terminated, 'the server was never stopped during a save').toEqual([])
+    const result = await done
+    expect(result.ok, 'the finished image is kept').toBe(true)
+    expect(h.state.job(id)?.state).toBe('completed')
+    expect(h.state.activeJobId).toBeUndefined()
+    // The cancel may land strictly inside the save window (the "cancel arrived …" log) or the save
+    // may finish while the grace period is still running; both keep the image and the server. The
+    // saving branch itself is pinned by the direct `cancelJob` test below.
+    expect(h.log.some((line) => line.includes('cancel not honoured'))).toBe(false)
+  })
+
+  it('that lands in the save phase waits it out without stopping the server, and a finished save keeps the image', async () => {
+    // The runner path, exercised directly on a record stuck in the save phase: the grace period
+    // runs out with the job still generating, `progress.phase` is `saving`, and only the save
+    // finishing may end the cancel.
+    const h = harness(45_000)
+    const id = randomUUID()
+    h.state.activeJobId = id
+    h.state.insertJob({
+      kind: 'image',
+      job: {
+        ...IMAGE_JOB_KIND.newJob(id, sampleSpec(), sampleRequest(), h.clock.now, undefined),
+        state: 'generating',
+        progress: { phase: 'saving', step: 4, totalSteps: 4, fraction: 1, etaSeconds: 0, batchIndex: 0, batchSize: 1, elapsedMs: 100 },
+      },
+      cancel: { requested: false },
+    })
+
+    const cancelled = cancelJob(h.deps, id)
+    // The harness's `sleep` advances its own fake clock but still settles on a real macrotask, so
+    // fake timers cannot drive `waitTerminal`'s 400 ms grace out; a short real wait does.
+    await sleep(150)
+    expect(h.state.job(id)?.state).toBe('generating')
+    h.state.updateJob(id, (record) => (record.job.state = 'completed'))
+    expect(await cancelled).toEqual({ cancelled: false, serverStopped: false })
+    expect(h.state.job(id)?.state).toBe('completed')
+    expect(h.state.modelState, 'the server was never taken down during a save').toBe('loaded')
+    expect(h.log.some((line) => line.includes('cancel arrived while the outputs were being saved'))).toBe(true)
+    expect(h.log.some((line) => line.includes('cancel not honoured'))).toBe(false)
   })
 
   it('gives an engine that promised a soft cancel a second grace period', async () => {

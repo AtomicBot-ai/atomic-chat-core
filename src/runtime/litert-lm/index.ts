@@ -1,6 +1,6 @@
 /**
  * The `litert-lm` provider (openspec change `add-litert-lm-runtime`): the core's side of the
- * `litert-host` protocol; the host mode, the runtime and the accelerator follow.
+ * `litert-host` protocol, the runtime behind it, and the NPU/accelerator checks.
  */
 export * from './host-process.js'
 export * from './model-yml.js'

@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ErrorCode, GeniexModelMetadata } from '../../contracts/index.js'
-import type { EngineProbeFacts } from '../../engine-builds/engines.js'
+import type { EngineProbeFacts } from '../../engine-builds/index.js'
 
 /** How to start `geniex-host`: `[execPath, script?]` + `geniex-host`, or a test stand-in. */
 export interface GeniexHostCommand {

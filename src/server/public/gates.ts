@@ -20,7 +20,6 @@ export const WHITELISTED_PATHS = new Set([
   '/openapi.json',
   '/docs/swagger-ui.css',
   '/docs/swagger-ui-bundle.js',
-  '/docs/swagger-ui-standalone-preset.js',
 ])
 
 /** Preflight skips the host check only for these. */

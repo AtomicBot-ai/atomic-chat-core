@@ -109,7 +109,7 @@ import type {
   UnloadResult,
 } from '../../contracts/index.js'
 import type { CoreEmitter } from '../../events/index.js'
-import type { CtxIncreaseResult } from '../../runtime/llamacpp/runtime.js'
+import type { CtxIncreaseResult } from '../../runtime/llamacpp/index.js'
 import type { GgufValidation, ModelCapabilities } from '../../models/index.js'
 import type { EmbeddingResponse } from '../../models/index.js'
 import type { ProxyConfig } from '../../downloads/index.js'

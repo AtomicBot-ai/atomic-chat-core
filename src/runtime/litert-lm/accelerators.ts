@@ -21,12 +21,12 @@ import type {
   LiteRtLmPrepareResult,
   ProxyConfig,
 } from '../../contracts/index.js'
-import { OWNER_MARKER } from '../../diffusion/install.js'
+import { OWNER_MARKER } from '../../diffusion/index.js'
 import { extractArchive } from '../../downloads/index.js'
 import type {
   LiteRtLmAccelerator as ManifestAccelerator,
   LiteRtLmRelease,
-} from '../../engine-builds/manifest.js'
+} from '../../engine-builds/index.js'
 
 export const OPENVINO = 'openvino'
 

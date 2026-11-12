@@ -9,7 +9,7 @@
  */
 import { validateTensorrtLlmSettings } from './adapter.js'
 import type { TensorrtLlmSettings } from './adapter.js'
-import { GENERATION_DEFAULT_KEYS } from '../managed-text/generation-defaults.js'
+import { GENERATION_DEFAULT_KEYS } from '../managed-text/index.js'
 
 const KEYS = [
   'gpu_id',

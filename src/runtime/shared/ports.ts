@@ -5,6 +5,7 @@
 
 import { createHmac, randomInt } from 'node:crypto'
 import { createServer } from 'node:net'
+import { AtomicCoreError } from '../../contracts/index.js'
 
 export const PORT_RANGE_MIN = 3000
 export const PORT_RANGE_MAX = 4000 // exclusive
@@ -53,7 +54,9 @@ export async function randomFreePort(usedPorts: Iterable<number>, opts: PortOpti
     if (used.has(port) || FETCH_BLOCKED_PORTS.has(port)) continue
     if (await isAvailable(port)) return port
   }
-  throw new Error(PORT_EXHAUSTED_MESSAGE)
+  // SERVER_START_FAILED: the wire code the start path already reports; a bare Error here would
+  // lose the classification on its way to the app.
+  throw new AtomicCoreError('SERVER_START_FAILED', PORT_EXHAUSTED_MESSAGE)
 }
 
 /**

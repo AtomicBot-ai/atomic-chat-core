@@ -1,6 +1,7 @@
 /**
  * The `foundry-local` provider (openspec change `add-foundry-local`): the core's side of the
- * `foundry-host` protocol for now; the runtime, the host mode and the accelerators follow.
+ * `foundry-host` protocol, the runtime over it, and the accelerator compatibility check the model
+ * catalog shows.
  */
 export * from './host-process.js'
 export * from './model-yml.js'

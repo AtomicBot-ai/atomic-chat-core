@@ -13,7 +13,7 @@ import { parseArgs } from 'node:util'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { CoreClient } from '../client/index.js'
 import { LOCAL_PROVIDER } from '../core/index.js'
-import { configureAgent } from '../integrations/configure/index.js'
+import { configureAgent } from '../integrations/index.js'
 import {
   AGENTS,
   apiUrlFor,

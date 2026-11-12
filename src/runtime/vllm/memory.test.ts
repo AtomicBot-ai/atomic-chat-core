@@ -4,8 +4,8 @@ import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseRuntimeDescriptor } from '../environment/index.js'
 import type { DescriptorProviderResult } from '../environment/index.js'
 import { checkCheckpoint, checkManagedModel, type CheckpointFile } from '../managed-models/index.js'
-import { tensorrtLlmCheckEngine } from '../tensorrt-llm/compatibility.js'
-import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/kv-cache.js'
+import { tensorrtLlmCheckEngine } from '../tensorrt-llm/index.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/index.js'
 import {
   VLLM_ENGINE_OVERHEAD_BYTES,
   VLLM_FREE_MEMORY_MARGIN_BYTES,

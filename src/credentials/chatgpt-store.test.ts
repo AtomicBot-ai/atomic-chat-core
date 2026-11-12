@@ -1,6 +1,6 @@
-import { mkdtemp, rm, stat, writeFile, chmod } from 'node:fs/promises'
+import { mkdtemp, readdir, rm, stat, writeFile, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   clearTokens,
@@ -39,6 +39,15 @@ describe('chatgpt token file', () => {
     await saveTokens(path, tokens)
 
     if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
+  it('writes through a temporary file and leaves none behind, the real file 0600 and readable', async () => {
+    const path = join(dir, 'nested', 'atomic-chatgpt-auth.json')
+    await saveTokens(path, tokens)
+
+    expect(await loadTokens(path)).toEqual(tokens)
+    if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(await readdir(dirname(path))).toEqual(['atomic-chatgpt-auth.json'])
   })
 
   it('reads as no session for a root that is not an object, a fractional expiry or a negative version', () => {

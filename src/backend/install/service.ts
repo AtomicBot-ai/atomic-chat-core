@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
-import { samePath } from '../../diffusion/containment.js'
+import { samePath } from '../../diffusion/index.js'
 import type { LocalProviderId } from '../../contracts/index.js'
 import type { DataLayout } from '../../config/index.js'
 import {
@@ -293,11 +293,6 @@ export function companionSource(
   const asset = (manifest.assets ?? []).find((a) => a.name === name)
   if (!asset?.sha256 || !asset.size) return { url: cdnUrl }
   return { url: `${manifest.download_base}/${tag}/${name}`, sha256: asset.sha256, size: asset.size }
-}
-
-/** The server executable inside a pack; the only name `normalizeBackendLayout` looks for. */
-export function backendExeName(osType: string): string {
-  return osType === 'windows' ? 'llama-server.exe' : 'llama-server'
 }
 
 export interface BackendServiceDeps {

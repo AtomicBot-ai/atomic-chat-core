@@ -7,7 +7,7 @@
  * Importing this file loads no `bun:*`: the library lives in a Worker the mode alone starts.
  */
 
-import { detachableWriter } from '../../cli/io.js'
+import { detachableWriter } from '../../cli/index.js'
 import { WorkerEngine, spawnGeniexWorker } from './host/engine.js'
 import { lineIo, runGeniexHost } from './host/run.js'
 

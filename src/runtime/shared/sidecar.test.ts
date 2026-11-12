@@ -79,7 +79,6 @@ describe('SidecarTable', () => {
     })
     await new Promise((r) => setTimeout(r, 20))
     expect(t.isLoading('a')).toBe(true)
-    expect(t.otherLoads('b')).toHaveLength(1)
     release()
     expect((await a).pid).toBe(1)
     expect((await joined).pid).toBe(1)

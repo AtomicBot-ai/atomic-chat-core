@@ -24,9 +24,11 @@ export function deviceFound(device: GeniexDevice, ids: readonly string[]): boole
   }
 }
 
-/** Why `device` is not there, in words a card can show. */
-export function deviceMissingReason(device: GeniexDevice): string {
+/** Why `device` is not there, in words a card can show; `ids` are the devices the library found. */
+export function deviceMissingReason(device: GeniexDevice, ids: readonly string[]): string {
   if (device === 'gpu') return 'GenieX found no Adreno GPU (no OpenCL device) on this computer.'
+  if (device === 'hybrid' && hasNpu(ids))
+    return 'GenieX found no Adreno GPU (no OpenCL device) on this computer, which hybrid needs with the NPU.'
   return `GenieX found no Hexagon NPU (no HTP device) on this computer${device === 'hybrid' ? ', which hybrid needs with the GPU' : ''}; check the Qualcomm NPU driver.`
 }
 

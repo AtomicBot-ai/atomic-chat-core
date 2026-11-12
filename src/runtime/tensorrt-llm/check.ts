@@ -10,7 +10,7 @@ import {
   checkManagedModel,
   type ManagedModelCheckEngine,
   type ModelCheckDeps,
-} from '../managed-models/check.js'
+} from '../managed-models/index.js'
 import { tensorrtLlmCheckEngine } from './compatibility.js'
 import { tensorrtLlmSettings } from './settings.js'
 
@@ -18,7 +18,7 @@ export {
   parseModelCheckInput,
   type ModelCheckDeps,
   type ModelCheckHostFacts,
-} from '../managed-models/check.js'
+} from '../managed-models/index.js'
 
 /** TensorRT-LLM's side of the check route: its card and its memory rule from its stored settings. */
 export const TENSORRT_LLM_MODEL_CHECK: ManagedModelCheckEngine = {

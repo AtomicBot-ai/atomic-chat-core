@@ -35,8 +35,8 @@ import {
   type MemoryNeed,
   type ModelCheckInput,
   type ResolvedCheckpoint,
-} from '../managed-models/compatibility.js'
-import type { JsonObject } from '../managed-models/quant-format.js'
+} from '../managed-models/index.js'
+import type { JsonObject } from '../managed-models/index.js'
 import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
 import {
   TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES,
@@ -46,7 +46,7 @@ import {
 } from './cuda-graphs.js'
 import { tensorrtLlmUnifiedKvMaxTokens } from './kv-cache.js'
 
-export * from '../managed-models/compatibility.js'
+export * from '../managed-models/index.js'
 
 const CORRECTION_BIAS_GATED_ARCHITECTURES: ReadonlySet<string> = new Set([
   'DeepseekV3ForCausalLM',

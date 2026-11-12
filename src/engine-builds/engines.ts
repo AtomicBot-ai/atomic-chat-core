@@ -8,7 +8,7 @@
 import { fastFlowLmDescriptor, type FastFlowLmIdentity } from './fastflowlm.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { EngineBuildId, EngineBuildRef } from '../contracts/index.js'
-import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/install.js'
+import { listInstalledBackends, prepareSdcppTree, writeInstallRecord } from '../diffusion/index.js'
 import { listInstalledAudioBuilds, prepareAudiocppTree, writeAudioInstallRecord } from '../audio/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { listDownloadedMlx, probeMlxServer, readBundledMlx, writeMlxInstallRecord } from './builds.js'
@@ -57,7 +57,7 @@ import {
   sdcppHostOf,
 } from './select.js'
 import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
-import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/index.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {

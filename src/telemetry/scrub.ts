@@ -37,7 +37,11 @@ const RULES: ReadonlyArray<readonly [RegExp, string]> = [
     `$1${REDACTED}`,
   ],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<email>'],
-  // LAN and public addresses; loopback and the wildcard say nothing about the user.
+  // LAN and public addresses; loopback and the wildcard say nothing about the user. IPv6 comes in
+  // the full eight-group form and the compressed `::` form; MAC addresses, clock times and the
+  // bare loopback `::1` are not addresses and stay.
+  [/\b[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4}){7}\b/g, '<ip>'],
+  [/\b(?:[0-9a-fA-F]{1,4}:){1,7}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*\b/g, '<ip>'],
   [
     /\b(?!127\.0\.0\.1\b)(?!0\.0\.0\.0\b)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g,
     '<ip>',

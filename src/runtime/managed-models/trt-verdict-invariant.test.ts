@@ -12,8 +12,8 @@ import { describe, expect, it } from 'vitest'
 import type { GpuFacts } from '../../contracts/index.js'
 import { readRuntimeFixture } from '../../../test/helpers/runtime-fixtures.js'
 import { parseRuntimeDescriptor } from '../environment/index.js'
-import { checkModelCompatibility, type CheckpointFile } from '../tensorrt-llm/compatibility.js'
-import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/kv-cache.js'
+import { checkModelCompatibility, type CheckpointFile } from '../tensorrt-llm/index.js'
+import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from '../tensorrt-llm/index.js'
 
 type Json = Record<string, unknown>
 

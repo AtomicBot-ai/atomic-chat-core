@@ -30,7 +30,7 @@ export async function modelsCommand(argv: string[], io: CliIo): Promise<number> 
     io.stderr('No chat models installed.\n\n')
     io.stderr('  Download one in the Atomic Chat desktop app, or serve a\n')
     io.stderr('  HuggingFace GGUF repo directly:\n\n')
-    io.stderr('    atomic-chat-cli serve <owner>/<repo>\n')
+    io.stderr('    atomic-chat-core serve <owner>/<repo>\n')
     return 0
   }
   const width = Math.max(8, ...models.map((m) => m.id.length))

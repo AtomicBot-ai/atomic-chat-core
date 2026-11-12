@@ -11,7 +11,7 @@
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
+import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/index.js'
 import { isDateTime } from './manifest.js'
 
 /** The C API's library; the plugins load beside it. GenieX has no macOS or Linux x64 build. */

@@ -1,7 +1,8 @@
 /**
  * The part of `bun:ffi` that the hosts' `ffi-bun.ts` use, declared here so the core needs no
- * `@types/bun` (AGENTS.md invariant 8: no new dependency). Only the two `ffi-bun.ts` import this module
- * (operator decision Q2 of change `add-foundry-local`; change `add-litert-lm-runtime`, design D1); they
+ * `@types/bun` (AGENTS.md invariant 8: no new dependency). Only the allow-listed `ffi-bun.ts` files
+ * import this module (operator decision Q2 of change `add-foundry-local`; change
+ * `add-litert-lm-runtime`, design D1; change `add-geniex-runtime`, design D1); they
  * run only inside the compiled binaries, never under Node.
  */
 declare module 'bun:ffi' {

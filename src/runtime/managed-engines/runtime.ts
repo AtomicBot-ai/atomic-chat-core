@@ -58,10 +58,10 @@ import type {
 } from '../shared/index.js'
 import { checkCheckpointMemory, selectLaunchGpu } from '../managed-models/index.js'
 import type { ManagedCheckEngine, ResolvedCheckpoint } from '../managed-models/index.js'
-import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
-import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
-import type { ManagedModel } from '../managed-models/model-dir.js'
-import { verifyModelFilesAndCompatibility } from '../tensorrt-llm/prelaunch.js'
+import type { TensorrtLlmHostFacts } from '../tensorrt-llm/index.js'
+import type { ReadyInstallation } from '../tensorrt-llm/index.js'
+import type { ManagedModel } from '../managed-models/index.js'
+import { verifyModelFilesAndCompatibility } from '../tensorrt-llm/index.js'
 import type { ManagedEngineSettings, ManagedEngineSpec } from './spec.js'
 
 export interface ManagedTextRuntimeDeps {

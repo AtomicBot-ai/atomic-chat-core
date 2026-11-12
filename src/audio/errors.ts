@@ -5,6 +5,7 @@
 
 import { AtomicCoreError, AUDIO_ERROR_CODES } from '../contracts/index.js'
 import type { AudioErrorBody, AudioErrorCode } from '../contracts/index.js'
+import { classifyIoError } from '../downloads/index.js'
 
 export function audioError(code: AudioErrorCode, message: string, details?: string): AtomicCoreError {
   return new AtomicCoreError(code, message, details)
@@ -14,19 +15,17 @@ export function audioInternalError(message: string, details?: string): AtomicCor
   return audioError('INTERNAL', message, details)
 }
 
-/** libuv reports a full disk as `ENOSPC` everywhere, Windows' two "disk full" codes included. */
-export function isAudioDiskFull(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOSPC'
-}
-
 /**
- * An I/O failure on the closest code: a full disk is something the user can act on, everything else
- * is internal, with `context` as the message.
+ * An I/O failure on the closest code: the shared download classifier names the disk cases (a full
+ * disk or a file-size limit is something the user can act on), everything else is internal, with
+ * `context` as the message and the original error as the `cause`, as image generation's does.
  */
 export function audioIoError(context: string, error: unknown): AtomicCoreError {
   const reason = error instanceof Error ? error.message : String(error)
-  if (isAudioDiskFull(error)) return audioError('DISK_FULL', 'The disk is full.', `${context}: ${reason}`)
-  return audioInternalError(context, reason)
+  const tag = classifyIoError(error)
+  return tag === 'disk_full' || tag === 'disk_fs_limit'
+    ? new AtomicCoreError('DISK_FULL', `[${tag}] The disk is full.`, `${context}: ${reason}`, { cause: error })
+    : new AtomicCoreError('INTERNAL', context, reason, { cause: error })
 }
 
 export function isAudioErrorCode(code: unknown): code is AudioErrorCode {

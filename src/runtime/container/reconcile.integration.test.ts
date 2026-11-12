@@ -3,9 +3,9 @@
  * acceptance scenarios (spec `tensorrt-llm-runtime`, "Восстановление контейнеров после перезапуска
  * core"): "осиротевший контейнер после kill -9 core" and "чужой контейнер с меткой". Same style as
  * `integration.test.ts` (a real spawned process standing in for `docker`, driven through
- * `createDockerExec` + `operations.ts`), not `test/e2e/`: nothing wires this module's reconcile call
- * into the compiled binary yet (`core/create.ts`'s TODO next to `reapOrphans`), so a binary-level e2e
- * would only prove the fake binary works, not this module.
+ * `createDockerExec` + `operations.ts`), not `test/e2e/`: reconcile is wired at `core/create.ts`
+ * (next to `reapOrphans`, before the first load is served), so a binary-level e2e would only prove
+ * the fake binary works, not this module.
  */
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'

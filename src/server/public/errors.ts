@@ -10,7 +10,7 @@
  * it to decide whether to offer a larger context or a smaller model.
  */
 
-import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/generation-limits.js'
+import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/index.js'
 import { isJsonObject, serdeToString } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
 
@@ -217,26 +217,20 @@ export function clientMaxTokens(requestBody: Buffer): number | undefined {
 
 /**
  * A 200 whose `finish_reason` is `length` because the context window ran out rather than because
- * an output cap was reached. The cap is the client's `max_tokens` or, without one, the engine's own:
- * core starts llama.cpp with `--n-predict` (DEFAULT_N_PREDICT unless the user set another,
- * `engineCap`), so a `length` with no client cap is no longer always the window. Either way only a
- * stop clearly short of the cap counts. An unknown token count is taken as client-driven under a
- * client cap, so a `max_tokens: 16` health check never grows the context, and as the window under
- * the engine's alone, as before. `engineCap` `null` (an engine started without a cap) keeps the
- * old rule: with no client cap, `length` can only mean the window.
+ * an output cap was reached. The cap is the client's `max_tokens` or, without one, the engine's
+ * default: core always starts llama.cpp with `--n-predict` (DEFAULT_N_PREDICT unless the user set
+ * another), so there is no cap-less engine and a `length` with no client cap is not always the
+ * window. Either way only a stop clearly short of the cap counts. An unknown token count is taken
+ * as client-driven under a client cap, so a `max_tokens: 16` health check never grows the context,
+ * and as the window under the engine's alone, as before.
  */
-export function isContextOverflowFinishLength(
-  response: JsonValue,
-  requestBody: Buffer,
-  engineCap: number | null = DEFAULT_N_PREDICT
-): boolean {
+export function isContextOverflowFinishLength(response: JsonValue, requestBody: Buffer): boolean {
   const choices = isJsonObject(response) ? response['choices'] : undefined
   const hasLength =
     Array.isArray(choices) && choices.some((c) => isJsonObject(c) && c['finish_reason'] === 'length')
   if (!hasLength) return false
   const clientCap = clientMaxTokens(requestBody)
-  const cap = clientCap ?? engineCap
-  if (cap === null) return true
+  const cap = clientCap ?? DEFAULT_N_PREDICT
   const usage = isJsonObject(response) ? response['usage'] : undefined
   const done = asU64(isJsonObject(usage) ? usage['completion_tokens'] : undefined)
   // Without a count, only the client's own cap is a known reason; the engine's is not proven.

@@ -11,9 +11,9 @@ import {
   GENERATION_DEFAULT_KEYS,
   readGenerationDefaults,
   type GenerationDefaults,
-} from '../managed-text/generation-defaults.js'
-import { settingValues } from '../managed-text/setting-values.js'
-import { MANAGED_AUTO_CONTEXTS } from '../managed-models/auto-limits.js'
+} from '../managed-text/index.js'
+import { settingValues } from '../managed-text/index.js'
+import { MANAGED_AUTO_CONTEXTS } from '../managed-models/index.js'
 
 export interface SglangSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */
@@ -30,7 +30,11 @@ export interface SglangSettings {
   mem_fraction_static: number | null
   /** `--max-total-tokens`; `null` lets SGLang size the KV cache from its share. */
   max_total_tokens: number | null
-  /** `auto`: `--cuda-graph-max-bs <max_running_requests>`; `on`: SGLang's own; `off`: `--disable-cuda-graph`. */
+  /**
+   * `auto`: `--cuda-graph-max-bs-decode <max_running_requests>`; `on`: SGLang's own (nothing passed);
+   * `off`: `--disable-decode-cuda-graph --disable-prefill-cuda-graph` (`--disable-cuda-graph` is
+   * deprecated in v0.5.21 and never sent).
+   */
   cuda_graphs: 'auto' | 'on' | 'off'
   kv_cache_dtype: 'auto' | 'fp8'
   /** Seconds. `null` leaves the adapter's own weight-based estimate in force. */

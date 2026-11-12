@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto'
 import { createServer } from 'node:net'
 import { describe, expect, it } from 'vitest'
+import { AtomicCoreError } from '../../contracts/index.js'
 import {
   exitedOnTakenPort,
   generateApiKey,
@@ -27,10 +28,15 @@ describe('randomFreePort', () => {
     const port = await randomFreePort([], { random: () => seq[i++] as number, isAvailable: async () => true })
     expect(port).toBe(3660)
   })
-  it('gives up with the Rust message after the attempt budget', async () => {
-    await expect(
-      randomFreePort([], { attempts: 3, random: () => 3000, isAvailable: async () => false })
-    ).rejects.toThrow(PORT_EXHAUSTED_MESSAGE)
+  it('gives up with the Rust message after the attempt budget, as a typed SERVER_START_FAILED error', async () => {
+    const error = await randomFreePort([], {
+      attempts: 3,
+      random: () => 3000,
+      isAvailable: async () => false,
+    }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(AtomicCoreError)
+    expect((error as AtomicCoreError).code).toBe('SERVER_START_FAILED')
+    expect((error as Error).message).toBe(PORT_EXHAUSTED_MESSAGE)
   })
   it('isPortAvailable reports a bound port as taken', async () => {
     const server = createServer()

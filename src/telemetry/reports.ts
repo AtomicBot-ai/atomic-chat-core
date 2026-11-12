@@ -203,6 +203,7 @@ export function diffusionFailureReport(input: {
 }): ErrorReport | null {
   if (isCancellation(input.error)) return null
   const code = errorCodeOf(input.error) ?? 'INTERNAL'
+  if (RECOVERABLE_DIFFUSION_CODES.has(code)) return null
   const diagnostic = classifyFailure(input.error, {
     component: 'diffusion',
     operation: input.phase === 'load' ? 'load' : 'job',

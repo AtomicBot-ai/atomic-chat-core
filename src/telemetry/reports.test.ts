@@ -215,7 +215,7 @@ describe('diffusionFailureReport', () => {
     ])
   })
 
-  it.each([['ENGINE_MISSING'], ['CANCELLED'], ['INVALID_DIMENSIONS']])('ignores %s', (code) => {
+  it.each([['ENGINE_MISSING'], ['CANCELLED'], ['INVALID_DIMENSIONS'], ['DISK_FULL']])('ignores %s', (code) => {
     const error = new AtomicCoreError(code as 'CANCELLED', 'x')
     expect(diffusionFailureReport({ phase: 'job', error })).toBeNull()
   })
@@ -291,9 +291,8 @@ it('reports typed internal failures and resource failures without changing their
       error: new AtomicCoreError('INTERNAL_ERROR', 'x'),
     })
   ).toMatchObject({ level: 'error', diagnostic: { category: 'defect' } })
-  expect(
-    diffusionFailureReport({ phase: 'job', error: new AtomicCoreError('DISK_FULL', 'x') })
-  ).toMatchObject({ level: 'warning' })
+  // DISK_FULL is in the recoverable set, so a full disk is never reported (see the it.each above).
+  expect(diffusionFailureReport({ phase: 'job', error: new AtomicCoreError('DISK_FULL', 'x') })).toBeNull()
   for (const code of ['MODEL_FILE_NOT_FOUND', 'CPU_NO_AVX'] as const)
     expect(
       loadFailureReport({ provider: 'mlx', modelId: 'm', error: new AtomicCoreError(code, 'x') })

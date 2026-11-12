@@ -63,11 +63,16 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
 | `src/decision/`                     | The decision model (`llama-server --decision`, TurboQuant ≥ 1.7.0; or an upstream decision GGUF on stock llama.cpp ≥ b11370), a module of its own outside the sessions registry: `service.ts` (lifecycle, restart with backoff, idle unload, the fail-open `scoreCandidates`/`decide`, the public passthrough's target), `process.ts` (spawn + readiness), `engine.ts` (the `-h` gate over the installed fork packs, the build-number gate over upstream packs), `wiring.ts`, `model-facts.ts` (which engine a file needs); pure `args.ts`, `engine-version.ts`, `upstream-version.ts`, `engine-candidates.ts`, `readiness.ts` parsers, `outcome.ts`, `backoff.ts`, `request.ts`. Wire types in `src/contracts/decision.ts`. |
 | `src/embedding/`                    | The embedding model (stock llama.cpp `llama-server --embedding`, optionally with a projector for images and audio), a module of its own outside the sessions registry like the decision model: `service.ts` (lifecycle, restart with backoff, idle unload, the public `/v1/embeddings` target, `embed` for the app), `process.ts` (spawn + readiness by a real vector), `engine.ts` (the build-number gate over upstream packs), `wiring.ts`; pure `args.ts`, `model-facts.ts`, `readiness.ts`, `request.ts` (inline media and its form, modalities, `dimensions`, a part outside `content`, the engine's 500 for undecodable media); `ffmpeg.ts` (video needs `ffmpeg`: found beyond a Finder app's bare PATH and put on the process's). Wire types in `src/contracts/embedding.ts`. |
 | `src/telemetry/`                    | Error reports to the core's own Sentry project from every host (app daemon, CLI, library): pure `reports.ts` (what each failure becomes, or nothing), `consent.ts` (who decides), `scrub.ts`, `stack.ts`, `envelope.ts`; `reporter.ts` sends (dedup, caps), `core-reporter.ts` builds it, `store.ts` is `telemetry.json`, `daemon.ts` the process handlers, `subscribe.ts` the engine events. |
+| `src/media/`                        | Remote media: the image and video models cloud providers and self-hosted servers offer through the core — catalog, adapters, the shared job table, request masking (`ADR 2026-10-13-remote-media-shares-the-diffusion-job-table`). |
+| `src/integrations/`                 | Coding-agent integrations: the catalog `launch` works from and the config writers that point an agent at a local model (one file per agent under `configure/`). |
+| `src/engines/`                      | The `/engines` layer (`unify-engine-lifecycle`): versions, updates, activations and removals of every engine of this host, over the systems that install them. |
+| `src/engine-builds/`                | Engine builds the core downloads, checks, activates and removes itself, from conf's manifests: sd.cpp, audio.cpp, MLX, Foundry Local, LiteRT-LM and GenieX. |
+| `src/util/`                         | Small shared helpers with no I/O; Rust-compatible number parsing/formatting for the ports that must reproduce `str::parse`/`to_string` exactly. |
 | `src/lock/`                         | One owner per canonical data folder; PID/start identity, attach, child-process journal and legacy-resource guards. |
 | `src/host/`                         | Internals behind the app binary's thin entry (`src/app-daemon.ts`), not re-exported from the package: `log-file.ts` (`core.log`'s rotating writer — `formatLogLine`, `openLogFile`) and `app-daemon.ts` (`runAppDaemon`, everything the app-owned daemon does once the entry hands it the real process, clock, reporter and core). |
 | `src/cli/`                          | `main.ts` is the binary entry; one file per subcommand in `commands/`.                                                |
 | `test/`                             | `contract/`, `e2e/`, `app-e2e/`, `runtime-compat/`, `live/`, `fixtures/`, `helpers/`. Unit tests live next to code.  |
-| `scripts/`                          | CI gates: `check-runtime-agnostic.mjs`, `check-test-quality.mjs`, `check-coverage-floor.mjs`; `build-binaries.mjs`; `import-app-fixtures.mjs`. |
+| `scripts/`                          | CI gates: `check-runtime-agnostic.mjs`, `check-test-quality.mjs`, `check-module-boundaries.mjs`, `check-coverage-floor.mjs`; `build-binaries.mjs`; `import-app-fixtures.mjs`. |
 | `docs/decisions/`                   | ADR log, one file per decision, append-only.                                                                          |
 
 ---
@@ -87,11 +92,14 @@ state after reconnect; stdout carries only the bootstrap ready line. See `PLAN.m
    mapping in the app repo, in the same pair of PRs.
 6. **Runtime-agnostic.** Only `node:*` builtins and global `fetch`. No `Bun.*`, no `bun:*`, no native
    addons, no `worker_threads`, no `import.meta.url`-relative file loading (breaks under `--compile`).
-   Embed JSON with `import … with { type: 'json' }`. `npm run lint` fails otherwise. Two exceptions:
-   `src/runtime/foundry-local/host/ffi-bun.ts` and `src/runtime/litert-lm/host/ffi-bun.ts` import
-   `bun:ffi` (ADRs 2026-10-15-foundry-local-runs-in-a-host-mode-of-the-core-binary,
-   2026-10-21-litert-lm-runs-in-a-host-mode-with-its-own-openai-server) — allow-listed in both gates and
-   imported only dynamically by their hidden host modes; no other file may follow them.
+   Embed JSON with `import … with { type: 'json' }`. `npm run lint` fails otherwise. Five allow-listed
+   files import `bun:ffi` (or bundle a Worker that does) — `src/runtime/foundry-local/host/ffi-bun.ts`,
+   `src/runtime/litert-lm/host/ffi-bun.ts`, `src/runtime/geniex/host/ffi-bun.ts` and
+   `src/runtime/geniex/host/worker.ts` (plus foundry-local's `bun-ffi.d.ts` declarations) — ADRs
+   2026-10-15-foundry-local-runs-in-a-host-mode-of-the-core-binary,
+   2026-10-21-litert-lm-runs-in-a-host-mode-with-its-own-openai-server,
+   2026-10-27-geniex-runs-in-a-host-mode-with-generation-in-a-worker — allow-listed in both gates and
+   imported only by their hidden host modes; no other file may follow them.
 7. **Naming.** New identifiers are `atomic-*`, never `jan*`. Files `kebab-case.ts`, classes `PascalCase`,
    functions `camelCase`. Data paths: only those listed in `docs/contracts.md`; never invent a new one.
 8. **Dependencies.** `yaml`, `tar`, `yauzl`, `ai`, `@ai-sdk/openai-compatible`, `smol-toml`. Adding one

@@ -129,11 +129,6 @@ export class SidecarTable<Extra = unknown> {
     return [...this.sessions.values()].map((s) => s.info.port)
   }
 
-  /** In-flight loads other than this model's, which an auto-unload must wait for. */
-  otherLoads(modelId: string): Promise<SessionInfo>[] {
-    return [...this.loading].filter(([id]) => id !== modelId).map(([, load]) => load)
-  }
-
   /**
    * Load through the provider's single queue, or join the load already in flight for this model.
    * An already-loaded model answers with its session without queueing. `signal` is the user's

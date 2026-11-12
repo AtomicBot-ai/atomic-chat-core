@@ -4,7 +4,7 @@
  * only once conf main publishes it — until then the provider is unsupported, design D15).
  */
 import { defaultDescriptorUrl } from '../environment/index.js'
-import type { ManagedEngineSpec } from '../managed-engines/spec.js'
+import type { ManagedEngineSpec } from '../managed-engines/index.js'
 import type { ManagedTextCapabilities } from '../managed-text/index.js'
 import type { SessionRoutePolicy } from '../shared/index.js'
 import { VLLM_ROUTES, mapVllmContextLengthError, vllmAdapter, type VllmLaunchPlan } from './adapter.js'

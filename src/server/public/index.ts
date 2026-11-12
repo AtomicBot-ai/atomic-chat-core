@@ -52,6 +52,7 @@ export type {
 } from './types.js'
 export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
 export type { HostAndKeyConfig } from './gates.js'
+export { requestAborted } from './exchange.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
 export { SessionWindows } from './context-window.js'
 export {

@@ -27,7 +27,7 @@ beforeEach(async () => {
   events = []
 })
 afterEach(async () => {
-  await runtime?.dispose()
+  await runtime?.shutdown()
   runtime = undefined
   await data.cleanup()
 })

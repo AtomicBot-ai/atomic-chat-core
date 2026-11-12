@@ -1,7 +1,9 @@
 /**
- * `LiteRtLibrary` over `bun:ffi` — the second and last file in `src/` that may import `bun:*` (change
- * `add-litert-lm-runtime`, design D1 and decision 3.6; allow-listed in both runtime-agnostic gates). It
- * is imported dynamically by the `litert-host` mode alone, so the npm package still loads under Node.
+ * `LiteRtLibrary` over `bun:ffi` — allow-listed to import `bun:*` (change
+ * `add-litert-lm-runtime`, design D1 and decision 3.6,
+ * ADR 2026-10-21-litert-lm-runs-in-a-host-mode-with-its-own-openai-server; allow-listed in both
+ * runtime-agnostic gates). It is imported dynamically by the `litert-host` mode alone, so the npm
+ * package still loads under Node.
  *
  * Streaming is the hard part (spike S2). The library calls a stream callback on a C++ thread of its
  * own and frees the chunk as soon as the callback returns. A plain `JSCallback` cannot run there; a

@@ -41,8 +41,8 @@ import {
   standaloneGgufRefusal,
 } from '../../models/index.js'
 import { resolveLlama3TemplateOverride, STRICT_SYSTEM_GUARD_SIGNATURE } from '../../speculative/index.js'
-import { checkDflashSupport } from '../../speculative/dflash-registry.js'
-import { checkGemmaMtpSupport } from '../../speculative/gemma-mtp-registry.js'
+import { checkDflashSupport } from '../../speculative/index.js'
+import { checkGemmaMtpSupport } from '../../speculative/index.js'
 import {
   buildProcessEnv,
   discoverCudaPaths,
@@ -261,10 +261,6 @@ export class LlamacppRuntime implements LocalRuntime {
 
   getRuntimeDeviceInfo(modelId: string): RuntimeDeviceInfo | undefined {
     return this.sessions.get(modelId)?.devices.snapshot()
-  }
-
-  getMaxCtxTrain(modelId: string): number | undefined {
-    return this.sessions.get(modelId)?.plan.maxCtxTrain
   }
 
   isLoading(modelId: string): boolean {
@@ -966,11 +962,6 @@ export class LlamacppRuntime implements LocalRuntime {
     }
   }
 
-  async unloadAll(): Promise<void> {
-    this.assertRunning()
-    await Promise.all([...this.sessions.keys()].map((id) => this.unloadSession(id)))
-  }
-
   /** `llama-server --list-devices` against an installed backend. */
   async getDevices(exePath: string): Promise<DeviceInfo[]> {
     this.assertRunning()
@@ -1056,10 +1047,6 @@ export class LlamacppRuntime implements LocalRuntime {
       }
     })()
     return this.shutdownPromise
-  }
-
-  async dispose(): Promise<void> {
-    await this.shutdown()
   }
 
   private assertRunning(): void {

@@ -632,7 +632,9 @@ async function waitTerminal(deps: JobDeps, id: string, graceMs: number): Promise
 /**
  * Cancel a job. A queued job cancels natively; a generating one gets the engine's cancel and a grace
  * period, twice when the engine promised `cancelGenerating`; after that the server is stopped. The
- * spec stays, so the next job respawns it.
+ * spec stays, so the next job respawns it. A job whose outputs are already being saved is left
+ * alone: the save needs no server, and stopping sd-server would drop a finished image (as
+ * `cancelAudioJob` keeps a clip being written).
  */
 export async function cancelJob(
   deps: JobDeps,
@@ -659,6 +661,18 @@ export async function cancelJob(
     const final = await waitTerminal(deps, id, graceMs)
     if (final !== undefined && isTerminalJobState(final))
       return { cancelled: final === 'cancelled', serverStopped: false }
+  }
+
+  // The engine has answered and the outputs are being written, which needs no server: wait the save
+  // out instead of stopping sd-server under it. `JobRecord` has no done promise, so poll.
+  if (deps.state.anyJob(id)?.progress?.phase === 'saving') {
+    deps.log('info', 'cancel arrived while the outputs were being saved; letting the save finish')
+    for (;;) {
+      const st = deps.state.anyJob(id)?.state
+      if (st === undefined || isTerminalJobState(st))
+        return { cancelled: st === 'cancelled', serverStopped: false }
+      await deps.sleep(deps.timings.cancelPollMs)
+    }
   }
 
   // sd-server will not interrupt a running generation: stop the process.

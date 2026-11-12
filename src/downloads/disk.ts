@@ -129,6 +129,6 @@ export function checkPathWithinLimit(savePath: string, platform: NodeJS.Platform
   if (effective < WINDOWS_MAX_PATH) return undefined
   return diskFaultMessage(
     'disk_path_too_long',
-    `File path is ${effective} characters, over the ${WINDOWS_MAX_PATH}-character Windows limit. Move the Jan data folder closer to the drive root and retry.`
+    `File path is ${effective} characters, over the ${WINDOWS_MAX_PATH}-character Windows limit. Move the Atomic Chat data folder closer to the drive root and retry.`
   )
 }

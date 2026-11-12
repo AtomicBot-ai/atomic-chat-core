@@ -8,7 +8,7 @@
 
 import { lstat, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
+import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/index.js'
 import { isDateTime } from './manifest.js'
 
 /** Names that are debug symbols only, on any of the three systems. */

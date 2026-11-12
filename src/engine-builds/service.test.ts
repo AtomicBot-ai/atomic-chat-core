@@ -14,7 +14,7 @@ import { Downloader } from '../downloads/index.js'
 import type { DownloaderEventName } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { makeZip } from '../../test/helpers/make-zip.js'
-import { OWNER_MARKER } from '../diffusion/install.js'
+import { OWNER_MARKER } from '../diffusion/index.js'
 import { writeLiteRtLmInstallRecord } from './litert-lm.js'
 import { writeGeniexInstallRecord } from './geniex.js'
 import { ENGINE_DESCRIPTORS } from './engines.js'
@@ -37,7 +37,7 @@ import type {
   SdcppManifest,
 } from './manifest.js'
 import type { FoundryLocalHostPlatform, LiteRtLmHostPlatform } from './select.js'
-import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
+import type { GeniexHostPlatform } from '../runtime/geniex/index.js'
 import { EngineBuildsService, IDLE_ENGINE_HOST, parseEngineBuildId } from './service.js'
 import type { EngineHost } from './service.js'
 

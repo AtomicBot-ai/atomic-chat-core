@@ -61,7 +61,7 @@
     "build:bin": "node scripts/build-binaries.mjs --host",
     "build:bin:all": "node scripts/build-binaries.mjs --all",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint . && node scripts/check-runtime-agnostic.mjs && node scripts/check-test-quality.mjs",
+    "lint": "eslint . && node scripts/check-runtime-agnostic.mjs && node scripts/check-test-quality.mjs && node scripts/check-module-boundaries.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run --project unit --project contract",

@@ -5,6 +5,9 @@
  *
  * Nothing here reads hardware, disk or network: the persisted values, the installed list, the
  * probe result and the catalog are parameters.
+ *
+ * Ported ahead of its caller: the app wires this in its phase 6 (PLAN.md §Stage 6). Nothing in the
+ * core calls it yet; the contract comparators in test/ hold it to the app's answers.
  */
 
 import {

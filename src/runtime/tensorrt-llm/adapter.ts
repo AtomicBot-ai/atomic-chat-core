@@ -123,7 +123,7 @@ import {
   readGenerationDefaults,
   withGenerationDefaults,
   type GenerationDefaults,
-} from '../managed-text/generation-defaults.js'
+} from '../managed-text/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
 import {
   MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
@@ -1084,9 +1084,6 @@ function unwrapJsonSchemaFormat(format: unknown): unknown {
  * fixed per container; only the request says whether thinking was on.
  */
 export const TENSORRT_LLM_REASONING_AT_START_PARSERS: ReadonlySet<string> = new Set(['qwen3_5'])
-
-/** Moves a no-thinking reply filed as reasoning back into `content` (the shared rule, `request-rules.ts`). */
-export const tensorrtLlmReasoningIntoContent = reasoningIntoContent
 
 /** The response rewrite for a chat request with thinking off on a reasoning-at-start parser. */
 export function tensorrtLlmRewriteResponseFor(

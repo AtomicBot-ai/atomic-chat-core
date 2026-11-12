@@ -91,7 +91,7 @@ export class ModelRegistry {
     if (!entry)
       throw new AtomicCoreError(
         'MODEL_NOT_FOUND',
-        `Model '${id}' is not installed. Run \`atomic-chat-cli models list\` to see available models.`,
+        `Model '${id}' is not installed. Run \`atomic-chat-core models list\` to see available models.`,
         join(modelDirFromId(this.modelsDir, id), MODEL_YML)
       )
     return entry

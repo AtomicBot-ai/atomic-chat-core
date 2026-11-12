@@ -7,7 +7,7 @@ import { makeZip } from '../../../test/helpers/make-zip.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { LiteRtLmAcceleratorsEvent, LiteRtLmNpu } from '../../contracts/index.js'
-import type { LiteRtLmRelease } from '../../engine-builds/manifest.js'
+import type { LiteRtLmRelease } from '../../engine-builds/index.js'
 import { LiteRtLmAcceleratorService } from './accelerators.js'
 import type { LiteRtLmAcceleratorDeps } from './accelerators.js'
 

@@ -30,7 +30,7 @@
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { ModelFamilySupport } from '../../contracts/index.js'
 import { supportsFp8KvCache } from '../managed-models/index.js'
-import { withGenerationDefaults } from '../managed-text/generation-defaults.js'
+import { withGenerationDefaults } from '../managed-text/index.js'
 import {
   MANAGED_TEXT_ADAPTER_CONTRACT_VERSION,
   ManagedRequestRefusal,

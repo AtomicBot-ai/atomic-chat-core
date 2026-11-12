@@ -81,7 +81,7 @@ export function geniexVerdict(
     )
   if (!facts.build) return verdict('engine-not-installed', 'GenieX is not installed on this computer.', model)
   if (!deviceFound(device as GeniexDevice, facts.build.devices))
-    return verdict('accelerator-unavailable', deviceMissingReason(device as GeniexDevice), model)
+    return verdict('accelerator-unavailable', deviceMissingReason(device as GeniexDevice, facts.build.devices), model)
   const needs =
     (model?.kind === 'qairt' ? model.min_runtime_version : null) ?? request.min_runtime_version ?? null
   if (needs && compareVersions(needs, facts.build.version) > 0)

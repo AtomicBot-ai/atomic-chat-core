@@ -41,7 +41,7 @@ import type {
   InstalledEngineBuild,
   ProxyConfig,
 } from '../contracts/index.js'
-import { samePath } from '../diffusion/containment.js'
+import { samePath } from '../diffusion/index.js'
 import type { Downloader } from '../downloads/index.js'
 import type { HardwareFacts } from '../hardware/index.js'
 import { MLX_SERVER_BINARY, removeOwnedBuild } from './builds.js'

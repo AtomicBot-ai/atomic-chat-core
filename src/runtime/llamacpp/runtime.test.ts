@@ -43,7 +43,7 @@ beforeEach(async () => {
   events = []
 })
 afterEach(async () => {
-  await Promise.all(runtimes.splice(0).map((r) => r.dispose()))
+  await Promise.all(runtimes.splice(0).map((r) => r.shutdown()))
   await data.cleanup()
 })
 
@@ -681,16 +681,6 @@ describe('unload', () => {
     expect(isAlive(hostPid(info))).toBe(false)
     expect(payloads('session:unloaded')).toMatchObject([{ model_id: 'demo', pid: info.pid }])
     expect(await runtime.unload('demo')).toEqual({ success: true })
-  })
-
-  it('unloadAll stops every session', async () => {
-    await data.writeModel('a')
-    await data.writeModel('b')
-    const runtime = await makeRuntime()
-    const [first, second] = [await runtime.load('a'), await runtime.load('b')]
-    await runtime.unloadAll()
-    expect(runtime.list()).toEqual([])
-    await waitFor(() => !isAlive(hostPid(first)) && !isAlive(hostPid(second)))
   })
 
   it('auto-unloads another text model before starting the next one', async () => {

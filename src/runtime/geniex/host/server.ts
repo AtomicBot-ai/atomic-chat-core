@@ -16,7 +16,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
-import { requestAborted } from '../../../server/public/exchange.js'
+import { requestAborted } from '../../../server/public/index.js'
 import {
   completionBody,
   FifoLock,

@@ -4,7 +4,7 @@
  * conf. Registered by core like any other managed engine.
  */
 import { TENSORRT_LLM_DESCRIPTOR_SOURCE, TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
-import type { ManagedEngineSpec } from '../managed-engines/spec.js'
+import type { ManagedEngineSpec } from '../managed-engines/index.js'
 import { tensorrtLlmAdapter, type TensorrtLlmSettings } from './adapter.js'
 import { tensorrtLlmCheckEngine, tensorrtLlmLaunchPlan, type MemorySizingInputs } from './compatibility.js'
 import { tensorrtLlmRoutePolicy } from './route-policy.js'

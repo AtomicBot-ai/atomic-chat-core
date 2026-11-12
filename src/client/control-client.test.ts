@@ -23,7 +23,7 @@ import type {
   SessionInfo,
 } from '../contracts/index.js'
 import { CoreEmitter } from '../events/index.js'
-import { ClientRegistry } from '../server/clients.js'
+import { ClientRegistry } from '../server/index.js'
 import { ControlServer } from '../server/control/index.js'
 import { CoreClient } from './control-client.js'
 import { fakeDiffusionControl } from '../../test/helpers/fake-diffusion-control.js'

@@ -4,7 +4,7 @@
  * Ported from: extensions/mlx-extension/src/buildMlxConfig.ts (verbatim logic).
  */
 
-import { DEFAULT_CTX_LEN } from '../llamacpp/ctx-ladder.js'
+import { DEFAULT_CTX_LEN } from '../llamacpp/index.js'
 
 /** What `build_mlx_server_args` reads (tauri-plugin-mlx/src/commands.rs `MlxConfig`). */
 export interface MlxServerConfig {

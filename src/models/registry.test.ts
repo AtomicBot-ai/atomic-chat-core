@@ -72,7 +72,7 @@ describe('get, read and write', () => {
     expect(await registry.find('nope')).toBeUndefined()
     await expect(registry.get('nope')).rejects.toMatchObject({
       code: 'MODEL_NOT_FOUND',
-      message: expect.stringContaining('atomic-chat-cli models list') as unknown as string,
+      message: expect.stringContaining('atomic-chat-core models list') as unknown as string,
       details: expect.stringContaining(join('nope', 'model.yml')) as unknown as string,
     })
   })

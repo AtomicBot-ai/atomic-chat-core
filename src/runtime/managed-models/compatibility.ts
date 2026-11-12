@@ -108,13 +108,6 @@ export function safetensorsTensorNames(header: unknown): string[] | undefined {
 }
 
 /**
- * Architectures whose MoE layers TensorRT-LLM builds with `DeepseekV3Gate`, which refuses to load
- * without an `e_score_correction_bias` tensor next to the router weight (TensorRT-LLM v1.3.0rc29,
- * `_torch/models/modeling_deepseekv3.py` `DeepseekV3Gate.load_weights`; `modeling_glm.py` builds
- * `Glm4Moe` with the same gate). `NemotronH*` also uses the gate, but only in its MoE layers, and a
- * dense Nemotron-H has none, so it is not listed: a rule here must never refuse a model that loads.
- */
-/**
  * The host's own memory, from `/proc/meminfo`: what a unified-memory card (design D13, GB10/DGX
  * Spark — `nvidia-smi` reports no memory of its own) has instead of VRAM. `availableBytes` is
  * `MemAvailable`, what such a card has free; `totalBytes` is `MemTotal`, its size. Either is `0`

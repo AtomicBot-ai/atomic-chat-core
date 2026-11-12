@@ -60,9 +60,9 @@ export function autoLimitCandidates(input: Omit<AutoLimitsInput, 'fits'>): Array
 /** The first candidate pair the memory rule passes, else the smallest (the check then refuses). */
 export function fitAutoLimits(input: AutoLimitsInput): { context: number; sequences: number } {
   const pairs = autoLimitCandidates(input)
-  const chosen =
-    pairs.find(([context, sequences]) => input.fits(context, sequences)) ?? pairs[pairs.length - 1]
-  const [context, sequences] = chosen ?? [input.context, input.sequences]
+  // `autoLimitCandidates` never returns an empty list, so the last pair is always there.
+  const chosen = pairs.find(([context, sequences]) => input.fits(context, sequences)) ?? pairs[pairs.length - 1]!
+  const [context, sequences] = chosen
   return { context, sequences }
 }
 

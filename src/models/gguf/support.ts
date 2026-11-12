@@ -28,7 +28,7 @@ export interface MemoryBudget {
   usable_total: number
 }
 
-/** Vulkan's `IntegratedGpu` is the only trusted signal; anything else counts as discrete. */
+/** Vulkan's `IntegratedGpu` is the only trusted signal; anything else counts as discrete. Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately. */
 export function isIntegratedGpu(gpu: { vulkan_info?: { device_type?: string } | null }): boolean {
   return gpu.vulkan_info?.device_type?.toLowerCase() === 'integratedgpu'
 }
@@ -37,6 +37,8 @@ export function isIntegratedGpu(gpu: { vulkan_info?: { device_type?: string } | 
  * Integrated graphics shares system RAM, so adding it to RAM would count it twice (the 16 GB
  * laptop that was told a 17 GB model fits). Only discrete GPUs add memory of their own. With no
  * GPU enumerated (Apple Silicon) RAM *is* the VRAM: one pool.
+ *
+ * Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately.
  */
 export function memoryBudget(totalRamBytes: number, gpus: GpuMemory[]): MemoryBudget {
   if (gpus.length === 0) {
@@ -51,7 +53,7 @@ export function memoryBudget(totalRamBytes: number, gpus: GpuMemory[]): MemoryBu
   }
 }
 
-/** RED = cannot run at all; GREEN = fits in VRAM; YELLOW = runs with CPU/GPU spill. */
+/** RED = cannot run at all; GREEN = fits in VRAM; YELLOW = runs with CPU/GPU spill. Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately. */
 export function modelSupportStatus(requiredBytes: number, budget: MemoryBudget): ModelSupportStatus {
   if (requiredBytes > budget.usable_total) return 'RED'
   if (requiredBytes <= budget.usable_vram) return 'GREEN'
@@ -64,7 +66,7 @@ export interface SystemMemoryFacts {
   gpus: Array<GpuProbeInfo & { total_memory: number }>
 }
 
-/** `is_model_supported` after the file size and KV estimate are known. */
+/** `is_model_supported` after the file size and KV estimate are known. Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately. */
 export function isModelSupported(
   modelSizeBytes: number,
   kvCacheBytes: number,

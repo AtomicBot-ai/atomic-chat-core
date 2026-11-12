@@ -20,7 +20,7 @@ import type { BackendVersion } from '../types.js'
 // Two build-number parsers exist on purpose: `version.ts` has the app's strict `^b(\d+)$` one, and
 // this is the Rust `ArgumentBuilder::parse_build_number`, which also reads the unified fork tag
 // `b10018-1.3.0`. Discovery must use the lenient one, or the fork's builds sort last.
-import { parseBuildNumber as parseLenientBuildNumber } from '../../runtime/llamacpp/args.js'
+import { parseBuildNumber as parseLenientBuildNumber } from '../../runtime/llamacpp/index.js'
 import { stripBom } from '../version.js'
 
 export interface DiscoveredBackendBinary {

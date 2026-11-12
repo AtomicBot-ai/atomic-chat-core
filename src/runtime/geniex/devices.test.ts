@@ -22,8 +22,13 @@ describe('GenieX devices (design D3)', () => {
     expect(acceleratorsFound(all)).toEqual(['npu', 'gpu'])
     expect(acceleratorsFound(['GPUOpenCL'])).toEqual(['gpu'])
     expect(acceleratorsFound(['CPU'])).toEqual([])
-    expect(deviceMissingReason('npu')).toMatch(/NPU driver/)
-    expect(deviceMissingReason('gpu')).toMatch(/OpenCL/)
-    expect(deviceMissingReason('hybrid')).toMatch(/hybrid/)
+    expect(deviceMissingReason('npu', [])).toMatch(/NPU driver/)
+    expect(deviceMissingReason('gpu', [])).toMatch(/OpenCL/)
+    expect(deviceMissingReason('hybrid', [])).toMatch(/hybrid/)
+    // Hybrid diagnoses the half that is missing: the NPU present means the GPU is what is gone.
+    expect(deviceMissingReason('hybrid', ['GPUOpenCL'])).toMatch(/NPU driver/)
+    expect(deviceMissingReason('hybrid', ['HTP0'])).toBe(
+      'GenieX found no Adreno GPU (no OpenCL device) on this computer, which hybrid needs with the NPU.'
+    )
   })
 })

@@ -12,8 +12,8 @@
 import { chmod, readdir, readFile, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
-import { locate, samePath } from '../diffusion/containment.js'
-import { INSTALL_RECORD, OWNER_MARKER, runHelpProbe } from '../diffusion/install.js'
+import { locate, samePath } from '../diffusion/index.js'
+import { INSTALL_RECORD, OWNER_MARKER, runHelpProbe } from '../diffusion/index.js'
 import type { ExitInfo } from '../runtime/llamacpp/index.js'
 import { isDateTime } from './manifest.js'
 

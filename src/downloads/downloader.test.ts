@@ -199,7 +199,7 @@ describe('Downloader', () => {
     server.files.set('/small.bin', { body: body.subarray(0, 10) })
     await expect(
       dl.download('t10', [{ url: server.url('/small.bin'), save_path: '../escape.bin', size: 10 }])
-    ).rejects.toThrow(/is outside of Jan data folder/)
+    ).rejects.toThrow(/is outside of the Atomic Chat data folder/)
     await expect(
       dl.download('t11', [{ url: server.url('/small.bin'), save_path: 'x.bin', size: 10 }])
     ).rejects.toThrow(/^Error: \[disk_full\]/)

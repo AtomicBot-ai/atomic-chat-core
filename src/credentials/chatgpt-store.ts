@@ -11,7 +11,7 @@
  * a refresh token is never briefly on disk under a wider one.
  */
 
-import { chmod, mkdir, open, readFile, unlink } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 export const TOKEN_FILE_VERSION = 1
@@ -107,14 +107,19 @@ export async function loadTokens(path: string): Promise<StoredTokens | undefined
 
 export async function saveTokens(path: string, tokens: StoredTokens): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
-  const handle = await open(path, 'w', 0o600)
+  // `<path>.tmp` then rename, as the api-keys and settings stores write: a crash mid-write never
+  // leaves a half-written token file under the real name.
+  const tmp = `${path}.tmp`
+  const handle = await open(tmp, 'w', 0o600)
   try {
     await handle.writeFile(serializeStoredTokens(tokens))
   } finally {
     await handle.close()
   }
-  // An existing file keeps its old mode through `open`, so restate it.
-  if (process.platform !== 'win32') await chmod(path, 0o600)
+  // `open` already asked for 0600, but a leftover temporary file keeps its old mode through
+  // `writeFile`, so restate it before the rename.
+  if (process.platform !== 'win32') await chmod(tmp, 0o600)
+  await rename(tmp, path)
 }
 
 /** Missing is success: "not connected" is the goal state. */

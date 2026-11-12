@@ -37,16 +37,16 @@ import {
   safetensorsHeaderLength,
   safetensorsTensorNames,
   weightSafetensorsFiles,
-} from '../managed-models/compatibility.js'
+} from '../managed-models/index.js'
 import type {
   CheckpointFile,
   HostMemory,
   ManagedCheckEngine,
   ModelCheckInput,
   ResolvedCheckpoint,
-} from '../managed-models/compatibility.js'
-import type { ManagedModel } from '../managed-models/model-dir.js'
-import type { JsonObject } from '../managed-models/quant-format.js'
+} from '../managed-models/index.js'
+import type { ManagedModel } from '../managed-models/index.js'
+import type { JsonObject } from '../managed-models/index.js'
 
 const CONFIG_FILE = 'config.json'
 const HF_QUANT_CONFIG_FILE = 'hf_quant_config.json'

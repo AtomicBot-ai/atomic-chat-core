@@ -65,7 +65,10 @@ export interface AtomicCoreOptions {
   remoteGgufTimeoutMs?: number
   fetch?: typeof fetch
   env?: NodeJS.ProcessEnv
-  /** 'owner' takes the instance lock; 'auto' is the same today — attaching is the CLI's job. */
+  /**
+   * Accepted but inert today: only 'owner' behaviour exists (attaching is the CLI's job). Reserved
+   * for the app's phase 6 (PLAN.md §Stage 6); do not implement or remove.
+   */
   role?: 'owner' | 'auto'
   controlHost?: string
   /** 0 (the default) picks a free port and publishes it in the lock. */

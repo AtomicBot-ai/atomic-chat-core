@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/generation-limits.js'
+import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/index.js'
 import {
   anthropicPromptTooLong,
   bodyIndicatesOom,
@@ -230,11 +230,6 @@ describe('isContextOverflowFinishLength', () => {
     expect(isContextOverflowFinishLength(response(DEFAULT_N_PREDICT - 1), noCap)).toBe(false)
     // Well short of it, the window ran out.
     expect(isContextOverflowFinishLength(response(1200), noCap)).toBe(true)
-    // A user's own cap, passed by the caller.
-    expect(isContextOverflowFinishLength(response(4096), noCap, 4096)).toBe(false)
-    expect(isContextOverflowFinishLength(response(4096), noCap, 8192)).toBe(true)
-    // An engine started without a cap: any length stop is the window.
-    expect(isContextOverflowFinishLength(response(DEFAULT_N_PREDICT), noCap, null)).toBe(true)
     // The client's cap still wins over the engine's.
     expect(isContextOverflowFinishLength(response(511), request(512))).toBe(false)
     expect(isContextOverflowFinishLength(response(500), request(512))).toBe(true)

@@ -4,7 +4,7 @@ import { mkdir, open, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
-import { classifyFailure, diagnosticTags } from '../telemetry/diagnostics.js'
+import { classifyFailure, diagnosticTags } from '../telemetry/index.js'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import {

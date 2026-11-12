@@ -6,6 +6,7 @@
 
 import { AtomicCoreError, DIFFUSION_ERROR_CODES } from '../contracts/index.js'
 import type { DiffusionErrorBody, DiffusionErrorCode } from '../contracts/index.js'
+import { classifyIoError } from '../downloads/index.js'
 
 export function diffusionError(code: DiffusionErrorCode, message: string, details?: string): AtomicCoreError {
   return new AtomicCoreError(code, message, details)
@@ -27,20 +28,17 @@ export function cancelledError(): AtomicCoreError {
   return diffusionError('CANCELLED', 'Generation was cancelled.')
 }
 
-/** libuv reports a full disk as `ENOSPC` everywhere, Windows' two "disk full" codes included. */
-export function isDiskFull(error: unknown): boolean {
-  return (error as NodeJS.ErrnoException | undefined)?.code === 'ENOSPC'
-}
-
 /**
- * An I/O failure on the closest code: a full disk is something the user can act on, everything else
- * is internal, with `context` as the message.
+ * An I/O failure on the closest code: the shared download classifier names the disk cases (a full
+ * disk or a file-size limit is something the user can act on), everything else is internal, with
+ * `context` as the message and the original error as the `cause`.
  */
 export function ioError(context: string, error: unknown): AtomicCoreError {
   const reason = error instanceof Error ? error.message : String(error)
-  if (isDiskFull(error))
-    return new AtomicCoreError('DISK_FULL', 'The disk is full.', `${context}: ${reason}`, { cause: error })
-  return new AtomicCoreError('INTERNAL', context, reason, { cause: error })
+  const tag = classifyIoError(error)
+  return tag === 'disk_full' || tag === 'disk_fs_limit'
+    ? new AtomicCoreError('DISK_FULL', `[${tag}] The disk is full.`, `${context}: ${reason}`, { cause: error })
+    : new AtomicCoreError('INTERNAL', context, reason, { cause: error })
 }
 
 export function isDiffusionErrorCode(code: unknown): code is DiffusionErrorCode {

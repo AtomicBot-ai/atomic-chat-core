@@ -1,6 +1,7 @@
 /**
- * `GeniexLibrary` over `bun:ffi` — the third file in `src/` that may import `bun:*` (change
- * `add-geniex-runtime`, design D1; allow-listed in both runtime-agnostic gates with `worker.ts`). It
+ * `GeniexLibrary` over `bun:ffi` — allow-listed to import `bun:*` (change
+ * `add-geniex-runtime`, design D1, ADR 2026-10-27-geniex-runs-in-a-host-mode-with-generation-in-a-worker;
+ * allow-listed in both runtime-agnostic gates with `worker.ts`). It
  * is imported by the Worker alone, so the npm package still loads under Node.
  *
  * The binding follows `sdk/include/geniex.h` of GenieX v0.9.3 (ABI 1 of conf's manifest). Structs

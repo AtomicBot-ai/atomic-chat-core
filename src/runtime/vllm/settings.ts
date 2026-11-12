@@ -9,9 +9,9 @@ import {
   GENERATION_DEFAULT_KEYS,
   readGenerationDefaults,
   type GenerationDefaults,
-} from '../managed-text/generation-defaults.js'
-import { settingValues } from '../managed-text/setting-values.js'
-import { MANAGED_AUTO_CONTEXTS } from '../managed-models/auto-limits.js'
+} from '../managed-text/index.js'
+import { settingValues } from '../managed-text/index.js'
+import { MANAGED_AUTO_CONTEXTS } from '../managed-models/index.js'
 
 export interface VllmSettings {
   /** `GPU-<uuid>`/`MIG-<uuid>`, or `null` to let the load pick the card with the most free memory. */

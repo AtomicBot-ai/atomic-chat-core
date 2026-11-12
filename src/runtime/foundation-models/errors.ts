@@ -12,7 +12,7 @@
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { ExitInfo } from '../llamacpp/errors.js'
+import type { ExitInfo } from '../llamacpp/index.js'
 
 /** Written on stdout once the HTTP server is up (FoundationModelsServerCommand.swift). */
 export const FOUNDATION_MODELS_READY_MARKERS = ['server is listening on', 'http server listening'] as const

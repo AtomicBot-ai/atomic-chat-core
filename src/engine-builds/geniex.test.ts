@@ -4,7 +4,7 @@ import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { makeZip } from '../../test/helpers/make-zip.js'
 import { extractArchive } from '../downloads/index.js'
-import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/install.js'
+import { INSTALL_RECORD, OWNER_MARKER } from '../diffusion/index.js'
 import {
   GENIEX_LIBRARY_FILE,
   listGeniexBuilds,

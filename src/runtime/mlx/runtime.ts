@@ -26,7 +26,7 @@ import type { SessionInfo, UnloadResult } from '../../contracts/index.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
 import { resolveEagle3Draft, resolveMlxDflashDraft, resolveMtpDraft } from '../../speculative/index.js'
-import { DEFAULT_CTX_LEN, computeNextCtxLen } from '../llamacpp/ctx-ladder.js'
+import { DEFAULT_CTX_LEN, computeNextCtxLen } from '../llamacpp/index.js'
 import type {
   CtxIncreaseResult,
   EmitFn,
@@ -47,7 +47,7 @@ import {
   throwIfLoadCancelled,
 } from '../shared/index.js'
 import type { BackendOutputSink } from '../shared/index.js'
-import type { EngineHost } from '../../engine-builds/service.js'
+import type { EngineHost } from '../../engine-builds/index.js'
 import { buildMlxServerArgs, normalizeMlxModelPath } from './args.js'
 import { asNumber, buildMlxConfig, selectMlxDraftSettings } from './config.js'
 import type { MlxDraftKind, MlxExtensionConfigInput } from './config.js'
@@ -60,8 +60,8 @@ import {
   mlxModelMissing,
   mlxTimeout,
 } from './errors.js'
-import { smallMemoryDefaultCtx } from '../llamacpp/fit-margin.js'
-import { resolveNPredict } from '../llamacpp/generation-limits.js'
+import { smallMemoryDefaultCtx } from '../llamacpp/index.js'
+import { resolveNPredict } from '../llamacpp/index.js'
 import {
   readMlxMaxCtxTrain,
   readMlxMemoryFacts,

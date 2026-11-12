@@ -10,8 +10,8 @@ import { readdir, readFile, rename, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { DataLayout } from '../../config/index.js'
 import type { ModelRegistry, ModelYmlDocument } from '../../models/index.js'
-import { readKvCacheShape } from '../managed-models/compatibility.js'
-import type { JsonObject } from '../managed-models/quant-format.js'
+import { readKvCacheShape } from '../managed-models/index.js'
+import type { JsonObject } from '../managed-models/index.js'
 import { planMlxShardRepair, repointLegacyWeightPath } from './shard-repair.js'
 
 /** A model path's folder: the path itself when it is a folder, its parent otherwise. */

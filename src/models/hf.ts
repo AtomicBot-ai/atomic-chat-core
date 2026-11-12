@@ -33,7 +33,7 @@ export function hfToken(env: NodeJS.ProcessEnv = process.env): string | undefine
   return nonEmpty(env['HF_TOKEN']) ?? nonEmpty(env['HUGGING_FACE_HUB_TOKEN'])
 }
 
-/** Fetch and normalize the GGUF siblings, smallest first. */
+/** Fetch and normalize the GGUF siblings, smallest first. Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately. */
 export async function fetchHfGgufFiles(
   repoId: string,
   options: { fetch?: typeof fetch; token?: string; revision?: string } = {}
@@ -78,7 +78,7 @@ export async function fetchHfGgufFiles(
   return files
 }
 
-/** Prefer the Rust CLI's default quantization, then the largest known file. */
+/** Prefer the Rust CLI's default quantization, then the largest known file. Public via `atomic-chat-core/models`; referenced by no core code today, kept deliberately. */
 export function chooseDefaultHfFile(files: HfFileInfo[]): HfFileInfo {
   const preferred = files.find((file) => file.filename.includes('Q4_K_XL'))
   const chosen =

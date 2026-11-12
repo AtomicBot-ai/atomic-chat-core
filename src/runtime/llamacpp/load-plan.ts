@@ -116,7 +116,6 @@ export interface LoadPlanDeps {
   backendSupportsDflashSpec: (exePath: string, env: Record<string, string>) => Promise<boolean>
   resolveLlama3TemplateOverride: (modelId: string, embedded: string | undefined) => string | undefined
   strictSystemGuardSignature?: string
-  apiSecret?: string
   warn?: (msg: string) => void
 }
 
@@ -197,8 +196,8 @@ export function llamaGpuFootprint(
  * The same plan on another port. The session key is derived from the port, so it moves with it.
  * For a start whose port was taken between `randomFreePort`'s probe and the engine's own bind.
  */
-export function withPort(plan: LoadPlan, port: number, apiSecret?: string): LoadPlan {
-  const apiKey = generateApiKey(plan.modelId, port, apiSecret)
+export function withPort(plan: LoadPlan, port: number): LoadPlan {
+  const apiKey = generateApiKey(plan.modelId, port)
   return { ...plan, port, apiKey, env: { ...plan.env, LLAMA_API_KEY: apiKey } }
 }
 
@@ -290,7 +289,7 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
       }
     : await deps.readModelYml(modelId)
   const port = await deps.randomPort()
-  const apiKey = generateApiKey(modelId, port, deps.apiSecret)
+  const apiKey = generateApiKey(modelId, port)
   const timeoutSecs = input.timeoutSecs ?? modelLoadReadyTimeoutSecs(input.engine.timeout)
   env['LLAMA_API_KEY'] = apiKey
   env['LLAMA_ARG_TIMEOUT'] = String(input.timeoutSecs ?? input.engine.timeout)

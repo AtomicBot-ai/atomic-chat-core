@@ -4,9 +4,9 @@
 //   cd ../Atomic-Chat/src-tauri && cargo test -- --ignored dump_fixtures
 //
 //   node scripts/import-app-fixtures.mjs [--app ../Atomic-Chat]
-import { createHash } from 'node:crypto'
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join, relative, resolve } from 'node:path'
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { computeFixtureChecksum } from './lib/fixture-checksum.mjs'
 
 const ROOT = new URL('..', import.meta.url).pathname
 const appArg = process.argv.indexOf('--app')
@@ -22,22 +22,8 @@ if (!existsSync(SRC)) {
 mkdirSync(DEST, { recursive: true })
 cpSync(SRC, DEST, { recursive: true })
 
-function* walk(dir) {
-  for (const name of readdirSync(dir).sort()) {
-    const p = join(dir, name)
-    if (statSync(p).isDirectory()) yield* walk(p)
-    else if (name !== 'CHECKSUM') yield p
-  }
-}
-const hash = createHash('sha256')
-let count = 0
-for (const f of walk(DEST)) {
-  hash.update(relative(DEST, f))
-  hash.update(readFileSync(f))
-  count++
-}
-const digest = hash.digest('hex')
+const digest = computeFixtureChecksum(DEST)
 writeFileSync(join(DEST, 'CHECKSUM'), `${digest}\n`)
 // The app's tests/core-contracts.test.mjs recomputes the same digest, so both repos hold one value.
 writeFileSync(join(SRC, 'CHECKSUM'), `${digest}\n`)
-console.log(`imported ${count} fixture files from ${SRC}\nsha256 ${digest}`)
+console.log(`imported fixture files from ${SRC}\nsha256 ${digest}`)

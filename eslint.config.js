@@ -47,10 +47,8 @@ export default tseslint.config(
           })),
           patterns: [
             { group: ['bun', 'bun:*'], message: 'Core code must stay Node-compatible.' },
-            {
-              group: ['../*/!(index)', '../*/!(index).js'],
-              message: 'Import sibling modules through their index.ts only.',
-            },
+            // Cross-module deep imports are gated by scripts/check-module-boundaries.mjs, which the
+            // ignore package's patterns cannot express (no extglob, so `!(index)` never matched).
           ],
         },
       ],
@@ -94,12 +92,8 @@ export default tseslint.config(
         'error',
         {
           paths: NODE_BUILTINS.map((name) => ({ name, message: `Import '${name}' as 'node:${name}'.` })),
-          patterns: [
-            {
-              group: ['../*/!(index)', '../*/!(index).js'],
-              message: 'Import sibling modules through their index.ts only.',
-            },
-          ],
+          // Cross-module deep imports are gated by scripts/check-module-boundaries.mjs, which the
+          // ignore package's patterns cannot express (no extglob, so `!(index)` never matched).
         },
       ],
     },

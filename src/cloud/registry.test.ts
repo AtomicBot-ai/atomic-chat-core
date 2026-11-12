@@ -194,6 +194,12 @@ describe('CloudRegistry', () => {
     await expect(registry.upsert({ provider: 'litert-lm' })).rejects.toMatchObject({
       message: '"litert-lm" is a local engine, not a cloud provider',
     })
+    await expect(registry.upsert({ provider: 'fastflowlm' })).rejects.toMatchObject({
+      message: '"fastflowlm" is a local engine, not a cloud provider',
+    })
+    await expect(registry.upsert({ provider: 'foundation-models' })).rejects.toMatchObject({
+      message: '"foundation-models" is a local engine, not a cloud provider',
+    })
     for (const bad of [
       { models: 'gpt' },
       { models: [1] },
@@ -206,6 +212,8 @@ describe('CloudRegistry', () => {
         code: 'INVALID_ARGUMENT',
       })
     }
+    await registry.upsert({ provider: 'mycloud', models: ['gpt'] })
+    expect(registry.get('mycloud')?.provider).toBe('mycloud')
   })
 
   it('skips malformed entries a hand-edited settings file may hold', async () => {

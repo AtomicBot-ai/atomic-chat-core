@@ -7,7 +7,6 @@ import {
   internalError,
   ioError,
   isDiffusionErrorCode,
-  isDiskFull,
   modelNotLoadedError,
   notConfiguredError,
   toDiffusionError,
@@ -36,33 +35,28 @@ describe('the named failures', () => {
 })
 
 describe('ioError', () => {
-  it('makes a full disk actionable and everything else internal', () => {
-    const full = ioError(
-      'Could not write the image.',
-      errno('ENOSPC', 'ENOSPC: no space left on device, write')
-    )
+  it('makes a full disk actionable and everything else internal, the cause kept', () => {
+    const enospc = errno('ENOSPC', 'ENOSPC: no space left on device, write')
+    const full = ioError('Could not write the image.', enospc)
     expect(full.toJSON()).toEqual({
       code: 'DISK_FULL',
-      message: 'The disk is full.',
+      message: '[disk_full] The disk is full.',
       details: 'Could not write the image.: ENOSPC: no space left on device, write',
     })
-    const denied = ioError(
-      'Could not create the output folder.',
-      errno('EACCES', 'EACCES: permission denied')
-    )
+    expect(full.cause).toBe(enospc)
+    const edquot = errno('EDQUOT', 'EDQUOT: disk quota exceeded')
+    expect(ioError('Could not write the image.', edquot).code).toBe('DISK_FULL')
+    expect(ioError('Could not write the image.', edquot).message).toBe('[disk_full] The disk is full.')
+    const efbig = errno('EFBIG', 'EFBIG: file too large')
+    expect(ioError('Could not write the image.', efbig).message).toBe('[disk_fs_limit] The disk is full.')
+    const denied = ioError('Could not create the output folder.', errno('EACCES', 'EACCES: permission denied'))
     expect(denied.toJSON()).toEqual({
       code: 'INTERNAL',
       message: 'Could not create the output folder.',
       details: 'EACCES: permission denied',
     })
+    expect(denied.cause).toBeInstanceOf(Error)
     expect(ioError('context', 'a string').details).toBe('a string')
-  })
-
-  it('recognises a full disk only by its errno code', () => {
-    expect(isDiskFull(errno('ENOSPC', 'x'))).toBe(true)
-    expect(isDiskFull(errno('EIO', 'x'))).toBe(false)
-    expect(isDiskFull(new Error('no space left on device'))).toBe(false)
-    expect(isDiskFull(undefined)).toBe(false)
   })
 })
 

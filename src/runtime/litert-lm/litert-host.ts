@@ -7,7 +7,7 @@
  * Importing this file loads no `bun:*`: the FFI bindings load dynamically, inside the mode alone.
  */
 
-import { detachableWriter } from '../../cli/io.js'
+import { detachableWriter } from '../../cli/index.js'
 import { lineIo, loadLibraryWithBun, runLiteRtHost } from './host/run.js'
 
 /**
