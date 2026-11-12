@@ -116,6 +116,11 @@ export class AtomicCore {
    * kept across server restarts, not across core restarts (the app hands it over again).
    */
   servedSelection: ReadonlyMap<string, string> = new Map()
+  /**
+   * Extra keys the public listener accepts next to its own `api_key` (`setClientKeys`), read per
+   * request. Private and in memory only: never in a snapshot, the server state or telemetry.
+   */
+  private clientKeys: readonly string[] = []
   private resolveStopped: (() => void) | undefined
   /** Resolves once this core has stopped, however that was triggered (API, signal, or in-process). */
   readonly stopped: Promise<void> = new Promise<void>((resolve) => {
@@ -227,6 +232,7 @@ export class AtomicCore {
       liveTrustedHosts: parts.managedTrustedHosts,
       serverDeps: () => ({
         ...(parts.publicApiKeys ? { apiKeys: parts.publicApiKeys } : {}),
+        clientKeys: () => this.clientKeys,
         findLocal: (provider, modelId) => this.localSessions.localTarget(provider, modelId),
         listLocal: () => this.localSessions.listLocalTargets(),
         contextWindow: (target) => this.sessionWindows.of(target),
@@ -372,6 +378,15 @@ export class AtomicCore {
   async stopPublicServer(): Promise<LocalApiServerState> {
     this.assertRunning()
     return this.publicServer.stop()
+  }
+
+  /**
+   * Replace the extra keys the public listener accepts next to its own `api_key`, effective on the
+   * next request and kept across listener restarts, not across core restarts. They apply only while
+   * the listener has a key and the host keeps no keyring (`AtomicCoreOptions.publicApiKeys`).
+   */
+  setClientKeys(keys: readonly string[]): void {
+    this.clientKeys = Object.freeze([...keys])
   }
 
   remoteAccessStatus(): RemoteAccessStatus {

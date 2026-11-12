@@ -871,6 +871,15 @@ export class CoreClient {
     return this.call('/server/selection', { method: 'PUT', body: JSON.stringify({ models }) })
   }
 
+  /**
+   * Replace the whole list of extra keys the public listener accepts next to its own `api_key`
+   * (at most 200, each 20–256 characters of `[A-Za-z0-9._~-]`). In memory only: send it again after
+   * every reattach. There is no read-back.
+   */
+  setServerClientKeys(keys: readonly string[]): Promise<{ count: number }> {
+    return this.call('/server/client-keys', { method: 'PUT', body: JSON.stringify({ keys }) })
+  }
+
   /** Tell the core whether the app's API screen is watching, which gates prompt previews. */
   setInspecting(enabled: boolean): Promise<{ enabled: boolean }> {
     return this.call('/server/inspector', { method: 'PUT', body: JSON.stringify({ enabled }) })

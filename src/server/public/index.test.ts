@@ -100,9 +100,58 @@ describe("the host's keyring", () => {
     expect(open.state().requires_api_key).toBe(false)
   })
 
+  it('wins over the extra client keys, which it ignores', async () => {
+    const server = await startPublic(
+      { apiKeys: () => ['alpha'], clientKeys: () => ['device-key-0123456789'] },
+      { apiKey: 'secret' }
+    )
+    expect((await models(server.port, 'alpha')).status).toBe(200)
+    expect((await models(server.port, 'device-key-0123456789')).status).toBe(401)
+    expect((await models(server.port, 'secret')).status).toBe(401)
+  })
+
   it('makes the state say a key is required even with no listener key, and never shows the keys', async () => {
     const server = await startPublic({ apiKeys: () => ['alpha'] })
     expect(server.state().requires_api_key).toBe(true)
     expect(JSON.stringify(server.state())).not.toContain('alpha')
+  })
+})
+
+describe('extra client keys', () => {
+  const DEVICE_A = 'device-a-0123456789abcdef'
+  const DEVICE_B = 'device-b-0123456789abcdef'
+  const models = (port: number, init?: RequestInit) => fetch(`http://127.0.0.1:${port}/v1/models`, init)
+  const bearer = (key: string) => ({ headers: { authorization: `Bearer ${key}` } })
+
+  it('are accepted next to the listener key, by bearer or x-api-key, and an unknown key is refused', async () => {
+    const server = await startPublic({ clientKeys: () => [DEVICE_A, DEVICE_B] }, { apiKey: 'secret' })
+    expect((await models(server.port, bearer('secret'))).status).toBe(200)
+    expect((await models(server.port, bearer(DEVICE_A))).status).toBe(200)
+    expect((await models(server.port, { headers: { 'x-api-key': DEVICE_B } })).status).toBe(200)
+    expect((await models(server.port, bearer('device-c-0123456789abcdef'))).status).toBe(401)
+    expect((await models(server.port)).status).toBe(401)
+  })
+
+  it('are read for every request: a key removed from the list is refused on the next one', async () => {
+    let extra: readonly string[] = [DEVICE_A, DEVICE_B]
+    const server = await startPublic({ clientKeys: () => extra }, { apiKey: 'secret' })
+    expect((await models(server.port, bearer(DEVICE_A))).status).toBe(200)
+    extra = [DEVICE_B]
+    expect((await models(server.port, bearer(DEVICE_A))).status).toBe(401)
+    expect((await models(server.port, bearer(DEVICE_B))).status).toBe(200)
+    extra = []
+    expect((await models(server.port, bearer(DEVICE_B))).status).toBe(401)
+    expect((await models(server.port, bearer('secret'))).status, 'the listener key stays').toBe(200)
+  })
+
+  it('never close an open listener, and never change what its state says', async () => {
+    const open = await startPublic({ clientKeys: () => [DEVICE_A] })
+    expect((await models(open.port)).status).toBe(200)
+    expect((await models(open.port, bearer('anything'))).status).toBe(200)
+    expect(open.state().requires_api_key).toBe(false)
+
+    const keyed = await startPublic({ clientKeys: () => [DEVICE_A] }, { apiKey: 'secret' })
+    expect(keyed.state().requires_api_key).toBe(true)
+    expect(JSON.stringify(keyed.state())).not.toContain(DEVICE_A)
   })
 })

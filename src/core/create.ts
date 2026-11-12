@@ -1478,6 +1478,7 @@ export async function createAtomicCore(
           setSelection: (models) => {
             ;(core as AtomicCore).servedSelection = new Map(models.map((m) => [m.model, m.provider]))
           },
+          setClientKeys: (keys) => (core as AtomicCore).setClientKeys(keys),
           status: () => (core as AtomicCore).publicState(),
           start: (opts) => (core as AtomicCore).startPublicServer(opts),
           stop: () => (core as AtomicCore).stopPublicServer(),

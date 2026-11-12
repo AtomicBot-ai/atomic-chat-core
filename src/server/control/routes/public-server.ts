@@ -1,4 +1,4 @@
-/** The public `/v1` listener: status, start, stop, and the inspector toggle. */
+/** The public `/v1` listener: status, start, stop, the inspector toggle, selection and client keys. */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
 import type { ServedModelSelection } from '../../../contracts/index.js'
@@ -70,6 +70,42 @@ export function registerPublicServerRoutes(
     deps.publicServer.setSelection(models)
     sendJson(res, 200, { models: deps.publicServer.selection() })
   })
+
+  // The whole list, replaced: the app sends every paired device's key after each change and after
+  // every reattach. The answer is only the count; a key is never echoed, logged or read back.
+  router.put(p('/server/client-keys'), async (req, res) => {
+    const keys = parseClientKeys(await readJsonBody<unknown>(req))
+    if (!keys)
+      return sendError(
+        res,
+        new AtomicCoreError(
+          'INVALID_ARGUMENT',
+          `client keys need {"keys": [...]} with at most ${MAX_CLIENT_KEYS} strings of ` +
+            `${MIN_CLIENT_KEY_LENGTH}–${MAX_CLIENT_KEY_LENGTH} characters from [A-Za-z0-9._~-]`
+        )
+      )
+    deps.publicServer.setClientKeys(keys)
+    sendJson(res, 200, { count: keys.length })
+  })
+}
+
+const MAX_CLIENT_KEYS = 200
+const MIN_CLIENT_KEY_LENGTH = 20
+const MAX_CLIENT_KEY_LENGTH = 256
+/** The characters a client key may use: unreserved URL characters, so a key fits any header as is. */
+const CLIENT_KEY = /^[A-Za-z0-9._~-]+$/
+
+function parseClientKeys(body: unknown): string[] | undefined {
+  const keys = typeof body === 'object' && body !== null ? (body as { keys?: unknown }).keys : undefined
+  if (!Array.isArray(keys) || keys.length > MAX_CLIENT_KEYS) return undefined
+  const valid = keys.every(
+    (key): key is string =>
+      typeof key === 'string' &&
+      key.length >= MIN_CLIENT_KEY_LENGTH &&
+      key.length <= MAX_CLIENT_KEY_LENGTH &&
+      CLIENT_KEY.test(key)
+  )
+  return valid ? [...(keys as string[])] : undefined
 }
 
 function parseSelection(body: unknown): ServedModelSelection[] | undefined {

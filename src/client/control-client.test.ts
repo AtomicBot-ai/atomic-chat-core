@@ -47,6 +47,7 @@ let shutdowns: number
 let loadFailure: Error | undefined
 let inspecting = false
 let selection: Array<{ model: string; provider: string }> = []
+let clientKeys: readonly string[] = []
 let tunnel: RemoteAccessStatus
 const diffusionCalls: string[] = []
 const audioCalls: string[] = []
@@ -382,6 +383,9 @@ beforeEach(async () => {
       setSelection: (models) => {
         selection = [...models]
       },
+      setClientKeys: (keys) => {
+        clientKeys = [...keys]
+      },
       status: () => ({ ...serverState }),
       start: async (options) => {
         Object.assign(serverState, { running: true, ...options, pid: process.pid })
@@ -489,6 +493,14 @@ describe('sessions and public server', () => {
     const models = [{ model: 'qwen', provider: 'llamacpp-upstream' }]
     expect(await client.setServerSelection(models)).toEqual({ models })
     expect(await client.serverSelection()).toEqual({ models })
+  })
+
+  it('replaces the extra client keys and answers only their count', async () => {
+    const keys = ['device-key-aaaaaaaaaaaa', 'device-key-bbbbbbbbbbbb']
+    expect(await client.setServerClientKeys(keys)).toEqual({ count: 2 })
+    expect(clientKeys).toEqual(keys)
+    await expect(client.setServerClientKeys(['short'])).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(clientKeys).toEqual(keys)
   })
 
   it('asks the core to shut down', async () => {

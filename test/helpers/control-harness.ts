@@ -91,6 +91,8 @@ export interface ControlHarness {
   audio: FakeAudioControl
   /** What `PUT /server/selection` stored. */
   selection: ServedModelSelection[]
+  /** What `PUT /server/client-keys` stored. */
+  clientKeys: string[]
   get: (path: string, init?: RequestInit) => Promise<Response>
 }
 
@@ -211,6 +213,7 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
     diffusion: fakeDiffusionControl(calls),
     audio: fakeAudioControl(calls),
     selection: [],
+    clientKeys: [],
   } as unknown as ControlHarness
   const server = await ControlServer.start({
     token: CONTROL_TOKEN,
@@ -314,6 +317,10 @@ export async function startControlHarness(over: Partial<ControlServerDeps> = {})
       setSelection: (models) => {
         calls.push(`selection ${JSON.stringify(models)}`)
         harness.selection = [...models]
+      },
+      setClientKeys: (keys) => {
+        calls.push(`client-keys ${keys.length}`)
+        harness.clientKeys = [...keys]
       },
       status: () => ({ ...serverState }),
       start: async (options) => {
