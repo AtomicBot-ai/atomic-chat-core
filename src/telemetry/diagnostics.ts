@@ -59,6 +59,7 @@ const EXPECTED: Readonly<Record<string, FailureDiagnostic['reason']>> = {
   JOB_NOT_FOUND: 'not_found',
   BACKEND_IN_USE: 'busy',
   ENGINE_INSTALL_IN_PROGRESS: 'busy',
+  AUDIO_UNAVAILABLE: 'busy',
   ENGINE_MISSING: 'not_configured',
   ENGINE_UPDATE_REQUIRED: 'unsupported',
   NOT_CONFIGURED: 'not_configured',

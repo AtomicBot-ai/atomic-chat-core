@@ -247,3 +247,4 @@ add a new one that says which record it supersedes.
 - [Downloads report the disk reason they already tag](2026-11-11-downloads-report-their-own-disk-reason.md)
 - [Refuse to replace a backend pack a session runs from](2026-11-12-refuse-replacing-in-use-backend-pack.md)
 - [Browser stack frames keep their served asset path](2026-11-12-keep-browser-asset-paths-in-stack-frames.md)
+- [An audio shutdown refusal is not an engine crash](2026-11-12-audio-shutdown-refusal-is-not-a-crash.md)

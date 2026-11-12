@@ -215,7 +215,7 @@ export async function startAudioJob(
   request: AudioGenerateRequest
 ): Promise<StartedAudioJob> {
   const { state } = deps
-  if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+  if (state.closing) throw audioError('AUDIO_UNAVAILABLE', 'The audio engine is shutting down.')
   const spec = state.spec
   if (!spec) throw modelNotLoadedError()
   if (spec.mode !== mode)
@@ -241,7 +241,7 @@ export async function startAudioJob(
       ? await resolveVoiceRef(request.voiceRef, deps.readSource)
       : undefined
   // Reading the reference took a moment: another job may have started meanwhile.
-  if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+  if (state.closing) throw audioError('AUDIO_UNAVAILABLE', 'The audio engine is shutting down.')
   if (state.spec !== spec)
     throw audioError(
       'CANCELLED',
@@ -328,7 +328,7 @@ async function ensureSession(deps: AudioJobDeps, id: string, record: AudioJobRec
     // Once the lock is held the job may be cancelled, the model unloaded or replaced, or the server
     // already back: the spec is read only now.
     if (record.cancel.requested) throw cancelledError()
-    if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+    if (state.closing) throw audioError('AUDIO_UNAVAILABLE', 'The audio engine is shutting down.')
     if (view()) return
     const current = state.spec
     if (!current) throw modelNotLoadedError()

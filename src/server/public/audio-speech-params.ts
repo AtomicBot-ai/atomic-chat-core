@@ -186,6 +186,9 @@ export function mapSpeechError(code: AudioErrorCode): MappedError {
       return { status: 503, type: 'server_error', code: 'model_not_loaded' }
     case 'JOB_BUSY':
       return { status: 429, type: 'server_error', code: 'busy' }
+    // The subsystem is shutting down: try again later, like any other busy answer.
+    case 'AUDIO_UNAVAILABLE':
+      return { status: 503, type: 'server_error', code: 'busy' }
     case 'OUT_OF_MEMORY':
       return { status: 500, type: 'server_error', code: 'insufficient_memory' }
     case 'CANCELLED':

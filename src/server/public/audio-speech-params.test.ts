@@ -264,6 +264,7 @@ describe('mapSpeechError', () => {
     ENGINE_MISSING: [503, 'server_error', 'model_not_loaded'],
     MODEL_MISSING: [503, 'server_error', 'model_not_loaded'],
     JOB_BUSY: [429, 'server_error', 'busy'],
+    AUDIO_UNAVAILABLE: [503, 'server_error', 'busy'],
     OUT_OF_MEMORY: [500, 'server_error', 'insufficient_memory'],
     CANCELLED: [500, 'server_error', 'cancelled'],
     ENGINE_INSTALL_FAILED: [500, 'server_error', 'server_error'],
