@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-12 — Group parallel tool results before passing history to Foundry](2026-11-12-group-foundry-parallel-tool-results.md)
+
 - [2026-11-12 — Repair Foundry tool boundaries from published markers](2026-11-12-repair-foundry-tool-boundaries-from-published-markers.md)
 
 - [2026-11-12 — Publish Qwen3.5 tool token IDs before Foundry loads the model](2026-11-12-publish-foundry-qwen35-tool-token-ids.md)

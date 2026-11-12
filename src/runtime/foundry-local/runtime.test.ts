@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { closeAll, localSession, postJson, startPublic } from '../../../test/helpers/public-server.js'
 import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { CoreEvents } from '../../contracts/index.js'
@@ -203,6 +204,64 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
       expect(events.map((e) => e.name)).toContain('session:started')
     } finally {
       await rt.unload('qwen3-0.6b-generic-gpu')
+    }
+  })
+
+  it('forwards Claude tool results to Foundry in one contiguous group even with text between user messages', async () => {
+    const model = 'parallel-tools'
+    await variant(model, { execution_provider: 'cpu', device: 'cpu', tools: true })
+    const { rt } = runtime({ mode: 'echo-chat-request' })
+    const session = await rt.load(model)
+    try {
+      const policy = rt.routePolicy(model)
+      if (!policy) throw new Error('Missing Foundry route policy')
+      const server = await startPublic({
+        sessions: [
+          localSession(session.port, {
+            provider: 'foundry-local',
+            modelId: model,
+            apiKey: session.api_key,
+            policy,
+          }),
+        ],
+      })
+      const response = await postJson(server, '/messages', {
+        model,
+        messages: [
+          { role: 'user', content: 'Read both files.' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', id: 'call_a', name: 'read', input: { path: 'a.txt' } },
+              { type: 'tool_use', id: 'call_b', name: 'read', input: { path: 'b.txt' } },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'call_b', content: 'second file' },
+              { type: 'text', text: 'Include both names.' },
+            ],
+          },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_a', content: 'first file' }] },
+        ],
+      })
+
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as { content: [{ text: string }] }
+      expect(JSON.parse(body.content[0].text)).toMatchObject({
+        model: `${model}:1`,
+        messages: [
+          { role: 'user', content: 'Read both files.' },
+          { role: 'assistant', tool_calls: [{ id: 'call_a' }, { id: 'call_b' }] },
+          { role: 'tool', tool_call_id: 'call_b', content: 'second file' },
+          { role: 'tool', tool_call_id: 'call_a', content: 'first file' },
+          { role: 'user', content: 'Include both names.' },
+        ],
+      })
+    } finally {
+      await closeAll()
+      await rt.unload(model)
     }
   })
 

@@ -4,7 +4,7 @@
  * arguments, readiness line, `/catalogs/local/v1/*` routes, registration-id model matching and stop
  * on SIGTERM or stdin end as `src/runtime/foundry-local/host/run.ts` with a real library.
  *
- *   FAKE_FOUNDRY_MODE  ready (default) | crash-after-ready | hang | exit-3 | exit-5
+ *   FAKE_FOUNDRY_MODE  ready (default) | echo-chat-request | crash-after-ready | hang | exit-3 | exit-5
  *   FAKE_FOUNDRY_ARGV  a file each start appends {argv, ort_telemetry_disabled,
  *                      ort_enable_cudnn_flash_attention, ci} to
  */
@@ -122,7 +122,15 @@ const server = createServer((req, res) => {
       }
       return send(res, 200, {
         model: id,
-        choices: [{ index: 0, message: { role: 'assistant', content: 'hi from fake foundry' } }],
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: mode === 'echo-chat-request' ? body : 'hi from fake foundry',
+            },
+          },
+        ],
         usage: { completion_tokens: 4 },
       })
     }
