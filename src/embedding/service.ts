@@ -590,7 +590,9 @@ export class EmbeddingService {
       exitCode: exit.code,
       signal: exit.signal,
     })
-    this.deps.log('warn', error.message)
+    // The engine's own last lines are the only thing that separates a ggml failure from an external
+    // kill; the `embedding:error` details do not survive restarts, core.log does.
+    this.deps.log('warn', tail ? `${error.message} (${tail.split('\n').join(' | ')})` : error.message)
     this.deps.emit('embedding:error', error)
     const restarts = nextRestartCount(this.state.restarts, this.now() - this.readySince)
     this.scheduleRestart(restarts, error)
