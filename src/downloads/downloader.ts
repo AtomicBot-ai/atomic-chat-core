@@ -25,6 +25,7 @@ import type { CoreEvents, DownloadProgress, DownloadStage } from '../contracts/i
 import {
   checkFreeSpace,
   checkPathWithinLimit,
+  classifyIoError,
   diskErrToString,
   diskWriteErrToString,
   remainingBytes,
@@ -226,6 +227,22 @@ function preflightFailure(message: string, reason: NonNullable<FailureDiagnostic
       stage: 'validate',
       reason,
       category: reason === 'invalid_request' ? 'expected' : 'operational',
+    } satisfies FailureDiagnostic,
+  })
+}
+
+/**
+ * An fs error on the transfer path. The tagged message is the app's contract; the same tag is also
+ * the failure reason, so a download that loses its staging file reports `disk_device_lost` instead
+ * of `unknown`. `classifyFailure` skips the chain for an unknown code unless a diagnostic says so.
+ */
+function diskFailure(error: unknown): Error {
+  return Object.defineProperty(new Error(diskErrToString(error), { cause: error }), 'diagnostic', {
+    value: {
+      component: 'downloads',
+      operation: 'download',
+      reason: classifyIoError(error),
+      category: 'operational',
     } satisfies FailureDiagnostic,
   })
 }
@@ -526,7 +543,7 @@ export class Downloader {
     }
   ): Promise<string> {
     const { signal, headers, progress, emitProgress, reportStage } = ctx
-    const disk = (e: unknown) => new Error(diskErrToString(e), { cause: e })
+    const disk = diskFailure
     const fetchImpl = this.deps.fetchFor(item, this.deps.fetch)
     if (item.proxy && shouldBypassProxy(item.url, item.proxy.no_proxy ?? []))
       this.deps.log('info', `Bypassing proxy for URL ${item.url}`)
