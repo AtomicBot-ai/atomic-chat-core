@@ -208,6 +208,8 @@ export const AUDIO_ERROR_CODES = [
   'ENGINE_MISSING',
   'ENGINE_INSTALL_FAILED',
   'ENGINE_CRASHED',
+  /** The core is shutting down; the audio subsystem refuses new work (`EMBEDDING_UNAVAILABLE`, `DECISION_UNAVAILABLE`). */
+  'AUDIO_UNAVAILABLE',
   'MODEL_MISSING',
   'MODEL_LOAD_FAILED',
   /** The engine served something other than the family and task the load asked for. */

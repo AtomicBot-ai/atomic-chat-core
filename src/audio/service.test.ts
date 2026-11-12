@@ -166,7 +166,7 @@ describe('loadModel', () => {
   it('refuses to load while the core shuts down', async () => {
     const w = await world()
     await w.service.shutdown()
-    await expect(w.service.loadModel(speechLoad())).rejects.toMatchObject({ code: 'ENGINE_CRASHED' })
+    await expect(w.service.loadModel(speechLoad())).rejects.toMatchObject({ code: 'AUDIO_UNAVAILABLE' })
   })
 })
 
@@ -564,7 +564,7 @@ describe('shutdown', () => {
     expect(w.handles[0]?.terminated).toBe(1)
     await vi.waitFor(() => expect(w.service.getJob(job.id)?.state).toBe('cancelled'))
     await expect(w.service.generate('speech', { text: 'x' })).rejects.toMatchObject({
-      code: 'ENGINE_CRASHED',
+      code: 'AUDIO_UNAVAILABLE',
     })
   })
 })

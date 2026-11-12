@@ -119,7 +119,7 @@ describe('a speech job', () => {
           await loadFromSpec(w.deps, sampleAudioSpec({ modelId: 'another-voice' }), 'load')
       }
       finishRead(sampleWav())
-      expect(await starting).toMatchObject({ code: change === 'shutdown' ? 'ENGINE_CRASHED' : 'CANCELLED' })
+      expect(await starting).toMatchObject({ code: change === 'shutdown' ? 'AUDIO_UNAVAILABLE' : 'CANCELLED' })
       expect(w.state.activeJobId).toBeUndefined()
       expect(w.http.posts).toEqual([])
       expect(w.events.filter((event) => event.name === 'audio:job')).toEqual([])
@@ -257,7 +257,7 @@ describe('refusals before a job starts', () => {
     await cancelAudioJob(w.deps, job.id)
     w.state.closing = true
     await expect(startAudioJob(w.deps, 'speech', { text: 'x' })).rejects.toMatchObject({
-      code: 'ENGINE_CRASHED',
+      code: 'AUDIO_UNAVAILABLE',
     })
   })
 

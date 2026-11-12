@@ -335,7 +335,7 @@ export class AudioService {
       const loading = new AbortController()
       this.loading = loading
       try {
-        if (state.closing) throw audioError('ENGINE_CRASHED', 'The audio engine is shutting down.')
+        if (state.closing) throw audioError('AUDIO_UNAVAILABLE', 'The audio engine is shutting down.')
         state.modelGeneration += 1
         if (state.activeJobId !== undefined)
           await cancelAudioJob(this.deps, state.activeJobId).catch(() => undefined)
