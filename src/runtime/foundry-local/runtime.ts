@@ -47,6 +47,7 @@ import type { FoundryHostCommand } from './host-process.js'
 import { withCudaRuntime } from './cuda/index.js'
 import type { CudaRuntimeStore } from './cuda/index.js'
 import { readFoundryLocalBlock } from './model-yml.js'
+import { groupFoundryToolResults } from './tool-results.js'
 
 /** The settings' `timeout` default, in seconds: registering, building the ORT session, compiling (OpenVINO). */
 export const FOUNDRY_LOCAL_DEFAULT_TIMEOUT_SECS = 600
@@ -397,8 +398,16 @@ export class FoundryLocalRuntime implements LocalRuntime {
         routes: FOUNDRY_LOCAL_ROUTES,
         rewritableRoutes: [{ method: 'POST', path: CHAT_ROUTE }],
         // The host knows the model by its registration id; the client by the core's id.
-        rewriteRequestBody: (_route, body) =>
-          body !== null && typeof body === 'object' && !Array.isArray(body) ? { ...body, model: id } : body,
+        rewriteRequestBody: (_route, body) => {
+          if (body === null || typeof body !== 'object' || Array.isArray(body)) return body
+          const request = body as Record<string, unknown>
+          const messages = request['messages']
+          return {
+            ...request,
+            model: id,
+            ...(Array.isArray(messages) ? { messages: groupFoundryToolResults(messages) } : {}),
+          }
+        },
         rewriteResponseFor: () => (json) => ('model' in json ? { ...json, model: modelId } : json),
       })
     } catch (error) {
