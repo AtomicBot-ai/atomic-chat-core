@@ -143,3 +143,91 @@ describe('GenieX host load bounded diagnostics', () => {
     )
   })
 })
+
+describe('MLX install probe bounded diagnostics', () => {
+  const install = { component: 'http', operation: 'request' } as const
+
+  it('tags mlx-server install probe failures with finite diagnostic codes', () => {
+    const cases = [
+      ['The downloaded mlx-server does not run on this Mac.', 'MLX_PROBE_DOES_NOT_RUN'],
+      ['The archive did not contain mlx-server.', 'MLX_ARCHIVE_MISSING_SERVER'],
+      ['mlx-server did not respond to --help.', 'MLX_PROBE_HELP_TIMEOUT'],
+      ['mlx-server could not be started.', 'MLX_PROBE_START_FAILED'],
+    ] as const
+
+    for (const [message, expectedCode] of cases) {
+      const error = new AtomicCoreError(
+        'ENGINE_INSTALL_FAILED',
+        message,
+        '/private/var/folders/mlx-server: exit code 1'
+      )
+      const tags = diagnosticTags(error, classifyFailure(error, install))
+
+      expect(tags).toMatchObject({
+        diagnostic_version: 'core-v1',
+        component: 'http',
+        operation: 'request',
+        failure_category: 'unknown',
+        failure_reason: 'unknown',
+        cause_code: 'ENGINE_INSTALL_FAILED',
+        diagnostic_code: expectedCode,
+      })
+      expect(JSON.stringify(tags)).not.toContain('/private')
+      expect(JSON.stringify(tags)).not.toContain(message)
+    }
+  })
+
+  it('keeps the launch refusal, its cause code finite and cyclic causes safe', () => {
+    const cause = Object.assign(new Error('spawn /private/fixture/mlx-server EACCES'), { code: 'EACCES' })
+    const startError = new AtomicCoreError(
+      'ENGINE_INSTALL_FAILED',
+      'mlx-server could not be started.',
+      '/private/fixture/mlx-server: spawn EACCES',
+      { cause }
+    )
+    const startTags = diagnosticTags(startError, classifyFailure(startError, install))
+    expect(startTags).toMatchObject({
+      diagnostic_code: 'MLX_PROBE_START_FAILED',
+      diagnostic_cause_code: 'EACCES',
+    })
+    expect(JSON.stringify(startTags)).not.toContain('/private')
+    expect(startError.toJSON()).toEqual({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'mlx-server could not be started.',
+      details: '/private/fixture/mlx-server: spawn EACCES',
+    })
+
+    const cycleA = new Error('unmapped wrapper /private/fixture/cycle-a')
+    const cycleB = Object.assign(new Error('The downloaded mlx-server does not run on this Mac.'), {
+      code: 'PRIVATE_CUSTOM_CODE',
+      cause: cycleA,
+    })
+    cycleA.cause = cycleB
+    const cycleTags = diagnosticTags(cycleA, classifyFailure(cycleA, install))
+    expect(cycleTags).toMatchObject({ diagnostic_code: 'MLX_PROBE_DOES_NOT_RUN' })
+    expect(cycleTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(cycleTags)).not.toContain('PRIVATE_CUSTOM_CODE')
+    expect(JSON.stringify(cycleTags)).not.toContain('/private')
+  })
+
+  it('reports the refusal as before with only finite tags added', () => {
+    const capture = vi.fn()
+    const observe = failureObserver({ capture })
+    const error = new AtomicCoreError(
+      'ENGINE_INSTALL_FAILED',
+      'The downloaded mlx-server does not run on this Mac.',
+      '/private/fixture: exit code 1'
+    )
+    observe(error, install)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'operation',
+        error,
+        level: 'error',
+      })
+    )
+    expect(error.code).toBe('ENGINE_INSTALL_FAILED')
+    expect(error.message).toBe('The downloaded mlx-server does not run on this Mac.')
+  })
+})
