@@ -25,6 +25,11 @@ export function framePath(raw: string): string {
   // The last `src/` or `dist/`: a checkout under `~/src/` must not keep that prefix.
   const cut = /^.*(?:^|\/)((?:src|dist)\/.+)$/.exec(path)
   if (cut?.[1]) return cut[1]
+  // A browser bundle's served path (`/assets/<file>`) carries no machine or user context once the
+  // origin is gone: keep it, so a rebuilt release can map the minified position back to sources.
+  // A local `assets/` directory keeps the same tail and loses its parent path like a user folder.
+  const asset = /(?:^|\/)(assets\/[\w.-]+)$/.exec(path)
+  if (asset?.[1]) return asset[1]
   return path.slice(path.lastIndexOf('/') + 1)
 }
 

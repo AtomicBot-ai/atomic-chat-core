@@ -12,6 +12,9 @@ describe('framePath', () => {
     ['/Users/misha/node_modules/yaml/dist/index.js', 'node_modules/yaml/dist/index.js'],
     ['/Users/misha/src/atomic-chat-core/src/core/x.ts', 'src/core/x.ts'],
     ['/Users/misha/elsewhere/tool.js', 'tool.js'],
+    ['https://admin.example:1338/assets/index-CQHL6z4L.js', 'assets/index-CQHL6z4L.js'],
+    ['/assets/index-CQHL6z4L.js', 'assets/index-CQHL6z4L.js'],
+    ['C:\\Users\\misha\\app\\assets\\cover.png', 'assets/cover.png'],
     ['native', 'native'],
     ['node:internal/process/task_queues', 'node:internal/process/task_queues'],
   ])('%s → %s', (raw, expected) => {
