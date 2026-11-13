@@ -18,10 +18,9 @@ import {
   buildImgGenRequest,
   buildServerArgs,
   buildVidGenRequest,
-  VID_GEN_MODE_FLAG_ENV,
-  videoModeFlags,
   commandSummaryForLog,
   cpuBackendExtraArgs,
+  cpuBackendFlags,
   DIFFUSION_BACKEND_ENV,
   hostEnv,
   imageVaeTilingArea,
@@ -29,7 +28,9 @@ import {
   isM5Brand,
   loadExtraArgs,
   METAL_TE_GPU_ENV,
-  metalTextEncoderFlags,
+  metalTextEncoderCpuModules,
+  MODULE_ASSIGNMENT_FLAGS_BUILD,
+  offloadCpuModules,
   offloadFlags,
   speedFlags,
   VAE_TILING_AREA,
@@ -42,6 +43,10 @@ import type { ResolvedInputs, ServerSpec } from './types.js'
 
 const MAC: ArgsHost = { platform: 'darwin', env: {} }
 const LINUX: ArgsHost = { platform: 'linux', env: {} }
+/** The first build conf served, which knows only `--diffusion-fa` and `--diffusion-conv-direct`. */
+const LEGACY_TAG = 'master-849-d04e895'
+/** The pin as conf's mirror tags it: `--flash-attn` and `--conv-direct`. */
+const MODERN_TAG = 'master-1088-32d516c-af0b1071'
 
 function spec(files: DiffusionModelFiles, offload: DiffusionOffloadPolicy): ServerSpec {
   return {
@@ -49,7 +54,7 @@ function spec(files: DiffusionModelFiles, offload: DiffusionOffloadPolicy): Serv
     engine: 'sd-cpp',
     backend: 'metal',
     backendId: 'macos-arm64',
-    tag: 'master-849-d04e895',
+    tag: LEGACY_TAG,
     modelId: 'z-image:q4_k_m',
     family: 'z-image',
     modality: 'image',
@@ -85,7 +90,6 @@ describe('buildServerArgs', () => {
       t5xxl: '/m/t5xxl.gguf',
       llm: '/m/qwen3.gguf',
       llmVision: '/m/qwen3-mmproj.gguf',
-      qwen2vl: '/m/qwen2vl.gguf',
     }
     const args = buildServerArgs(spec(files, 'none'), 4242, '/s', MAC)
     const idx = (flag: string) => args.indexOf(flag)
@@ -94,7 +98,6 @@ describe('buildServerArgs', () => {
     expect(idx('--clip_l')).toBeLessThan(idx('--t5xxl'))
     expect(idx('--t5xxl')).toBeLessThan(idx('--llm'))
     expect(idx('--llm')).toBeLessThan(idx('--llm_vision'))
-    expect(idx('--llm_vision')).toBeLessThan(idx('--qwen2vl'))
     expect(valueAfter(args, '--llm_vision')).toBe('/m/qwen3-mmproj.gguf')
     expect(valueAfter(args, '--vae-format')).toBe('flux2')
     expect(idx('--vae-format')).toBeLessThan(idx('--listen-ip'))
@@ -121,54 +124,93 @@ describe('buildServerArgs', () => {
     expect(empty).not.toContain('--vae-format')
   })
 
+  it('hands a qwen2vl file over as --llm, the slot its deprecated alias names, and keeps it over an llm file', () => {
+    const qwenImage = { diffusionModel: '/m/qwen-image.gguf', qwen2vl: '/m/qwen2.5-vl.gguf' }
+    const args = buildServerArgs(spec(qwenImage, 'none'), 1, '/s', LINUX)
+    expect(valueAfter(args, '--llm')).toBe('/m/qwen2.5-vl.gguf')
+    expect(args).not.toContain('--qwen2vl')
+    // The old argv said `--llm` and then `--qwen2vl`; the second won.
+    const both = buildServerArgs(spec({ ...qwenImage, llm: '/m/qwen3.gguf' }, 'none'), 1, '/s', LINUX)
+    expect(both.filter((a) => a === '--llm')).toHaveLength(1)
+    expect(valueAfter(both, '--llm')).toBe('/m/qwen2.5-vl.gguf')
+  })
+
   it('passes threads when they are set', () => {
     const args = buildServerArgs({ ...spec(zImageFiles(), 'none'), threads: 6 }, 1, '/s', MAC)
     expect(valueAfter(args, '--threads')).toBe('6')
   })
 
-  it('maps the offload policies to the documented flags', () => {
+  it('maps the offload policies to the documented flags and modules', () => {
     expect(offloadFlags('none')).toEqual([])
-    expect(offloadFlags('group')).toEqual(['--offload-to-cpu', '--diffusion-fa'])
-    expect(offloadFlags('model')).toEqual([
-      '--offload-to-cpu',
-      '--clip-on-cpu',
-      '--vae-on-cpu',
-      '--diffusion-fa',
-      '--vae-tiling',
-    ])
-    expect(speedFlags()).toEqual(['--diffusion-fa', '--diffusion-conv-direct'])
+    expect(offloadFlags('group')).toEqual(['--offload-to-cpu'])
+    expect(offloadFlags('model')).toEqual(['--offload-to-cpu', '--vae-tiling'])
+    expect(offloadCpuModules('none')).toEqual([])
+    expect(offloadCpuModules('group')).toEqual([])
+    expect(offloadCpuModules('model')).toEqual(['te', 'vae'])
   })
 
-  it('de-duplicates the speed flags against the offload flags', () => {
-    const args = buildServerArgs(spec(zImageFiles(), 'group'), 1, '/s', MAC)
-    expect(args.filter((a) => a === '--diffusion-fa')).toHaveLength(1)
-    expect(args).toContain('--diffusion-conv-direct')
-    expect(args).toContain('--offload-to-cpu')
+  it('puts the CPU modules in one --backend, each once, the text encoder first', () => {
+    expect(cpuBackendFlags([])).toEqual([])
+    expect(cpuBackendFlags(['te'])).toEqual(['--backend', 'te=cpu'])
+    expect(cpuBackendFlags(['vae'])).toEqual(['--backend', 'vae=cpu'])
+    expect(cpuBackendFlags(['vae', 'te', 'te'])).toEqual(['--backend', 'te=cpu,vae=cpu'])
   })
 
-  it('says --clip-on-cpu once under model offload on macOS', () => {
-    const args = buildServerArgs(spec(zImageFiles(), 'model'), 1, '/s', MAC)
-    expect(args.filter((a) => a === '--clip-on-cpu')).toHaveLength(1)
+  it('spells the speed flags for the build: the module assignments from 982 on, the old flags before', () => {
+    const modern = ['--flash-attn', 'off,diffusion=on', '--conv-direct', 'auto,diffusion=on,controlnet=on']
+    const legacy = ['--diffusion-fa', '--diffusion-conv-direct']
+    expect(MODULE_ASSIGNMENT_FLAGS_BUILD).toBe(982)
+    expect(speedFlags(982)).toEqual(modern)
+    expect(speedFlags(1091)).toEqual(modern)
+    expect(speedFlags(981)).toEqual(legacy)
+    expect(speedFlags(849)).toEqual(legacy)
+    // A tag that names no build gets what every build up to the pin still reads.
+    expect(speedFlags(undefined)).toEqual(legacy)
+    expect(buildServerArgs({ ...spec(zImageFiles(), 'none'), tag: MODERN_TAG }, 1, '/s', LINUX)).toEqual(
+      expect.arrayContaining(modern)
+    )
+    expect(buildServerArgs({ ...spec(zImageFiles(), 'none'), tag: 'unknown' }, 1, '/s', LINUX)).toEqual(
+      expect.arrayContaining(legacy)
+    )
+  })
+
+  it('says each hardware flag once, whatever the policy and the host', () => {
+    for (const tag of [LEGACY_TAG, MODERN_TAG])
+      for (const offload of ['none', 'group', 'model'] as const)
+        for (const host of [MAC, LINUX]) {
+          const args = buildServerArgs({ ...spec(zImageFiles(), offload), tag }, 1, '/s', host)
+          const flags = args.filter((a) => a.startsWith('--'))
+          expect(new Set(flags).size, `${tag} ${offload} ${host.platform}`).toBe(flags.length)
+        }
+  })
+
+  it('moves the text encoder and the VAE in one --backend under model offload, on macOS too', () => {
+    const args = buildServerArgs({ ...spec(zImageFiles(), 'model'), tag: MODERN_TAG }, 1, '/s', MAC)
+    expect(args.filter((a) => a === '--backend')).toHaveLength(1)
+    expect(valueAfter(args, '--backend')).toBe('te=cpu,vae=cpu')
+    expect(valueAfter(args, '--flash-attn')).toBe('off,diffusion=on')
+    for (const flag of ['--clip-on-cpu', '--vae-on-cpu', '--diffusion-fa', '--diffusion-conv-direct'])
+      expect(args, flag).not.toContain(flag)
   })
 
   it('pins the text encoder to the CPU on macOS unless overridden', () => {
-    expect(metalTextEncoderFlags(true, undefined)).toEqual(['--clip-on-cpu'])
-    expect(metalTextEncoderFlags(true, '0')).toEqual(['--clip-on-cpu'])
-    expect(metalTextEncoderFlags(true, '1')).toEqual([])
-    expect(metalTextEncoderFlags(true, ' TRUE ')).toEqual([])
-    expect(metalTextEncoderFlags(true, 'yes')).toEqual([])
-    expect(metalTextEncoderFlags(true, 'on')).toEqual([])
-    expect(metalTextEncoderFlags(false, undefined)).toEqual([])
+    expect(metalTextEncoderCpuModules(true, undefined)).toEqual(['te'])
+    expect(metalTextEncoderCpuModules(true, '0')).toEqual(['te'])
+    expect(metalTextEncoderCpuModules(true, '1')).toEqual([])
+    expect(metalTextEncoderCpuModules(true, ' TRUE ')).toEqual([])
+    expect(metalTextEncoderCpuModules(true, 'yes')).toEqual([])
+    expect(metalTextEncoderCpuModules(true, 'on')).toEqual([])
+    expect(metalTextEncoderCpuModules(false, undefined)).toEqual([])
 
     const onMac = buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', MAC)
-    expect(onMac).toContain('--clip-on-cpu')
+    expect(valueAfter(onMac, '--backend')).toBe('te=cpu')
     const elsewhere = buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', LINUX)
-    expect(elsewhere).not.toContain('--clip-on-cpu')
+    expect(elsewhere).not.toContain('--backend')
     const overridden = buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', {
       platform: 'darwin',
       env: { [METAL_TE_GPU_ENV]: '1' },
     })
-    expect(overridden).not.toContain('--clip-on-cpu')
+    expect(overridden).not.toContain('--backend')
   })
 
   it('puts extra args last, so they win', () => {
@@ -205,14 +247,16 @@ describe('buildServerArgs', () => {
       embeddingsConnectors: '/m/i',
     }
     const emitted = new Set<string>()
-    for (const offload of ['none', 'group', 'model'] as const) {
-      const full = { ...spec(everything, offload), threads: 4, extraArgs: cpuBackendExtraArgs([]) }
-      for (const arg of buildServerArgs(full, 1, '/s', MAC)) if (arg.startsWith('-')) emitted.add(arg)
-    }
+    for (const tag of [LEGACY_TAG, MODERN_TAG])
+      for (const offload of ['none', 'group', 'model'] as const) {
+        const full = { ...spec(everything, offload), tag, threads: 4, extraArgs: cpuBackendExtraArgs([]) }
+        for (const arg of buildServerArgs(full, 1, '/s', MAC)) if (arg.startsWith('-')) emitted.add(arg)
+      }
     expect([...emitted].filter((flag) => !required.has(flag))).toEqual([])
-    // The video flags are in the list too; the mode flag is not, because it is off until proven.
+    // The video flags are in the list too; no mode flag, and none of the deprecated aliases.
     expect(required.has('--audio-vae') && required.has('--embeddings-connectors')).toBe(true)
-    expect(required.has('-M')).toBe(false)
+    for (const flag of ['-M', '--qwen2vl', '--clip-on-cpu', '--vae-on-cpu'])
+      expect(required.has(flag), flag).toBe(false)
     // And the list names nothing this module stopped emitting.
     required.delete('--verbose')
     expect([...required].filter((flag) => !emitted.has(flag))).toEqual([])
@@ -226,6 +270,20 @@ describe('the CPU-backend recovery', () => {
     expect(cpuBackendExtraArgs(flags)).toEqual(['--diffusion-fa', '--backend', 'cpu'])
     // A trailing `--backend` with no value is dropped too.
     expect(withoutDeviceBackendFlags(['-x', '--backend'])).toEqual(['-x'])
+  })
+
+  it('keeps the CPU modules’ --backend and appends the bare cpu after it, which sd.cpp joins into all-CPU', () => {
+    const recovered = {
+      ...spec(zImageFiles(), 'model'),
+      tag: MODERN_TAG,
+      extraArgs: cpuBackendExtraArgs([]),
+      cpuFallback: true,
+    }
+    const args = buildServerArgs(recovered, 1, '/s', MAC)
+    const values = args.flatMap((a, i) => (a === '--backend' ? [args[i + 1]] : []))
+    // Joined: `te=cpu,vae=cpu,cpu`, the bare entry being the default for every other module.
+    expect(values).toEqual(['te=cpu,vae=cpu', 'cpu'])
+    expect(args.slice(-2)).toEqual(['--backend', 'cpu'])
   })
 
   it('starts a load on the CPU only under ATOMIC_DIFFUSION_BACKEND=cpu', () => {
@@ -501,6 +559,13 @@ describe('commandSummaryForLog', () => {
     )
     expect(commandSummaryForLog(['--diffusion-model'])).toBe('')
   })
+
+  it('names every --backend joined, as sd.cpp reads them', () => {
+    expect(commandSummaryForLog(['--backend', 'te=cpu,vae=cpu', '-v', '--backend', 'cpu'])).toBe(
+      'backend=te=cpu,vae=cpu,cpu'
+    )
+    expect(commandSummaryForLog(['--backend=te=cpu'])).toBe('backend=te=cpu')
+  })
 })
 
 describe('the host switches', () => {
@@ -538,19 +603,11 @@ describe('the video argv', () => {
     expect(buildServerArgs(spec(zImageFiles(), 'none'), 1, '/s', MAC)).not.toContain('--audio-vae')
   })
 
-  it('emits -M vid_gen only for a video model and only when the environment opts in', () => {
-    expect(videoModeFlags('video', undefined)).toEqual([])
-    expect(videoModeFlags('video', '0')).toEqual([])
-    expect(videoModeFlags('image', '1')).toEqual([])
-    for (const on of ['1', 'true', 'YES', ' on '])
-      expect(videoModeFlags('video', on), on).toEqual(['-M', 'vid_gen'])
-    const host: ArgsHost = { platform: 'linux', env: { [VID_GEN_MODE_FLAG_ENV]: '1' } }
+  it('never emits sd-cli’s -M, even under the switch that used to opt into it', () => {
+    const host: ArgsHost = { platform: 'linux', env: { ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG: '1' } }
     const args = buildServerArgs({ ...sampleVideoSpec(), extraArgs: ['--x'] }, 1, '/s', host)
-    const at = args.indexOf('-M')
-    expect(args[at + 1]).toBe('vid_gen')
-    // Before -v and the caller's extras, after the hardware flags.
-    expect(at).toBeLessThan(args.indexOf('-v'))
-    expect(at).toBeGreaterThan(args.indexOf('--diffusion-fa'))
+    expect(args).not.toContain('-M')
+    expect(args).not.toContain('vid_gen')
     expect(args.slice(-1)).toEqual(['--x'])
   })
 })

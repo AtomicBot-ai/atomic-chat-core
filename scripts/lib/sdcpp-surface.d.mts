@@ -16,7 +16,16 @@ export interface SdcppContract {
   }>
   probe?: { bins: string[]; argv: string[]; markers: string[] }
   version?: { pattern: string }
-  flags: Array<{ flag: string; severity?: Severity; source?: string; note?: string }>
+  flags: Array<{
+    flag: string
+    severity?: Severity
+    source?: string
+    note?: string
+    /** Emitted only to builds from this one on. */
+    from_build?: number
+    /** Emitted only to builds before this one, and to a tag that names no build. */
+    below_build?: number
+  }>
   strings?: Array<{
     id: string
     text: string
@@ -90,7 +99,18 @@ export declare const SDCPP_CHECKS: ReadonlyArray<{ id: string; title: string }>
 export declare const MIN_SD_HELP_OPTIONS: number
 export declare function parseSdHelp(text: string): SdHelpOption[]
 export declare function findSdOption(options: readonly SdHelpOption[], flag: string): SdHelpOption | undefined
-export declare function checkSdHelp(contract: SdcppContract, options: readonly SdHelpOption[]): Finding[]
+/** `master-<build>-<rest>` → the build number; any other tag → undefined. */
+export declare function sdcppBuildOf(tag: string | undefined): number | undefined
+/** The contract's flags core emits to `build` (undefined: older than every bound). */
+export declare function sdFlagsForBuild(
+  contract: SdcppContract,
+  build: number | undefined
+): SdcppContract['flags']
+export declare function checkSdHelp(
+  contract: SdcppContract,
+  options: readonly SdHelpOption[],
+  tag?: string
+): Finding[]
 export declare function diffSdHelp(
   pinOptions: readonly SdHelpOption[],
   candidateOptions: readonly SdHelpOption[],

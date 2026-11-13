@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { DiffusionBackendInstallRecord } from '../contracts/index.js'
-import { checkEngineCompatibility, selectModelInstall } from './compat.js'
+import { checkEngineCompatibility, sdcppBuildOf, selectModelInstall } from './compat.js'
 
 const record = (tag: string, backendId: string): DiffusionBackendInstallRecord => ({
   tag,
@@ -20,6 +20,15 @@ const codeOf = (fn: () => unknown): string | undefined => {
     return (error as { code?: string }).code
   }
 }
+
+describe('sdcppBuildOf', () => {
+  it('reads the build of upstream, fork and mirror tags, and nothing else', () => {
+    expect(sdcppBuildOf('master-849-d04e895')).toBe(849)
+    expect(sdcppBuildOf('master-1088-32d516c-af0b1071')).toBe(1088)
+    for (const tag of ['unknown', 'master-883', 'master-883-', 'master-x83-abc', 'master-137f740', 'b1088-x'])
+      expect(sdcppBuildOf(tag), tag).toBeUndefined()
+  })
+})
 
 describe('checkEngineCompatibility', () => {
   // The tag table of `modern_families_require_a_compatible_engine_without_switching_backends`
