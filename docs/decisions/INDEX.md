@@ -257,3 +257,4 @@ add a new one that says which record it supersedes.
 - [Browser stack frames keep their served asset path](2026-11-12-keep-browser-asset-paths-in-stack-frames.md)
 - [An audio shutdown refusal is not an engine crash](2026-11-12-audio-shutdown-refusal-is-not-a-crash.md)
 - [Check MLX builds with the engine candidate workflow](2026-11-12-check-mlx-builds-with-the-engine-candidate.md) — `engine=mlx`: the fork's `vX.Y.Z`, conf's `mlxvlm-macos-arm64-<rev>` mirror; everything on macos-15, watched folders, folder live models
+- [Wait out a Windows hold before deleting a backend pack](2026-11-13-removing-a-backend-pack-waits-out-a-windows-hold.md)
