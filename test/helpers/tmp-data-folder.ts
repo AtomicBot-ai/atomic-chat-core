@@ -73,6 +73,8 @@ export async function makeTmpDataFolder(prefix = 'atomic-core-data-'): Promise<T
     layout,
     writeModel,
     writeBackend,
-    cleanup: () => rm(root, { recursive: true, force: true }),
+    // A child the test just stopped may still be closing a file in the folder: retried, as rm does on
+    // ENOTEMPTY / EBUSY / EPERM (a macOS gate failed on ENOTEMPTY after a diffusion owner shut down).
+    cleanup: () => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }),
   }
 }
