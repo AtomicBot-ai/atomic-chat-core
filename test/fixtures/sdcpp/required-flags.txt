@@ -1,6 +1,8 @@
-# Every sd-server flag tauri-plugin-atomic-diffusion emits (src/args.rs).
-# scripts/test-local-diffusion.py checks the pinned binary's --help against
-# this list so a flag renamed upstream fails loudly before it ships.
+# Every sd-server flag the core emits for some build (src/diffusion/args.ts).
+# engine-contract.json says which builds get which: --diffusion-fa and
+# --diffusion-conv-direct go only to builds before 982, --flash-attn and
+# --conv-direct only from 982 on. The live test holds an engine's --help to
+# the flags of its build, so a flag renamed upstream fails loudly before it ships.
 --diffusion-model
 --vae
 --vae-format
@@ -10,13 +12,12 @@
 --t5xxl
 --llm
 --llm_vision
---qwen2vl
---clip-on-cpu
---vae-on-cpu
 --vae-tiling
 --offload-to-cpu
 --diffusion-fa
 --diffusion-conv-direct
+--flash-attn
+--conv-direct
 --listen-ip
 --listen-port
 --lora-model-dir

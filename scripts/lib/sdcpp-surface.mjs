@@ -92,11 +92,33 @@ export function parseSdHelp(text) {
 export const findSdOption = (options, flag) => options.find((o) => o.aliases.includes(flag))
 
 /**
- * The build's `--help` against the flags core emits (the contract's `flags`): one it does not know
- * fails the launch (`break`), or is a `warn` for a flag core emits only when opted in (`-M`); one it
- * marks deprecated is a `warn`.
+ * `master-<build>-<rest>` → the build number, as `sdcppBuildOf` in src/diffusion/compat.ts reads an
+ * install's tag; any other tag → undefined.
  */
-export function checkSdHelp(contract, options) {
+export function sdcppBuildOf(tag) {
+  const match = /^master-(\d+)-./.exec(tag ?? '')
+  return match ? Number(match[1]) : undefined
+}
+
+/**
+ * The contract's flags core emits to `build`: a flag with `from_build` only from that build on, one
+ * with `below_build` only before it. `build` is undefined for a tag that names none, which core
+ * treats as older than every bound (`speedFlags` in src/diffusion/args.ts).
+ */
+export function sdFlagsForBuild(contract, build) {
+  return contract.flags.filter(
+    (f) =>
+      (f.from_build === undefined || (build !== undefined && build >= f.from_build)) &&
+      (f.below_build === undefined || build === undefined || build < f.below_build)
+  )
+}
+
+/**
+ * The build's `--help` against the flags core emits to it (the contract's `flags` for the build `tag`
+ * names): one it does not know fails the launch (`break`, or the flag's own severity); one it marks
+ * deprecated is a `warn`.
+ */
+export function checkSdHelp(contract, options, tag) {
   if (options.length < MIN_SD_HELP_OPTIONS)
     return [
       finding(
@@ -107,7 +129,7 @@ export function checkSdHelp(contract, options) {
       ),
     ]
   const findings = []
-  for (const f of contract.flags) {
+  for (const f of sdFlagsForBuild(contract, sdcppBuildOf(tag))) {
     const option = findSdOption(options, f.flag)
     const severity = f.severity ?? 'break'
     if (!option)
@@ -495,7 +517,7 @@ export function buildSdcppReport(contract, inputs, options = {}) {
     skipped['help.diff'] = 'the candidate was not run'
   } else {
     const options = parseSdHelp(candidate.help_text ?? '')
-    findings.push(...checkSdHelp(contract, options))
+    findings.push(...checkSdHelp(contract, options, candidate.tag))
     const pinOptions = pin?.help_text === undefined ? undefined : parseSdHelp(pin.help_text)
     if (!pin) skipped['help.diff'] = 'no pin'
     else if (pin.capture_error)

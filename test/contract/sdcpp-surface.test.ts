@@ -19,8 +19,10 @@ import {
   diffSdHelp,
   findSdOption,
   parseSdHelp,
+  sdcppBuildOf,
   sdcppCompleteness,
   sdcppCoreAssets,
+  sdFlagsForBuild,
 } from '../../scripts/lib/sdcpp-surface.mjs'
 import type { ReleaseAssetInfo, SdcppContract } from '../../scripts/lib/sdcpp-surface.mjs'
 import { liveModelPath, sdcppHostArchive, sdcppInstallManifest } from '../../scripts/lib/sdcpp-fixtures.mjs'
@@ -39,6 +41,8 @@ const FORK = release('master-883-137f740')
 const MIRROR = release('master-883-137f740-a36f1b1a')
 const names = (r: { assets: Array<{ name: string }> }) => r.assets.map((a) => a.name)
 const SERVER_HELP = fixture('help/sd-server-master-883-137f740.txt')
+/** A build past 982, from the fork's macOS arm64 archive: `--flash-attn` and `--conv-direct` are there. */
+const SERVER_HELP_1028 = fixture('help/sd-server-master-1028-37bc88b.txt')
 const CLI_HELP = fixture('help/sd-cli-master-883-137f740.txt')
 const VERSION = fixture('help/sd-server-version-master-883-137f740.txt')
 const ids = (findings: Array<{ id: string; severity: string }>, severity: string) =>
@@ -72,15 +76,38 @@ describe('reading sd.cpp’s --help', () => {
     expect(ids(checkSdHelp(contract, parseSdHelp(help)), 'break')).toEqual(['help.required_flags/--vae'])
   })
 
-  it('on master-883: three flags core emits are deprecated, -M is sd-cli’s only', () => {
-    const findings = checkSdHelp(contract, options)
-    expect(ids(findings, 'break')).toEqual([])
-    expect(ids(findings, 'warn').sort()).toEqual([
-      'help.deprecated/--clip-on-cpu',
-      'help.deprecated/--qwen2vl',
-      'help.deprecated/--vae-on-cpu',
-      'help.required_flags/-M',
+  it('on master-883: every flag core spells for the build is there, and none is deprecated', () => {
+    expect(checkSdHelp(contract, options, 'master-883-137f740-a36f1b1a')).toEqual([])
+  })
+
+  it('from build 982 on: the module assignments are checked, the flags they replace are not', () => {
+    const modern = parseSdHelp(SERVER_HELP_1028)
+    expect(findSdOption(modern, '--diffusion-fa')?.deprecated).toBe(true)
+    expect(findSdOption(modern, '--clip-on-cpu')?.deprecated).toBe(true)
+    expect(checkSdHelp(contract, modern, 'master-1028-37bc88b-a5f9a63b')).toEqual([])
+    // A tag that names no build gets the old flags from core, so the check reads those.
+    expect(ids(checkSdHelp(contract, modern, 'unknown'), 'warn').sort()).toEqual([
+      'help.deprecated/--diffusion-conv-direct',
+      'help.deprecated/--diffusion-fa',
     ])
+    // A build that lost --flash-attn breaks the launch; 883 was never going to get it.
+    const lost = parseSdHelp(without(SERVER_HELP_1028, '--flash-attn'))
+    expect(ids(checkSdHelp(contract, lost, 'master-1091-b9d7176'), 'break')).toEqual([
+      'help.required_flags/--flash-attn',
+    ])
+    expect(ids(checkSdHelp(contract, options, 'master-883-137f740'), 'break')).toEqual([])
+  })
+
+  it('reads the build from a tag and keeps each bounded flag to its side of the bound', () => {
+    expect(sdcppBuildOf('master-1088-32d516c-af0b1071')).toBe(1088)
+    expect(sdcppBuildOf('master-137f740')).toBeUndefined()
+    expect(sdcppBuildOf(undefined)).toBeUndefined()
+    const flags = (build: number | undefined) => sdFlagsForBuild(contract, build).map((f) => f.flag)
+    expect(flags(981)).toEqual(expect.arrayContaining(['--diffusion-fa', '--diffusion-conv-direct']))
+    expect(flags(981)).not.toEqual(expect.arrayContaining(['--flash-attn']))
+    expect(flags(982)).toEqual(expect.arrayContaining(['--flash-attn', '--conv-direct']))
+    expect(flags(982)).not.toEqual(expect.arrayContaining(['--diffusion-fa']))
+    expect(flags(undefined)).toEqual(flags(849))
   })
 
   it('fails closed on something that is not a help screen', () => {
@@ -392,7 +419,7 @@ describe('the sd.cpp surface report', () => {
     },
   })
 
-  it('master-883 against its signed mirror: a warn for the deprecated flags, nothing else to fix', () => {
+  it('master-883 against its signed mirror: no deprecated flag left, nothing to fix', () => {
     const report = buildSdcppReport(
       contract,
       {
@@ -404,12 +431,12 @@ describe('the sd.cpp surface report', () => {
     )
     expect(report.schema).toBe('atomic-engine-surface-report')
     expect(report.engine).toBe('sd-cpp')
-    expect(report.status).toBe('warn')
-    expect(report.counts).toEqual({ break: 0, warn: 4, info: 5, error: 0 })
+    expect(report.status).toBe('pass')
+    expect(report.counts).toEqual({ break: 0, warn: 0, info: 5, error: 0 })
     expect(report.checks.map((c) => `${c.id}:${c.status}`)).toEqual([
       'help.parse:pass',
-      'help.required_flags:warn',
-      'help.deprecated:warn',
+      'help.required_flags:pass',
+      'help.deprecated:pass',
       'help.diff:pass',
       'invocations.exit:pass',
       'install.probe:pass',
