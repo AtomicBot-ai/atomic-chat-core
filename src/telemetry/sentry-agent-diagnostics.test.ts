@@ -231,3 +231,77 @@ describe('MLX install probe bounded diagnostics', () => {
     expect(error.message).toBe('The downloaded mlx-server does not run on this Mac.')
   })
 })
+
+describe('guest Docker image-pull bounded diagnostics', () => {
+  // `prepare`'s setup failure reports the environment/execute vocabulary, see src/runtime/environment/service.ts.
+  const setup = { component: 'environment', operation: 'setup', stage: 'execute' } as const
+
+  it('tags the guest image-pull failures with their own codes', () => {
+    const cases = [
+      ['Could not reach the Docker daemon.', 'DOCKER_PULL_DAEMON_UNREACHABLE'],
+      ['Docker image pull failed.', 'DOCKER_PULL_DAEMON_REFUSED'],
+      ['Docker image pull completed but the image is not present locally.', 'DOCKER_PULL_IMAGE_NOT_PRESENT'],
+    ] as const
+
+    for (const [message, expectedCode] of cases) {
+      const error = new AtomicCoreError(
+        'IO_ERROR',
+        message,
+        '/private/guest/pull: curl: (7) Failed to connect to localhost port 80'
+      )
+      const tags = diagnosticTags(error, classifyFailure(error, setup))
+
+      expect(tags).toMatchObject({
+        diagnostic_version: 'core-v1',
+        component: 'environment',
+        operation: 'setup',
+        failure_stage: 'execute',
+        failure_category: 'unknown',
+        failure_reason: 'unknown',
+        cause_code: 'IO_ERROR',
+        diagnostic_code: expectedCode,
+      })
+      // pull.ts raises the AtomicCoreError without a cause, so no OS or transport code can be captured.
+      expect(tags['diagnostic_cause_code']).toBeUndefined()
+      expect(JSON.stringify(tags)).not.toContain('/private')
+      expect(JSON.stringify(tags)).not.toContain(message)
+    }
+
+    // The message may sit behind an unmapped wrapper, but a cyclic chain must still terminate.
+    const cycleA = new Error('unmapped wrapper /private/guest/cycle-a')
+    const cycleB = Object.assign(new Error('Could not reach the Docker daemon.'), {
+      code: 'PRIVATE_CUSTOM_CODE',
+      cause: cycleA,
+    })
+    cycleA.cause = cycleB
+    const cycleTags = diagnosticTags(cycleA, classifyFailure(cycleA, setup))
+    expect(cycleTags).toMatchObject({ diagnostic_code: 'DOCKER_PULL_DAEMON_UNREACHABLE' })
+    expect(cycleTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(cycleTags)).not.toContain('PRIVATE_CUSTOM_CODE')
+    expect(JSON.stringify(cycleTags)).not.toContain('/private')
+  })
+
+  it('leaves the dynamic curl-exit message untagged and reports the failure unchanged', () => {
+    const dynamic = new AtomicCoreError(
+      'IO_ERROR',
+      'Docker image pull failed (curl exited 7).',
+      '/private/guest/pull: could not connect to the registry'
+    )
+    const dynamicTags = diagnosticTags(dynamic, classifyFailure(dynamic, setup))
+    expect(dynamicTags['diagnostic_code']).toBeUndefined()
+    expect(dynamicTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(dynamicTags)).not.toContain('/private')
+
+    const capture = vi.fn()
+    const observe = failureObserver({ capture })
+    const error = new AtomicCoreError('IO_ERROR', 'Could not reach the Docker daemon.')
+    observe(error, setup)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'operation', error, level: 'error' })
+    )
+    expect(error.code).toBe('IO_ERROR')
+    expect(error.message).toBe('Could not reach the Docker daemon.')
+    expect(error.toJSON()).toEqual({ code: 'IO_ERROR', message: 'Could not reach the Docker daemon.' })
+  })
+})
