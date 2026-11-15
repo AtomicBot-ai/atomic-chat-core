@@ -1,0 +1,12 @@
+---
+date: 2026-11-15
+title: "Tag which guest image-pull branch failed during a Windows setup"
+---
+
+# 2026-11-15 — Tag which guest image-pull branch failed during a Windows setup
+
+- **Context:** A managed Windows setup failed inside `checkGpu` (`src/runtime/environment/windows-provisioner.ts`), which pulls the descriptor's GPU-check image through `pullImageWithCurl` (`src/runtime/container/pull.ts`). The pull raises one `AtomicCoreError('IO_ERROR', …)` per branch: an `error` line on the daemon's NDJSON stream (`Docker image pull failed.`), an unreachable daemon or absent exit code (`Could not reach the Docker daemon.`), a successful pull whose image is missing (`Docker image pull completed but the image is not present locally.`), and a dynamic `Docker image pull failed (curl exited N).` for a curl that connected and then failed. `IO_ERROR` is not in the operational vocabulary of `classifyFailure`, so Sentry reported `environment setup: unknown`: the branch, curl's exit code and the daemon's words live only in `AtomicCoreError.details`, which the operation reporter drops. The thrown error also carries no `cause`, so no OS or transport code reaches the envelope.
+- **Decision:** Use the bounded diagnostic observer to map the three exact static `pullImageWithCurl` messages to finite `diagnostic_code` tags, with allowlisted `diagnostic_cause_code` capture, on existing error events only. The dynamic curl-exit message stays unmapped, so its absence together with one of the three codes separates the branches.
+- **Consequences:** Future Windows setup failures at this throw site carry `diagnostic_code` `DOCKER_PULL_DAEMON_UNREACHABLE`, `DOCKER_PULL_DAEMON_REFUSED` or `DOCKER_PULL_IMAGE_NOT_PRESENT`; an event with none of them is the dynamic `curl exited N` branch, meaning curl reached the guest daemon and failed on its own (registry, TLS or proxy). Classification, filtering, event count and the caller-visible `IO_ERROR` stay unchanged, and no message, path or details string is sent. This observes; it does not repair the setup, so the daemon-readiness wait or clearer setup error remains a separate change. Remove or replace these rules once an event names the branch and its handling ships.
+- **Owner:** `team`
+- **Links:** `src/runtime/container/pull.ts`, `src/runtime/environment/windows-provisioner.ts`, `src/telemetry/diagnostics.ts`, `src/telemetry/sentry-agent-diagnostics.ts`, `src/telemetry/sentry-agent-diagnostics.test.ts`, Sentry `ATOMIC-CHAT-CORE-CA`
