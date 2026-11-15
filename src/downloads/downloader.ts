@@ -779,6 +779,12 @@ export class Downloader {
       await writer.close().catch(() => {})
       await reader.cancel().catch(() => {})
     }
+    // The loop above consults `signal` only when a chunk arrives, so a superseded or cancelled
+    // attempt can reach this point after its body ended without noticing. Publishing now would
+    // rename the staging file the newcomer is writing and delete its `.url` sidecar, and its own
+    // verification failure would then remove the newcomer's file and directory. Stand back and
+    // leave the partial to the newcomer (or to the resume branch above).
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     const persisted = (
       await stat(tmpPath).catch((e) => {
         throw disk(e)
