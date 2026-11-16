@@ -1,3 +1,6 @@
+import { strataDescriptor } from './strata.js'
+import type { StrataHostFacts } from '../runtime/strata/index.js'
+import type { StrataRelease, StrataVariant } from './strata-manifest.js'
 /**
  * Everything that differs between the engines `EngineBuildsService` installs, as one table (openspec
  * change `add-foundry-local`, task 4.1): which release a manifest offers, which build fits this host,
@@ -61,6 +64,7 @@ import type { GeniexHostPlatform } from '../runtime/geniex/chip.js'
 
 /** One build on disk as the service sees it. */
 export interface Build extends EngineBuildRef {
+  strata?: { release: StrataRelease; variant: StrataVariant }
   /** Foundry: retained locally so downgrading core cannot activate an incompatible build offline. */
   min_core_version?: string
   /** For a bundled MLX build, `resources-dir`; otherwise the build's own directory. */
@@ -100,6 +104,7 @@ export type EngineHostPlatform =
 
 /** What a row may read from the service's dependencies. */
 export interface EngineContext {
+  strataHardware?: (() => Promise<StrataHostFacts>) | undefined
   /** This engine's `<data>/…/backends`. */
   env?: NodeJS.ProcessEnv | undefined
   root: string
@@ -131,6 +136,7 @@ export interface HostChoice {
 export type ArchiveRef = Omit<BuildArchive, 'sha256' | 'size'> & { sha256?: string; size?: number }
 
 export interface BuildRecordInfo {
+  strataRelease?: StrataRelease
   minCoreVersion?: string
   flmIdentity?: FastFlowLmIdentity
   tag: string
@@ -147,6 +153,7 @@ export interface BuildRecordInfo {
 }
 
 export interface BuildRelease {
+  strataRelease?: StrataRelease
   min_core_version?: string
   tag: string
   published_at: string | null
@@ -529,6 +536,7 @@ export const ENGINE_DESCRIPTORS: { [K in EngineBuildId]: EngineDescriptor<Manife
   'foundry-local': foundryLocal,
   'litert-lm': liteRtLm,
   'fastflowlm': fastFlowLmDescriptor,
+  'strata': strataDescriptor,
   'geniex': geniex,
   'audio-cpp': audiocpp,
 }

@@ -39,6 +39,7 @@ const OWNED_BY: Record<LocalProvider, string> = {
   'litert-lm': 'litert-lm',
   'geniex': 'geniex',
   'fastflowlm': 'fastflowlm',
+  'strata': 'strata',
 }
 
 /** What a declared session (`LocalTarget.policy`) says about itself, for `/muse-code/models`. */

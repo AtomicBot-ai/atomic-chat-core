@@ -30,6 +30,29 @@ async function resolveFromPackage(specifiers: string[]): Promise<Record<string, 
 }
 
 describe('package exports', () => {
+  it('exports the additive Strata client/contracts/models API without a downloads subpath', async () => {
+    const [client, contracts, models] = await Promise.all([
+      import('../../src/client/index.js'),
+      import('../../src/contracts/index.js'),
+      import('../../src/models/index.js'),
+    ])
+    expect(typeof client.parseStrataDescriptor).toBe('function')
+    expect(typeof client.projectStrataCollection).toBe('function')
+    expect(typeof client.CoreClient.prototype.beginStrataPreparation).toBe('function')
+    expect(typeof models.readStrataBlock).toBe('function')
+    expect(contracts.ENGINE_BUILD_IDS).toContain('strata')
+    expect(contracts.STRATA_PREPARATION_STATES).toContain('interrupted')
+    const resolved = await resolveFromPackage([
+      '@atomic-chat/core/client',
+      '@atomic-chat/core/contracts',
+      '@atomic-chat/core/models',
+      '@atomic-chat/core/downloads',
+    ])
+    expect(resolved['@atomic-chat/core/downloads']).toBe('ERR_PACKAGE_PATH_NOT_EXPORTED')
+    for (const entry of ['client', 'contracts', 'models'])
+      expect(resolved['@atomic-chat/core/' + entry]).toMatch(new RegExp('/dist/' + entry + '/index\\.js$'))
+  })
+
   it('exports exactly the public subpaths, without ./downloads', async () => {
     const pkg = JSON.parse(await readFile(new URL('package.json', ROOT), 'utf8')) as {
       exports: Record<string, unknown>
