@@ -26,6 +26,7 @@ export interface ModelClaimHandle {
 }
 
 const isEexist = (e: unknown) => (e as NodeJS.ErrnoException).code === 'EEXIST'
+const isEnoent = (e: unknown) => (e as NodeJS.ErrnoException).code === 'ENOENT'
 
 /** Every filesystem failure leaves the core as a coded error, keeping the errno as its cause. */
 function claimIoError(action: string, path: string, cause: unknown): AtomicCoreError {
@@ -107,14 +108,31 @@ async function readClaim(path: string): Promise<ModelClaim | undefined> {
   }
 }
 
+/**
+ * Write the record through a temp file. The claim directory is created before a load starts and the
+ * record is only written again when the engine reports itself ready, so a directory removed in the
+ * meantime leaves an owned claim with no record. The load behind it is already up and this process
+ * still holds the claim, so a missing directory is re-created once and the record written again
+ * instead of answering a finished load as failed. Nothing inside the core removes a live claim
+ * directory; a second ENOENT, or any other cause, stays the coded `IO_ERROR` it was.
+ */
 async function writeClaim(path: string, claim: ModelClaim): Promise<void> {
   const target = join(path, 'claim.json')
-  const temp = join(path, `claim.${claim.claim_id}.${randomUUID()}.tmp`)
-  try {
+  const write = async (): Promise<void> => {
+    const temp = join(path, `claim.${claim.claim_id}.${randomUUID()}.tmp`)
     await writeFile(temp, `${JSON.stringify(claim, null, 2)}\n`)
     await rename(temp, target)
+  }
+  try {
+    await write()
   } catch (cause) {
-    throw claimIoError('write', target, cause)
+    if (!isEnoent(cause)) throw claimIoError('write', target, cause)
+    await mkdir(path, { recursive: true }).catch((e: unknown) => {
+      throw claimIoError('create', path, e)
+    })
+    await write().catch((e: unknown) => {
+      throw claimIoError('write', target, e)
+    })
   }
 }
 
