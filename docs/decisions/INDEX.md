@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-17 — Select Strata releases by host compatibility](2026-11-17-select-strata-releases-by-host-compatibility.md)
+
 - [2026-11-13 — Replay fragmented and partial tool turns through Foundry](2026-11-13-replay-fragmented-foundry-tool-turns.md)
 
 - [2026-11-12 — Group parallel tool results before passing history to Foundry](2026-11-12-group-foundry-parallel-tool-results.md)

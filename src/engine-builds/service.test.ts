@@ -2308,6 +2308,49 @@ describe('Strata atomic bundles', () => {
       { id: 'apple:0', vendor: 'apple', architecture: 'apple-gpu', memoryBytes: 128e9, unified: true },
     ],
   })
+  it('uses the newest compatible Strata release for the catalog, update and download', async () => {
+    const h = harness({ strataHardware: facts, strataProbe: async () => {} })
+    const old = await installed(h)
+    const release = structuredClone(old.release)
+    release.release_id = 'strata-0.1.59-r3'
+    const variant = release.variants[0]!
+    const out = join(data.root, 'compatible-strata.tar.gz')
+    await tarCreate({ cwd: old.dir, file: out, gzip: true }, ['control', 'bundle.json'])
+    const body = await readFile(out)
+    variant.bundle.url = MIRROR + '/strata/compatible-strata.tar.gz'
+    variant.bundle.size = body.length
+    variant.bundle.sha256 = sha(body)
+    server.files.set('/releases/strata/compatible-strata.tar.gz', { body })
+    const incompatible = structuredClone(release)
+    incompatible.release_id = 'strata-0.1.59-r4'
+    incompatible.variants[0]!.host.minimum_os_version = '99.0'
+    incompatible.variants[0]!.bundle.url = MIRROR + '/strata/incompatible-strata.tar.gz'
+    h.manifests.strata = {
+      manifest: parseStrataManifest(
+        { schema_version: 1, releases: [old.release, release, incompatible] },
+        '0.24.0'
+      ),
+      source: 'remote',
+      fetched_at: 2,
+      error: null,
+    }
+
+    expect(await h.service.catalog('strata')).toMatchObject({
+      manifest: { tag: release.release_id },
+      host_backend_id: variant.id,
+      host_download_bytes: body.length,
+    })
+    expect(await h.service.checkUpdates('strata')).toMatchObject({
+      update_needed: true,
+      target: { tag: release.release_id, backend_id: variant.id, download_bytes: body.length },
+    })
+    expect(await h.service.install('strata', { task_id: 'compatible-release' })).toMatchObject({
+      installed: true,
+      build: { tag: release.release_id, backend_id: variant.id },
+    })
+    expect((await h.service.catalog('strata')).active?.tag).toBe(release.release_id)
+    expect(await h.service.checkUpdates('strata')).toMatchObject({ update_needed: false })
+  })
   it('keeps an installed immutable release when its metadata changes despite the same archive hash', async () => {
     const h = harness({ strataHardware: facts })
     const t = await installed(h)

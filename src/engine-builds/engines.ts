@@ -128,6 +128,8 @@ export interface HostChoice {
   /** What this host would install, best first. */
   ladder: string[]
   backend_id: string | null
+  /** Release selected together with the backend when the newest release varies by host. */
+  release?: BuildRelease
   /** Why `backend_id` is `null`. */
   reason: string | null
 }
@@ -169,7 +171,7 @@ export interface EngineDescriptor<M> {
   release(manifest: M): BuildRelease | null
   hostChoice(ctx: EngineContext, manifest: M | null): Promise<HostChoice>
   /** The build's archive first, companions after; all unpack into one directory. */
-  archives(manifest: M, backendId: string): ArchiveRef[]
+  archives(manifest: M, backendId: string, release?: BuildRelease): ArchiveRef[]
   /** Fix the unpacked tree up before the probe; runs even when a test replaces the probe. */
   prepare?(staging: string, ctx: EngineContext): Promise<void>
   /**

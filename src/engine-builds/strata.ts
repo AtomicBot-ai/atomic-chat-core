@@ -4,30 +4,45 @@ import { promisify } from 'node:util'
 import { AtomicCoreError } from '../contracts/index.js'
 import { selectStrataDevice } from '../runtime/strata/index.js'
 import { CORE_VERSION } from '../version.js'
-import type { EngineDescriptor } from './engines.js'
-import type { StrataManifest } from './strata-manifest.js'
+import type { BuildRelease, EngineDescriptor } from './engines.js'
+import type { StrataManifest, StrataRelease } from './strata-manifest.js'
 import { readStrataBuilds, verifyStrataBundle, writeStrataBuild } from './strata-install.js'
 import { compareBuilds } from './order.js'
 const run = promisify(execFile)
 
+const buildRelease = (release: StrataRelease): BuildRelease => ({
+  tag: release.release_id,
+  published_at: null,
+  min_core_version: release.minimum_core_version,
+  strataRelease: release,
+})
+
 export const strataDescriptor: EngineDescriptor<StrataManifest> = {
   release(manifest) {
-    const r = manifest.releases[0]
-    return r
-      ? { tag: r.release_id, published_at: null, min_core_version: r.minimum_core_version, strataRelease: r }
-      : null
+    const latest = manifest.releases[0]
+    return latest ? buildRelease(latest) : null
   },
   async hostChoice(ctx, manifest) {
     const unavailable = (reason: string) => ({ backend_id: null, ladder: [], reason })
-    const release = manifest?.releases[0]
-    if (!release) return unavailable('No Strata bundles have been published.')
+    if (!manifest?.releases.length) return unavailable('No Strata bundles have been published.')
     if (!ctx.strataHardware) return unavailable('Strata hardware requirements have not been checked.')
-    const selection = selectStrataDevice(release, await ctx.strataHardware())
-    if (!selection.variant) return unavailable(selection.reason)
-    return { backend_id: selection.variant.id, ladder: [selection.variant.id], reason: null }
+    const facts = await ctx.strataHardware()
+    let reason: string | undefined
+    for (const release of manifest.releases) {
+      if (!release.variants.some(({ host }) => host.os === facts.os && host.arch === facts.arch)) continue
+      const selection = selectStrataDevice(release, facts)
+      if (selection.variant) {
+        const id = selection.variant.id
+        return { backend_id: id, ladder: [id], reason: null, release: buildRelease(release) }
+      }
+      reason ??= selection.reason
+    }
+    return unavailable(reason ?? 'No Strata bundle supports this operating system and CPU architecture.')
   },
-  archives(manifest, backendId) {
-    const b = manifest.releases[0]?.variants.find((v) => v.id === backendId)?.bundle
+  archives(manifest, backendId, release) {
+    const b = (release?.strataRelease ?? manifest.releases[0])?.variants.find(
+      (v) => v.id === backendId
+    )?.bundle
     return b
       ? [
           {

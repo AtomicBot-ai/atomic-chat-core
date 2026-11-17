@@ -199,9 +199,11 @@ export class EngineBuildsService {
     const inUse = await this.deps.hosts[engine].inUse()
     const installed: InstalledEngineBuild[] = []
     for (const build of builds) installed.push(await this.describe(engine, build, active, inUse))
-    const release = read.manifest ? this.engine(engine).release(read.manifest) : null
+    const release = choice.release ?? (read.manifest ? this.engine(engine).release(read.manifest) : null)
     const archives =
-      read.manifest && choice.backend_id ? this.engine(engine).archives(read.manifest, choice.backend_id) : []
+      read.manifest && choice.backend_id && release
+        ? this.engine(engine).archives(read.manifest, choice.backend_id, release)
+        : []
     const manifest: EngineBuildManifestInfo | null =
       release && read.source && read.fetched_at !== null
         ? {
@@ -234,10 +236,10 @@ export class EngineBuildsService {
     const choice = await this.hostChoice(engine, read.manifest)
     if (!active || !read.manifest || !choice.backend_id)
       return { update_needed: false, current, target: null }
-    const candidate = this.engine(engine).release(read.manifest)
+    const candidate = choice.release ?? this.engine(engine).release(read.manifest)
     if (!candidate || compareBuilds(engine, candidate, active) <= 0)
       return { update_needed: false, current, target: null }
-    const archives = this.engine(engine).archives(read.manifest, choice.backend_id)
+    const archives = this.engine(engine).archives(read.manifest, choice.backend_id, candidate)
     return {
       update_needed: true,
       current,
@@ -294,7 +296,7 @@ export class EngineBuildsService {
         'UNSUPPORTED_BACKEND',
         choice.reason ?? 'No build of this engine fits this computer.'
       )
-    const target = this.engine(engine).release(manifest)
+    const target = choice.release ?? this.engine(engine).release(manifest)
     if (!target) throw new AtomicCoreError('UNSUPPORTED_BACKEND', 'No compatible engine release.')
     const tag = target.tag
     const top: EngineBuildRef = { tag, backend_id: choice.backend_id, origin: 'downloaded' }
@@ -310,7 +312,8 @@ export class EngineBuildsService {
     )
     if (
       present?.immutable_sha256 &&
-      this.engine(engine).archives(manifest, choice.backend_id)[0]?.sha256 !== present.immutable_sha256
+      this.engine(engine).archives(manifest, choice.backend_id, target)[0]?.sha256 !==
+        present.immutable_sha256
     )
       throw new AtomicCoreError(
         'ENGINE_INSTALL_FAILED',
@@ -380,7 +383,7 @@ export class EngineBuildsService {
   ): Promise<Omit<EngineBuildInstallResult, 'failed_backend_ids'>> {
     const descriptor = this.engine(engine)
     const { tag, published_at: publishedAt, c_api_version: cApiVersion, abi } = release
-    const archives = descriptor.archives(manifest, backendId)
+    const archives = descriptor.archives(manifest, backendId, release)
     const unpinned = archives.find((archive) => !assetInstallable(archive))
     if (unpinned)
       throw new AtomicCoreError(
