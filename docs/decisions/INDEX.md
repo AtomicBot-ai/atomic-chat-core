@@ -262,6 +262,7 @@ add a new one that says which record it supersedes.
 - [Accept the app's client keys next to the server key](2026-11-12-accept-app-client-keys-next-to-the-server-key.md) — `PUT /atomic/v1/server/client-keys`: in-memory extra keys next to a non-empty `api_key`; keyring wins, keyless stays open
 - [Downloads report the disk reason they already tag](2026-11-11-downloads-report-their-own-disk-reason.md)
 - [Keep the stream failure that ended a download retry ladder](2026-11-16-downloads-keep-the-stream-failure-that-ended-a-retry-ladder.md)
+- [A superseded download stands back before it publishes](2026-11-15-a-superseded-download-does-not-publish.md)
 - [Refuse to replace a backend pack a session runs from](2026-11-12-refuse-replacing-in-use-backend-pack.md)
 - [Browser stack frames keep their served asset path](2026-11-12-keep-browser-asset-paths-in-stack-frames.md)
 - [Publishing a released instance lock writes nothing](2026-11-17-publishing-a-released-instance-lock-writes-nothing.md)
