@@ -157,6 +157,15 @@ describe('childEnv', () => {
     expect(runArgsFor(agent('muse'), 'org/m')).toEqual([])
   })
 
+  it('starts Muse with the embedding host endpoint when no model is selected', () => {
+    expect(runArgsFor(agent('muse'), '', 'http://127.0.0.1:1339/v1')).toEqual([
+      '--provider',
+      'meta',
+      '--base-url',
+      'http://127.0.0.1:1339/v1',
+    ])
+  })
+
   it('gives Codex no key variable for a keyless server, whose profile names none', () => {
     expect(childEnv(agent('codex'), 'http://h/v1', 'm', '')).toEqual({})
   })
