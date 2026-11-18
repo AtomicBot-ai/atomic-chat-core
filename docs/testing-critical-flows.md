@@ -69,6 +69,28 @@ Line coverage alone never raises a grade. A PR may not lower a grade.
 | Unified `core.log`: shared `[date][time][target][LEVEL]` format and rotation, engine output via `backendOutput`, `atomic-chat-app-core` stderr header (`add-unified-logs`) | Strong (core), Missing (app Logs window / export) | `src/host/log-file.test.ts` (rotation before an over-limit write, archive pruning oldest-first at 4 kept, disabled with one warning, and never a throw, on a rotation that leaves nothing writable, on a close that fails mid-rotation and on an unwritable folder, a failed rename retried on the next write, `[`/`]`/control characters in a target replaced by `_`, rotation succeeding while another reader holds the file open), `test/contract/core-log.test.ts` (the pinned `test/fixtures/core-log/sample.log` written byte-for-byte through the real `openLogFile`/`formatLogLine`, and the strict-header/continuation-line split), `src/host/app-daemon.test.ts` (fake deps: the tee'd core logger, `backendOutput` wired to the file with the `engine:<provider>/<model>` target, `failFatally`'s text duplicated at `ERROR`, usage errors before the file opens, `--version`), `src/runtime/shared/{backend-output,redact-args}.test.ts` (a throwing sink swallowed after one `warn` per session, a throwing `warn` swallowed too, `--api-key`/`--api-key=<v>` masked), `src/runtime/{llamacpp,mlx,foundation-models}/runtime.test.ts` and `src/diffusion/server-process.test.ts` (the engine start line, `backendOutput` fed from `onLine`/`deliver` alongside `logPath`/`verbose`), `src/core/create.test.ts` (`backendOutput` reaches all four runtime kinds); `test/e2e/app-core-log.test.ts` on the compiled `atomic-chat-app-core` binary: `core.log` created and appended across a restart with the version/pid start line, every stderr line headed in UTC, a busy `--control-port` logged as one `ERROR` entry in the file and on stderr before exit 1, an unwritable logs folder disables the file writer (one `WARN` on stderr) while the daemon keeps serving and heading stderr, the CLI's `atomic-chat-core daemon` keeps its unheaded `[level] message` stderr and writes no file, and the engine start line is a `core` entry (so on stderr too) written to `core.log` ahead of the engine's own stdout/stderr, which land in `core.log` under `engine:<provider>/<model>` and never on stderr | the app's Logs window and export (`[app]`/`[core]` merge) — `docs/app-e2e.md` scenario 17 |
 | Mobile paths survive desktop legacy removal | Missing | — | Existing mobile build/contract checks in phase 6 |
 
+## Strata model preparation and runtime
+
+**Strong (local preparation and maintenance).** `test/integration/strata-recipes.test.ts` uses the
+pinned converters with tiny Qwen3.8 and DeepSeek inputs, rejects a missing Qwen shard, and proves the
+DeepSeek pack uses the pinned vision input even when a foreign sibling pack exists.
+`test/integration/strata-converter-guard.test.ts` checks the local-only converter policy.
+`src/runtime/strata/strata-prepared-cache.test.ts` covers step reuse, corrupted artifacts, and owned
+cleanup. `test/e2e/strata-maintenance.test.ts` covers a failed replacement and the load guard through
+the compiled owner.
+
+**Partial (session lifecycle and inference).** `test/integration/strata-ready.test.ts` starts the
+packaged Control on macOS, verifies a generation over HTTP, reattaches, and unloads the owner and its
+protocol fixture. `test/e2e/strata-owner-death.test.ts` exercises the packaged parent-loss guard with
+a child that ignores graceful termination. `test/contract/strata-http.test.ts` covers gateway request
+policy and cancellation. Ubuntu 26.04.1 x64 with an RTX 4070 Laptop passed real Qwen3.6 Q4
+preparation, chat, SSE usage, tool round-trip, cancellation under the CI-pinned Bun 1.4.4,
+unload with process-exit proof, and a second load from the local cache. Qwen3.8 Next IQ3_XXS
+passed the same lifecycle on that Ubuntu CUDA host and on macOS arm64 with Metal, using the
+Strata 0.1.59 r5 candidate in SSD mode. Both runs verified all source hashes and confirmed that
+every owned process exited after unload. Live DeepSeek and the Windows native lifecycle still
+require qualification.
+
 ## Core diagnostic handoff to the Sentry fixer
 
 **Partial.** `src/contracts/errors.test.ts` verifies that causes/diagnostics never enter ErrorBody;

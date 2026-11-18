@@ -154,3 +154,27 @@ it('rejects a Windows device path in engine zips and extracts ordinary library n
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+it.skipIf(process.platform === 'win32')(
+  'extracts Strata sibling links but refuses external links before execution',
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'atomic-strata-archive-'))
+    try {
+      await writeFile(join(dir, 'python3.12'), 'packaged Python')
+      await symlink('python3.12', join(dir, 'python3'))
+      const archive = join(dir, 'bundle.tar.gz')
+      await tarCreate({ cwd: dir, file: archive, gzip: true }, ['python3.12', 'python3'])
+      await extractArchive(archive, join(dir, 'good'), 'sibling-symlinks')
+      expect(await readFile(join(dir, 'good/python3'), 'utf8')).toBe('packaged Python')
+      await rm(join(dir, 'python3'))
+      await symlink('../outside', join(dir, 'python3'))
+      await tarCreate({ cwd: dir, file: archive, gzip: true }, ['python3.12', 'python3'])
+      await expect(extractArchive(archive, join(dir, 'bad'), 'sibling-symlinks')).rejects.toThrow(
+        'Unsafe engine archive entry'
+      )
+      expect(await exists(join(dir, 'bad/python3'))).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+)

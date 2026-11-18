@@ -380,3 +380,20 @@ describe('litert-lm in GPU residency (change add-litert-lm-runtime, task 6.6)', 
     expect(w.calls).toEqual(['unload litert-lm/gemma-gpu'])
   })
 })
+
+it('blocks overlapping claims while a Strata process tree remains unconfirmed', async () => {
+  const w = world()
+  w.leftovers.push({
+    provider: 'strata',
+    model_id: 'qwen',
+    cards: ['GPU-0'],
+    auxiliary: false,
+    state: 'stop-unconfirmed',
+    evict: async () => {
+      throw new Error('Strata compute is still running')
+    },
+  })
+  await expect(
+    w.residency.hook('llamacpp')({ model_id: 'next', cards: ['GPU-0'], auxiliary: false })
+  ).rejects.toMatchObject({ code: 'GPU_BUSY', details: expect.stringContaining('strata/qwen') })
+})

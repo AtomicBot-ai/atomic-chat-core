@@ -10,3 +10,8 @@ export * from './select.js'
 export * from './builds.js'
 export * from './install.js'
 export * from './service.js'
+
+export * from './strata-manifest.js'
+
+export { readStrataBuilds, verifyStrataBundle } from './strata-install.js'
+export type { Build } from './engines.js'

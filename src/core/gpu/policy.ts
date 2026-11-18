@@ -21,7 +21,7 @@
  * a CPU-only session holds none. Embedding and transcription sessions are outside the rule both ways
  * — never evicted, never evicting — or warming an embedding model for RAG would unload a
  * `tensorrt-llm` model the next reply loads again for minutes, forever. Sessions of the requesting
- * provider are its own business (its auto-unload setting), except where the provider runs only one.
+ * provider are its own business (its auto-unload setting), unless it requires exclusivity.
  *
  * What is not blunt is the release, and that is not decided here but by what the engines report: a
  * session stays listed — `stopping`, `stop-unconfirmed` — until something verified says its process
@@ -73,7 +73,8 @@ export function gpuEvictions<T extends GpuOccupant>(request: GpuRequest, occupan
     if (occupant.auxiliary) return false
     if (occupant.provider === request.provider) {
       if (occupant.model_id === request.model_id) return false
-      return request.soleSessionOfProvider === true
+      if (request.soleSessionOfProvider) return true
+      if (!request.exclusiveCardsOfProvider) return false
     }
     return cardsOverlap(request.cards, occupant.cards)
   })

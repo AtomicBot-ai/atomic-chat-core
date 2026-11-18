@@ -19,3 +19,5 @@ export * from './catalog-source.js'
 
 export * from './fastflowlm.js'
 export * from './fastflowlm-check.js'
+
+export * from './strata.js'
