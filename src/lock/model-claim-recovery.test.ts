@@ -1,4 +1,5 @@
 import { readFile, rm, writeFile } from 'node:fs/promises'
+import type * as Fs from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
@@ -6,7 +7,7 @@ import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { acquireModelClaim } from './model-claim.js'
 
 vi.mock('node:fs/promises', async (importOriginal) => {
-  const fs = await importOriginal<typeof import('node:fs/promises')>()
+  const fs = await importOriginal<typeof Fs>()
   return { ...fs, writeFile: vi.fn(fs.writeFile) }
 })
 
