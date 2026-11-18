@@ -132,12 +132,22 @@ function hostError(exitCode: number | null, stderr: string): AtomicCoreError {
       'The accelerator of this model is not prepared; prepare it on the Foundry Local page first.',
       said
     )
+  const libraryDidNotLoad = exitCode === 3
   return new AtomicCoreError(
     'FOUNDRY_LOCAL_HOST_ERROR',
-    exitCode === 3
+    libraryDidNotLoad
       ? 'The Foundry Local library does not load on this computer.'
       : 'The Foundry Local host stopped before the model was ready.',
-    said || `exit code ${String(exitCode)}`
+    said || `exit code ${String(exitCode)}`,
+    {
+      diagnostic: {
+        component: 'runtime',
+        operation: 'load',
+        operationDetail: libraryDidNotLoad
+          ? 'foundry_local_library_not_loaded'
+          : 'foundry_local_host_stopped_before_ready',
+      },
+    }
   )
 }
 

@@ -8,6 +8,7 @@ import { makeTmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../../test/helpers/tmp-data-folder.js'
 import type { CoreEvents } from '../../contracts/index.js'
 import { ModelRegistry, serializeModelYml } from '../../models/index.js'
+import { diagnosticTags, loadFailureReport } from '../../telemetry/index.js'
 import { spawnAndAwaitReady } from '../shared/index.js'
 import type { GpuClaimHook } from '../shared/index.js'
 import { FoundryLocalRuntime } from './runtime.js'
@@ -358,6 +359,27 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
     await expect(runtime({ mode: 'exit-3' }).rt.load('webgpu-variant')).rejects.toMatchObject({
       code: 'FOUNDRY_LOCAL_HOST_ERROR',
       details: expect.stringContaining('libatomic.so.1'),
+    })
+  })
+
+  it.each([
+    ['exit-3', 'foundry_local_library_not_loaded'],
+    ['exit-4', 'foundry_local_host_stopped_before_ready'],
+  ])('reports the Foundry host load detail for %s', async (mode, detail) => {
+    const modelId = 'foundry-diagnostic'
+    await variant(modelId, { execution_provider: 'webgpu', device: 'gpu' })
+    const error: unknown = await runtime({ mode })
+      .rt.load(modelId)
+      .catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'FOUNDRY_LOCAL_HOST_ERROR' })
+    const report = loadFailureReport({ provider: 'foundry-local', modelId, error })
+    if (!report?.diagnostic) throw new Error('Expected a Foundry host load report')
+    expect(report.level).toBe('error')
+    expect(diagnosticTags(report.error, report.diagnostic)).toMatchObject({
+      component: 'runtime',
+      operation: 'load',
+      failure_reason: 'unknown',
+      operation_detail: detail,
     })
   })
 

@@ -4,7 +4,7 @@
  * arguments, readiness line, `/catalogs/local/v1/*` routes, registration-id model matching and stop
  * on SIGTERM or stdin end as `src/runtime/foundry-local/host/run.ts` with a real library.
  *
- *   FAKE_FOUNDRY_MODE  ready (default) | echo-chat-request | crash-after-ready | hang | exit-3 | exit-5
+ *   FAKE_FOUNDRY_MODE  ready (default) | echo-chat-request | crash-after-ready | hang | exit-3 | exit-4 | exit-5
  *   FAKE_FOUNDRY_ARGV  a file each start appends {argv, ort_telemetry_disabled,
  *                      ort_enable_cudnn_flash_attention, ci} to
  */
@@ -89,6 +89,10 @@ if (mode === 'exit-5') {
 if (mode === 'exit-3') {
   console.error('foundry_local does not load from /b: libatomic.so.1: cannot open shared object file')
   process.exit(3)
+}
+if (mode === 'exit-4') {
+  console.error('Foundry library call failed before readiness')
+  process.exit(4)
 }
 
 const port = Number(arg('--port'))
