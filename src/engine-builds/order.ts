@@ -1,3 +1,4 @@
+import { strataBuildKey } from './strata-manifest.js'
 /**
  * Which of two builds of one engine is newer (design D4). An "update" is only ever a strictly newer
  * build, so a conf manifest rolled back to an older tag is never offered and never installed over a
@@ -62,6 +63,7 @@ const ORDER_KEYS: Record<EngineBuildId, (build: OrderedBuild) => readonly number
   'mlx': publishedKey,
   'foundry-local': publishedKey,
   'litert-lm': publishedKey,
+  'strata': (build) => strataBuildKey(build.tag),
   'fastflowlm': (build) => fastFlowLmBuildKey(build.tag),
   'geniex': publishedKey,
   'audio-cpp': (build) => audiocppBuildKey(build.tag),

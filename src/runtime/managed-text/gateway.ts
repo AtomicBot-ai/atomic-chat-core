@@ -86,6 +86,8 @@ export interface ManagedGatewayUpstream {
   port: number
   /** A prefix every forwarded path gets, for an engine that serves its models under a sub-path (Foundry Local's `/catalogs/local`). */
   basePath?: string
+  /** An independent credential for an authenticated loopback engine. */
+  apiKey?: string
 }
 
 export interface ManagedGatewayOptions {
@@ -332,7 +334,10 @@ async function sendBodyToUpstream(
     upstreamResponse = await sendUpstream(`${origin}${upstream.basePath ?? ''}${req.url ?? '/'}`, {
       method: req.method ?? 'GET',
       // The client's own auth headers are this gateway's secret, not the container's; they stop here.
-      headers: forwardableHeaders(req, ['authorization', 'x-api-key']),
+      headers: [
+        ...forwardableHeaders(req, ['authorization', 'x-api-key']),
+        ...(upstream.apiKey ? [['authorization', 'Bearer ' + upstream.apiKey] as [string, string]] : []),
+      ],
       ...(body.length > 0 ? { body } : {}),
       connectTimeoutMs: CONNECT_TIMEOUT_MS,
       signal: controller.signal,

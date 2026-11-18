@@ -51,6 +51,8 @@ export interface GpuClaim {
    * rule, design D10): its other sessions go too, on whichever card they are.
    */
   soleSessionOfProvider?: boolean
+  /** The provider needs one resident session per card and can use other cards independently. */
+  exclusiveCardsOfProvider?: boolean
 }
 
 /**

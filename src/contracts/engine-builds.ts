@@ -18,6 +18,7 @@ export const ENGINE_BUILD_IDS = [
   'litert-lm',
   'geniex',
   'fastflowlm',
+  'strata',
   'audio-cpp',
 ] as const
 export type EngineBuildId = (typeof ENGINE_BUILD_IDS)[number]

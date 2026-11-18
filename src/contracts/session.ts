@@ -35,6 +35,7 @@ export type LocalProviderId =
   | 'litert-lm'
   | 'geniex'
   | 'fastflowlm'
+  | 'strata'
   | ManagedProviderId
 
 /**

@@ -11,3 +11,5 @@ export * from './import.js'
 export * from './store.js'
 export * from './decision.js'
 export * from './embedding.js'
+
+export * from './strata-settings.js'

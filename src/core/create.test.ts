@@ -7,7 +7,9 @@ import { pathToFileURL } from 'node:url'
 import { c as tarCreate } from 'tar'
 import { describe, expect, it, vi } from 'vitest'
 import qwen3Candidate from '../../test/fixtures/fastflowlm/qwen3-candidate.json' with { type: 'json' }
-import { parseFastFlowLmDescriptor } from '../client/index.js'
+import strataCatalog from '../../test/fixtures/strata/catalog.json' with { type: 'json' }
+import strataManifest from '../../test/fixtures/strata/manifest.json' with { type: 'json' }
+import { parseFastFlowLmDescriptor, parseStrataDescriptor } from '../client/index.js'
 import { linuxFastFlowLmPci, writeFlmInstallation } from '../../test/helpers/fastflowlm-installation.js'
 import { flmRelease } from '../../test/helpers/fastflowlm-manifest.js'
 import { launcherArchive } from '../../test/helpers/engine-builds-mirror.js'
@@ -22,6 +24,7 @@ import { BPW, bonsaiLikeGguf, buildGguf } from '../../test/helpers/gguf-builder.
 import { writeFakeSidecarBinary } from '../../test/helpers/fake-sidecar-server.js'
 import { CoreClient } from '../client/index.js'
 import { AtomicCore, CORE_VERSION } from './index.js'
+import { parseStrataManifest } from '../engine-builds/index.js'
 import type { BackendOutputSink } from './index.js'
 import { inspectLock, readControlToken } from '../lock/index.js'
 import type { ErrorReport } from '../telemetry/index.js'
@@ -303,7 +306,7 @@ describe('taking ownership', () => {
     expect(() => core.runtime('ollama' as never)).toThrow(
       expect.objectContaining({
         details:
-          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, fastflowlm, tensorrt-llm, vllm, sglang',
+          'available: llamacpp-upstream, llamacpp, atomic-prism, foundry-local, litert-lm, fastflowlm, strata, tensorrt-llm, vllm, sglang',
       })
     )
   })
@@ -2697,4 +2700,71 @@ it('discovers an installer commit immediately and checks it by ID or directory t
     metadata: null,
   })
   expect(await registry.list()).toEqual([])
+})
+
+it('uses the registered hardware probe and saved GPU selection for a Strata check', async () => {
+  const release = parseStrataManifest(strataManifest, CORE_VERSION).releases[0]!
+  const variant = release.variants[0]!
+  const dir = join(data.layout.provider('strata').backendsDir, release.release_id, variant.id)
+  const inventory = '{}'
+  variant.bundle.bundle_manifest_sha256 = createHash('sha256').update(inventory).digest('hex')
+  await mkdir(join(dir, 'control/python/bin'), { recursive: true })
+  await writeFile(join(dir, variant.bundle.python), '')
+  await writeFile(join(dir, 'bundle.json'), inventory)
+  await writeFile(join(dir, '.atomic-owned'), 'atomic-chat\n')
+  await writeFile(
+    join(dir, 'install.json'),
+    JSON.stringify({ release, variant_id: variant.id, installed_at_ms: 1 })
+  )
+
+  const core = await createCore({
+    platform: 'darwin',
+    hardware: {
+      probe: async () => ({
+        info: {
+          cpu: { name: 'Apple M4', core_count: 4, arch: 'aarch64', extensions: [], extensions_known: true },
+          os_type: 'macos',
+          os_name: 'macOS 15.4',
+          total_memory: 64 * 1024,
+          gpus: [],
+        },
+        warnings: [],
+      }),
+    },
+  })
+  const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+  const descriptor = parseStrataDescriptor(strataCatalog.models['strata-qwen38-iq3-xxs'].definition)
+  const check = () => client.checkStrataModel({ descriptor })
+  expect((await check()).compatible_devices).toEqual([
+    { gpu_id: 'apple:0', backend: 'metal', variant_id: variant.id },
+  ])
+  const response = await fetch(core.control.url + '/atomic/v1/settings/strata', {
+    method: 'PATCH',
+    headers: { 'authorization': 'Bearer ' + core.controlToken, 'content-type': 'application/json' },
+    body: JSON.stringify({ values: { gpu_id: 'another-gpu' } }),
+  })
+  expect(response.ok).toBe(true)
+  expect(await check()).toMatchObject({ verdict: 'platform-unsupported', compatible_devices: [] })
+})
+
+it('retains an unresolved Strata GPU and build across core restart', async () => {
+  const { StrataProcessJournal } = await import('../runtime/strata/index.js')
+  const journal = await StrataProcessJournal.open(join(data.layout.core.dir, 'strata'), 'strata-v1')
+  const generation = 'a'.repeat(32)
+  await journal.begin({
+    generation,
+    profile: 'atomic-' + generation,
+    modelId: 'previous-model',
+    cards: ['test-gpu'],
+    build: join(data.root, 'missing-build'),
+    core: { pid: process.pid, startId: 'unknown', instanceId: 'previous-core' },
+  })
+  const core = await createCore()
+  const runtime = core.runtime('strata')
+  expect(runtime.list()).toEqual([])
+  expect(runtime.gpuOccupancy?.()).toMatchObject([
+    { model_id: 'previous-model', cards: ['test-gpu'], state: 'stop-unconfirmed' },
+  ])
+  await expect(runtime.load('previous-model')).rejects.toMatchObject({ code: 'GPU_BUSY' })
+  expect((await runtime.unload('previous-model')).success).toBe(false)
 })

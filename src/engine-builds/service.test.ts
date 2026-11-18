@@ -1,3 +1,8 @@
+import strataFixture from '../../test/fixtures/strata/manifest.json' with { type: 'json' }
+import { parseStrataManifest } from './strata-manifest.js'
+import { writeStrataBuild } from './strata-install.js'
+import type { StrataHostFacts } from '../runtime/strata/index.js'
+import type { StrataManifest } from './strata-manifest.js'
 import { flmRelease } from '../../test/helpers/fastflowlm-manifest.js'
 import { parseFastFlowLmManifest, type FastFlowLmManifest } from './fastflowlm-manifest.js'
 import { createHash } from 'node:crypto'
@@ -163,6 +168,8 @@ class FakeHost implements EngineHost {
 
 function harness(
   opts: {
+    strataHardware?: () => Promise<StrataHostFacts>
+    strataProbe?: (dir: string) => Promise<void>
     facts?: typeof LINUX_VULKAN | typeof MAC_ARM
     space?: number
     resourcesDir?: string
@@ -181,6 +188,7 @@ function harness(
     'mlx': ManifestRead<MlxManifest>
     'foundry-local': ManifestRead<FoundryLocalManifest>
     'litert-lm': ManifestRead<LiteRtLmManifest>
+    'strata': ManifestRead<StrataManifest>
     'fastflowlm': ManifestRead<FastFlowLmManifest>
     'geniex': ManifestRead<GeniexManifest>
     'audio-cpp': ManifestRead<AudiocppManifest>
@@ -189,6 +197,7 @@ function harness(
     'mlx': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'foundry-local': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'litert-lm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
+    'strata': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'fastflowlm': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'geniex': { manifest: null, source: null, fetched_at: null, error: 'offline' },
     'audio-cpp': { manifest: null, source: null, fetched_at: null, error: 'offline' },
@@ -223,18 +232,21 @@ function harness(
     'mlx': new FakeHost(),
     'foundry-local': new FakeHost(),
     'litert-lm': new FakeHost(),
+    'strata': new FakeHost(),
     'fastflowlm': new FakeHost(),
     'geniex': new FakeHost(),
     'audio-cpp': new FakeHost(),
   }
   let clock = 1_000
   const service = new EngineBuildsService({
+    ...(opts.strataHardware ? { strataHardware: opts.strataHardware } : {}),
     dataFolder: data.root,
     roots: {
       'sd-cpp': data.layout.diffusion.backendsDir,
       'mlx': data.layout.provider('mlx').backendsDir,
       'foundry-local': FOUNDRY_ROOT(),
       'litert-lm': LITERT_ROOT(),
+      'strata': data.layout.provider('strata').backendsDir,
       'fastflowlm': data.layout.provider('fastflowlm').backendsDir,
       'geniex': GENIEX_ROOT(),
       'audio-cpp': data.layout.audio.backendsDir,
@@ -251,6 +263,7 @@ function harness(
       'mlx': { read: async () => manifests.mlx },
       'foundry-local': { read: async () => manifests['foundry-local'] },
       'litert-lm': { read: async () => manifests['litert-lm'] },
+      'strata': { read: async () => manifests.strata },
       'fastflowlm': { read: async () => manifests.fastflowlm },
       'geniex': { read: async () => manifests.geniex },
       'audio-cpp': { read: async () => manifests['audio-cpp'] },
@@ -274,6 +287,7 @@ function harness(
       ...(opts.geniexProbe ? { geniex: opts.geniexProbe } : {}),
     },
     probe: {
+      ...(opts.strataProbe ? { strata: opts.strataProbe } : {}),
       ...(opts.liteRtLmProbe ? { 'litert-lm': opts.liteRtLmProbe } : {}),
     },
     hardware: async () => opts.facts ?? LINUX_VULKAN,
@@ -2265,4 +2279,165 @@ it('recovers the parked FLM build after a crash between the two renames', async 
   await h.service.startupCleanup()
   expect(await readFile(join(dir, 'old'), 'utf8')).toBe('working')
   expect(await ls(join(dir, '..'))).toEqual(['linux-x64-npu'])
+})
+
+describe('Strata atomic bundles', () => {
+  async function installed(h: ReturnType<typeof harness>) {
+    const release = parseStrataManifest(strataFixture, '0.23.6').releases[0]!
+    const variant = release.variants[0]!
+    const dir = join(data.layout.provider('strata').backendsDir, release.release_id, variant.id)
+    await mkdir(join(dir, 'control/python/bin'), { recursive: true })
+    await writeFile(join(dir, variant.bundle.python), 'old Python')
+    await writeFile(join(dir, 'bundle.json'), '{}')
+    variant.bundle.bundle_manifest_sha256 = sha(Buffer.from('{}'))
+    await writeStrataBuild(dir, release, variant, 1)
+    h.manifests.strata = {
+      manifest: { schema_version: 1, releases: [release] },
+      source: 'remote',
+      fetched_at: 1,
+      error: null,
+    }
+    return { dir, release, variant }
+  }
+  const facts = async (): Promise<StrataHostFacts> => ({
+    os: 'macos',
+    arch: 'arm64',
+    osVersion: '26.6.2',
+    ramBytes: 128e9,
+    devices: [
+      { id: 'apple:0', vendor: 'apple', architecture: 'apple-gpu', memoryBytes: 128e9, unified: true },
+    ],
+  })
+  it('uses the newest compatible Strata release for the catalog, update and download', async () => {
+    const h = harness({ strataHardware: facts, strataProbe: async () => {} })
+    const old = await installed(h)
+    const release = structuredClone(old.release)
+    release.release_id = 'strata-0.1.59-r3'
+    const variant = release.variants[0]!
+    const out = join(data.root, 'compatible-strata.tar.gz')
+    await tarCreate({ cwd: old.dir, file: out, gzip: true }, ['control', 'bundle.json'])
+    const body = await readFile(out)
+    variant.bundle.url = MIRROR + '/strata/compatible-strata.tar.gz'
+    variant.bundle.size = body.length
+    variant.bundle.sha256 = sha(body)
+    server.files.set('/releases/strata/compatible-strata.tar.gz', { body })
+    const incompatible = structuredClone(release)
+    incompatible.release_id = 'strata-0.1.59-r4'
+    incompatible.variants[0]!.host.minimum_os_version = '99.0'
+    incompatible.variants[0]!.bundle.url = MIRROR + '/strata/incompatible-strata.tar.gz'
+    h.manifests.strata = {
+      manifest: parseStrataManifest(
+        { schema_version: 1, releases: [old.release, release, incompatible] },
+        '0.24.0'
+      ),
+      source: 'remote',
+      fetched_at: 2,
+      error: null,
+    }
+
+    expect(await h.service.catalog('strata')).toMatchObject({
+      manifest: { tag: release.release_id },
+      host_backend_id: variant.id,
+      host_download_bytes: body.length,
+    })
+    expect(await h.service.checkUpdates('strata')).toMatchObject({
+      update_needed: true,
+      target: { tag: release.release_id, backend_id: variant.id, download_bytes: body.length },
+    })
+    expect(await h.service.install('strata', { task_id: 'compatible-release' })).toMatchObject({
+      installed: true,
+      build: { tag: release.release_id, backend_id: variant.id },
+    })
+    expect((await h.service.catalog('strata')).active?.tag).toBe(release.release_id)
+    expect(await h.service.checkUpdates('strata')).toMatchObject({ update_needed: false })
+  })
+  it('keeps an installed immutable release when its metadata changes despite the same archive hash', async () => {
+    const h = harness({ strataHardware: facts })
+    const t = await installed(h)
+    t.release.components[0]!.version = '0.1.60'
+    await expect(h.service.install('strata', { task_id: 'changed' })).rejects.toThrow(/immutable/)
+    expect(server.requests).toEqual([])
+  })
+  it('restores a retired Strata build after a crash between the two renames', async () => {
+    const h = harness({ strataHardware: facts })
+    const t = await installed(h)
+    const { rename } = await import('node:fs/promises')
+    await rename(t.dir, t.dir + '.retired-1000')
+    await h.service.startupCleanup()
+    expect(await h.service.activeDir('strata')).toBe(t.dir)
+  })
+  it('reports one provider, refuses removal in use, and emits only after removal', async () => {
+    const h = harness({ strataHardware: facts })
+    const t = await installed(h)
+    expect((await h.service.catalog('strata')).active).toMatchObject({
+      tag: t.release.release_id,
+      backend_id: t.variant.id,
+    })
+    h.hosts.strata.used = [t.dir]
+    await expect(h.service.remove('strata', t.release.release_id, t.variant.id)).rejects.toMatchObject({
+      code: 'BACKEND_IN_USE',
+    })
+    expect(h.changed).toEqual([])
+    h.hosts.strata.used = []
+    expect(await h.service.remove('strata', t.release.release_id, t.variant.id)).toEqual({ removed: true })
+    expect(h.changed).toEqual([{ engine: 'strata', reason: 'uninstall' }])
+  })
+  it('rolls back publication if the host cannot confirm stop, retaining the previous active bundle', async () => {
+    const h = harness({ strataHardware: facts, strataProbe: async () => {} })
+    const old = await installed(h)
+    const release = structuredClone(old.release)
+    release.release_id = 'strata-0.1.59-r3'
+    const variant = release.variants[0]!
+    const out = join(data.root, 'new-strata.tar.gz')
+    await tarCreate({ cwd: old.dir, file: out, gzip: true }, ['control', 'bundle.json'])
+    const body = await readFile(out)
+    variant.bundle.url = MIRROR + '/strata/new-strata.tar.gz'
+    variant.bundle.size = body.length
+    variant.bundle.sha256 = sha(body)
+    server.files.set('/releases/strata/new-strata.tar.gz', { body })
+    h.manifests.strata = {
+      manifest: { schema_version: 1, releases: [release] },
+      source: 'remote',
+      fetched_at: 2,
+      error: null,
+    }
+    h.hosts.strata.activate = async () => {
+      throw new AtomicCoreError('GPU_BUSY', 'Previous process tree still alive')
+    }
+    await expect(h.service.install('strata', { task_id: 'blocked-stop' })).rejects.toMatchObject({
+      code: 'GPU_BUSY',
+    })
+    expect(await h.service.activeDir('strata')).toBe(old.dir)
+    expect(await readFile(join(old.dir, old.variant.bundle.python), 'utf8')).toBe('old Python')
+    expect(h.changed).toEqual([])
+  })
+})
+
+it('reserves Strata task IDs across engines until the installation finishes', async () => {
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const h = harness({
+    strataHardware: async () => {
+      await pending
+      return { os: 'unknown', arch: 'unknown', ramBytes: 0, devices: [] }
+    },
+  })
+  h.manifests.strata = {
+    manifest: parseStrataManifest(strataFixture, '0.23.6'),
+    source: 'remote',
+    fetched_at: 1,
+    error: null,
+  }
+  const first = h.service.install('strata', { task_id: 'shared-task' })
+  const rejected = expect(first).rejects.toMatchObject({ code: 'UNSUPPORTED_BACKEND' })
+  try {
+    await expect(h.service.install('fastflowlm', { task_id: 'shared-task' })).rejects.toMatchObject({
+      code: 'ENGINE_INSTALL_IN_PROGRESS',
+    })
+  } finally {
+    release()
+    await rejected
+  }
 })
