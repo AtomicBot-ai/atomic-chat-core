@@ -31,6 +31,7 @@ import type {
   LocalProviderId,
   ServerSettings,
 } from '../contracts/index.js'
+import { parseStrataSettings } from './strata-settings.js'
 import { decisionSettingsOf, parseDecisionSettingsPatch } from './decision.js'
 import { embeddingSettingsOf, parseEmbeddingSettingsPatch } from './embedding.js'
 import { LOCAL_PROVIDER_IDS, canonicalizeSettingValues, defaultSettingValues } from './schema.js'
@@ -384,6 +385,7 @@ export class SettingsStore {
   ): Promise<UpdateResult> {
     assertProvider(provider)
     const canonical = canonicalizeSettingValues(provider, patch)
+    if (provider === 'strata') parseStrataSettings(canonical)
     return this.mutate(options, (doc) =>
       applyPatch(doc.providers[provider], canonical, (key, value) => ({ scope: provider, key, value }))
     )
@@ -445,6 +447,7 @@ export class SettingsStore {
   ): Promise<ImportResult> {
     assertProvider(provider)
     const canonicalLegacy = canonicalizeSettingValues(provider, legacyValues)
+    if (provider === 'strata') parseStrataSettings(canonicalLegacy)
     const hash = legacyHash(canonicalLegacy)
     let outcome: ImportOutcome = { status: 'unchanged', applied: [], conflicts: [] }
 
