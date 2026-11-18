@@ -149,8 +149,8 @@ export async function inspectLock(layout: DataLayout, deps: LockDeps = {}): Prom
 }
 
 export class InstanceLock {
-  /** Set by `release()` before the descriptor is closed; see `publish()`. */
-  private released = false
+  private publication = Promise.resolve()
+  private releasing?: Promise<void>
 
   private constructor(
     private readonly handle: FileHandle,
@@ -232,20 +232,30 @@ export class InstanceLock {
   /**
    * Announce the bound control listener. Until this lands, clients see `state: "starting"`.
    *
-   * A shutdown that arrives while startup is still finishing releases the lock first, closing its
-   * descriptor; startup then reaches this call on the way out. A released lock has no record to
-   * announce — its file is gone and may already belong to a new owner — so the write is skipped
-   * instead of throwing `EBADF` on the closed descriptor and turning a clean stop into a crash.
+   * Stop accepting writes once shutdown starts. A write already accepted must finish before its
+   * descriptor closes, including the gap between truncating and rewriting the record.
    */
   async publish(controlHost: string, controlPort: number): Promise<void> {
-    if (this.released) return
-    this.current = { ...this.current, control_host: controlHost, control_port: controlPort, state: 'ready' }
-    await writeRecord(this.handle, this.current)
+    if (this.releasing) return
+    const record: LockRecord = {
+      ...this.current,
+      control_host: controlHost,
+      control_port: controlPort,
+      state: 'ready',
+    }
+    this.current = record
+    const pending = this.publication.then(() => writeRecord(this.handle, record))
+    this.publication = pending.catch(() => {})
+    await pending
   }
 
   /** Release only what is still ours: a lock taken over by someone else is left alone. */
-  async release(): Promise<void> {
-    this.released = true
+  release(): Promise<void> {
+    return (this.releasing ??= this.close())
+  }
+
+  private async close(): Promise<void> {
+    await this.publication
     await this.handle.close().catch(() => {})
     const onDisk = await readLockRecord(this.path, this.deps).catch(() => undefined)
     if (onDisk && onDisk !== 'corrupt' && onDisk.instance_id !== this.current.instance_id) return

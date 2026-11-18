@@ -13,15 +13,14 @@ title: "Publishing a released instance lock writes nothing"
   throws `EBADF` ("file closed"), the throw escapes `createAtomicCore`, and the daemon reports a
   fatal `core startup: unknown` instead of finishing its intended clean stop. `EBADF` is not a
   reportable code, so telemetry could not name the cause either.
-- **Decision:** `release()` marks the lock released before closing the descriptor, and `publish()`
-  returns without writing when that flag is set. A released lock has no record to announce: its file
-  is gone and may already belong to a new owner.
+- **Decision:** Serialize publications on the open descriptor. `release()` stops accepting new
+  publications and waits for the accepted writes to settle before closing and removing the lock.
+  Concurrent releases share one close operation.
 - **Consequences:** A mid-startup retire becomes the clean stop it was meant to be, on every host,
   instead of a fatal startup error. Acquire stays unchanged and a lock that was never released keeps
-  publishing as before. The flag is set before `close()`, so a publish already in flight is the only
-  remaining window, and it is no wider than the pre-existing ordering between the two calls. Callers
-  can no longer detect a released lock from a throwing `publish()`; they never did, since the error
-  was a bare `EBADF`.
+  publishing as before. Shutdown waits for the local record write, so it cannot close the descriptor
+  between the write's truncate and write calls. A real write failure still reaches the caller that
+  requested the publication, and release still closes the descriptor.
 - **Owner:** team
 - **Links:** `src/lock/instance-lock.ts`, `src/lock/instance-lock-publish.test.ts`,
   `src/core/create.ts`, `src/core/app-lease.ts`, `src/core/app-daemon.ts`

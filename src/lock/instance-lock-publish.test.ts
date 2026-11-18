@@ -27,4 +27,16 @@ describe('InstanceLock.publish after release', () => {
     expect(await inspectLock(data.layout)).toMatchObject({ kind: 'owned', record: { state: 'ready' } })
     await lock.release()
   })
+
+  it('finishes an accepted publication before shutdown can close its descriptor', async () => {
+    const lock = await InstanceLock.acquire(data.layout)
+    const publishing = lock.publish('127.0.0.1', 42_424)
+    const releasing = lock.release()
+    await expect(Promise.all([publishing, releasing, lock.release()])).resolves.toEqual([
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(await inspectLock(data.layout)).toEqual({ kind: 'free' })
+  })
 })
