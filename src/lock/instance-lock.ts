@@ -149,6 +149,9 @@ export async function inspectLock(layout: DataLayout, deps: LockDeps = {}): Prom
 }
 
 export class InstanceLock {
+  private publication = Promise.resolve()
+  private releasing?: Promise<void>
+
   private constructor(
     private readonly handle: FileHandle,
     private readonly path: string,
@@ -226,14 +229,33 @@ export class InstanceLock {
     )
   }
 
-  /** Announce the bound control listener. Until this lands, clients see `state: "starting"`. */
+  /**
+   * Announce the bound control listener. Until this lands, clients see `state: "starting"`.
+   *
+   * Stop accepting writes once shutdown starts. A write already accepted must finish before its
+   * descriptor closes, including the gap between truncating and rewriting the record.
+   */
   async publish(controlHost: string, controlPort: number): Promise<void> {
-    this.current = { ...this.current, control_host: controlHost, control_port: controlPort, state: 'ready' }
-    await writeRecord(this.handle, this.current)
+    if (this.releasing) return
+    const record: LockRecord = {
+      ...this.current,
+      control_host: controlHost,
+      control_port: controlPort,
+      state: 'ready',
+    }
+    this.current = record
+    const pending = this.publication.then(() => writeRecord(this.handle, record))
+    this.publication = pending.catch(() => {})
+    await pending
   }
 
   /** Release only what is still ours: a lock taken over by someone else is left alone. */
-  async release(): Promise<void> {
+  release(): Promise<void> {
+    return (this.releasing ??= this.close())
+  }
+
+  private async close(): Promise<void> {
+    await this.publication
     await this.handle.close().catch(() => {})
     const onDisk = await readLockRecord(this.path, this.deps).catch(() => undefined)
     if (onDisk && onDisk !== 'corrupt' && onDisk.instance_id !== this.current.instance_id) return

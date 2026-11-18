@@ -263,6 +263,7 @@ add a new one that says which record it supersedes.
 - [Keep the stream failure that ended a download retry ladder](2026-11-16-downloads-keep-the-stream-failure-that-ended-a-retry-ladder.md)
 - [Refuse to replace a backend pack a session runs from](2026-11-12-refuse-replacing-in-use-backend-pack.md)
 - [Browser stack frames keep their served asset path](2026-11-12-keep-browser-asset-paths-in-stack-frames.md)
+- [Publishing a released instance lock writes nothing](2026-11-17-publishing-a-released-instance-lock-writes-nothing.md)
 - [An audio shutdown refusal is not an engine crash](2026-11-12-audio-shutdown-refusal-is-not-a-crash.md)
 - [Check MLX builds with the engine candidate workflow](2026-11-12-check-mlx-builds-with-the-engine-candidate.md) — `engine=mlx`: the fork's `vX.Y.Z`, conf's `mlxvlm-macos-arm64-<rev>` mirror; everything on macos-15, watched folders, folder live models
 - [Spell the sd.cpp argv for the installed build](2026-11-13-spell-the-sd-cpp-argv-for-the-installed-build.md) — `--backend te=cpu,vae=cpu` and `--llm` everywhere; `--flash-attn`/`--conv-direct` from build 982, the deprecated pair before; no `-M`
