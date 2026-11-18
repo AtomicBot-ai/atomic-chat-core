@@ -40,6 +40,8 @@ export const FAILURE_OPERATION_DETAILS = [
   'mlx_explicit_binary_missing',
   'mlx_resolved_binary_missing',
   'mlx_resources_binary_missing',
+  'foundry_local_library_not_loaded',
+  'foundry_local_host_stopped_before_ready',
 ] as const
 export const FAILURE_REASONS = [
   'cancelled',

@@ -2,6 +2,7 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { classifyFailure, diagnosticTags } from '../../telemetry/index.js'
 import { foundryHostCommand, runFoundryHostProbe } from './host-process.js'
 
 const POSIX = process.platform !== 'win32'
@@ -58,11 +59,17 @@ describe.skipIf(!POSIX)('runFoundryHostProbe', () => {
 
   it('fails when the host prints no probe answer', async () => {
     const exe = await fakeHost(`echo 'not json'`)
-    await expect(
-      runFoundryHostProbe({ exe, args: [] }, { libDir: '/l', appDataDir: '/a', logsDir: '/g' })
-    ).rejects.toMatchObject({
+    const error: unknown = await runFoundryHostProbe(
+      { exe, args: [] },
+      { libDir: '/l', appDataDir: '/a', logsDir: '/g' }
+    ).catch((cause: unknown) => cause)
+    expect(error).toMatchObject({
       code: 'ENGINE_INSTALL_FAILED',
+      message: 'The Foundry Local library does not load on this computer.',
     })
+    const tags = diagnosticTags(error, classifyFailure(error, { component: 'backend', operation: 'install' }))
+    expect(tags).not.toHaveProperty('operation_detail')
+    expect(tags).not.toHaveProperty('diagnostic_code')
   })
 
   it('stops a host that does not answer in time', async () => {
