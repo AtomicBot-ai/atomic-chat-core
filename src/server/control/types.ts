@@ -1,3 +1,4 @@
+import type { StrataMaintenanceService, StrataPreparationService } from '../../runtime/strata/index.js'
 import type { FlmMaintenance } from '../../runtime/fastflowlm/index.js'
 import type { PreparationCoordinator } from '../../runtime/fastflowlm/environment/index.js'
 /**
@@ -476,6 +477,10 @@ export interface ModelCompatibilityControl {
 }
 
 export interface ControlServerDeps {
+  strata?: {
+    preparations: Pick<StrataPreparationService, 'store' | 'list' | 'get' | 'begin' | 'cancel' | 'resume'>
+    maintenance: Pick<StrataMaintenanceService, 'list' | 'get' | 'begin' | 'complete'>
+  }
   /** Running downloads' last progress, for the snapshot (`Downloader.snapshot`); absent is none. */
   downloads?: () => DownloadProgress[]
   /** Absent in a build with no managed runtime wired; its routes then answer that it is not there. */
@@ -626,6 +631,8 @@ export interface ControlSnapshot {
   /** The managed container runtimes this user has, and the changes in flight on them. */
   environments: EnvironmentSnapshot[]
   environment_operations: EnvironmentOperation[]
+  strata_preparations?: ReturnType<StrataPreparationService['list']>
+  strata_maintenance?: ReturnType<StrataMaintenanceService['list']>
 }
 
 /**

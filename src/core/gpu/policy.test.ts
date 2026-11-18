@@ -160,6 +160,20 @@ describe('gpuEvictions: one resident model per card (spec gpu-residency)', () =>
     expect(ids(gpuEvictions(req, [trtOn1]))).toEqual(['tensorrt-llm/qwen3'])
   })
 
+  it('replaces the previous Strata model on the selected card only', () => {
+    const req = request({
+      provider: 'strata',
+      model_id: 'qwen36',
+      cards: [GPU0],
+      exclusiveCardsOfProvider: true,
+    })
+    const occupants = [
+      occupant({ provider: 'strata', model_id: 'qwen38', cards: [GPU0] }),
+      occupant({ provider: 'strata', model_id: 'qwen38-other', cards: [GPU1] }),
+    ]
+    expect(ids(gpuEvictions(req, occupants))).toEqual(['strata/qwen38'])
+  })
+
   it('never lists the model being loaded itself, even on another provider-wide sweep', () => {
     const req = request({
       provider: 'tensorrt-llm',

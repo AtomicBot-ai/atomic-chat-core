@@ -166,3 +166,11 @@ describe('/models', () => {
     })
   })
 })
+
+it('lists a loaded Strata model with its own provider', async () => {
+  const server = await startPublic({
+    sessions: [localSession(1, { modelId: 'strata-model', provider: 'strata' })],
+  })
+  const response = await fetch('http://127.0.0.1:' + server.port + '/v1/models')
+  expect(await response.json()).toMatchObject({ data: [{ id: 'strata-model', owned_by: 'strata' }] })
+})

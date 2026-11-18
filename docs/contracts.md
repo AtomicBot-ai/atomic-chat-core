@@ -351,3 +351,44 @@ GPU records may include `shared_memory` in MiB: the measured amdgpu GTT capacity
 ### FastFlowLM manual driver guidance
 
 `POST /runtimes/fastflowlm/probe` may return `driver_setup: { title, steps, commands, links: [{ label, url }] }`. This is optional display-only guidance selected from the server OS and hardware, not the client platform. Commands are never host-step parameters and must not be executed automatically. New driver preparation remains blocked and does not fetch or select driver recipes; memory-only preparation still returns `action-required`. An already pinned legacy operation retains its recovery protocol. After manual setup, clients call probe again and use its measured readiness.
+
+## Strata additive control contract
+
+Change `add-strata-runtime` separates acquisition metadata (`model.yml.strata`:
+`{schema_version: 1, source_digest, descriptor}`) from core-owned preparation
+readiness. Descriptors are the complete pinned family records in the optional
+`strata-models` catalog collection. An absent collection is an empty shelf.
+`source_digest` is the lowercase SHA-256 of UTF-8 JSON of the complete descriptor,
+with recursively sorted object keys, preserved array order, and no whitespace
+or trailing newline. `strataCanonicalDescriptor` and `strataSourceDigest` provide
+the shared client implementation. It is not a readiness marker.
+
+- `POST /atomic/v1/models/strata/check`: `{descriptor}` or `{model_id}`; returns
+  verdict/reason, requirements, capabilities, preparation status, separate disk
+  and RAM/VRAM/unified-memory estimates, compatible devices and evidence.
+- `POST /atomic/v1/strata/preparations`: `{request_id, model_id, source_digest,
+  maintenance_id?}`; `202` with the operation. List/get use `GET` at the same
+  root and `/:id`; cancel/resume use `POST /:id/{cancel,resume}` with `{}`.
+- `strata:preparation-changed`: full operation with `operation_id`, request/model
+  identity, monotonically increasing revision, state/stage and nullable error.
+  Measured byte progress is optional; absence means no measured percentage.
+- `POST /atomic/v1/models/strata/maintenance`: request/model identity and
+  `action: replace|remove`; replacement also requires `target_source_digest`.
+  List/get use `GET` at that root and `/:id`; complete uses `POST /:id/complete`
+  with `{}`. Complete verifies the resulting installation rather than accepting
+  a client-supplied success flag.
+
+Sources live under `<data>/strata/models/`, builds under
+`<data>/strata/backends/<release>/<variant>/`, derivative artifacts under
+`<data>/strata/prepared/<model-key>/<source-digest>/<preparation-abi>/<backend>/`,
+and operation/maintenance records under `<data>/atomic-core/strata/`.
+Preparation operations do not enter `snapshot.downloads` or `model_setups`.
+The contracts/client/models npm entry points are additive.
+
+Strata exposes Chat Completions and model metadata on a session gateway. The
+gateway uses a separate key from the upstream Control server. The core checks
+the Control owner, HTTP instance and loaded model before publishing a session.
+A scoped process journal retains GPU and build ownership until the owner and
+its descendants are confirmed gone. Process-ledger recovery requires the
+bundled Atomic owner contract version 3. Hardware and live qualification
+remain tracked in OpenSpec.

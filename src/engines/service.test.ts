@@ -5,7 +5,7 @@ import { EnginesService, hostEngines } from './service.js'
 import type { EngineHandle } from './service.js'
 
 describe('hostEngines', () => {
-  it('lists the llama.cpp providers, sd.cpp, audio.cpp and MLX on macOS, and no managed engine', () => {
+  it('lists the llama.cpp providers, sd.cpp, audio.cpp, MLX and Strata on macOS, and no managed engine', () => {
     expect(hostEngines('darwin', [])).toEqual([
       'llamacpp-upstream',
       'llamacpp',
@@ -13,6 +13,7 @@ describe('hostEngines', () => {
       'sd-cpp',
       'audio-cpp',
       'mlx',
+      'strata',
     ])
   })
 
@@ -31,6 +32,7 @@ describe('hostEngines', () => {
       'atomic-prism',
       'sd-cpp',
       'audio-cpp',
+      'strata',
     ])
     expect(hostEngines('linux', ['vllm', 'tensorrt-llm'])).toEqual([
       'llamacpp-upstream',
@@ -38,6 +40,7 @@ describe('hostEngines', () => {
       'atomic-prism',
       'sd-cpp',
       'audio-cpp',
+      'strata',
       'tensorrt-llm',
       'vllm',
     ])
@@ -59,9 +62,10 @@ describe('hostEngines', () => {
   })
 
   it('lists litert-lm after foundry-local only where its platform rule holds', () => {
-    expect(hostEngines('darwin', [], { foundryLocal: true, liteRtLm: true }).slice(-2)).toEqual([
+    expect(hostEngines('darwin', [], { foundryLocal: true, liteRtLm: true }).slice(-3)).toEqual([
       'foundry-local',
       'litert-lm',
+      'strata',
     ])
     expect(hostEngines('linux', ['vllm'], { liteRtLm: true })).toEqual([
       'llamacpp-upstream',
@@ -70,6 +74,7 @@ describe('hostEngines', () => {
       'sd-cpp',
       'audio-cpp',
       'litert-lm',
+      'strata',
       'vllm',
     ])
     expect(hostEngines('win32', [], { liteRtLm: false })).not.toContain('litert-lm')
@@ -78,9 +83,10 @@ describe('hostEngines', () => {
   })
 
   it('lists geniex after litert-lm only on a Snapdragon X host (change add-geniex-runtime, task 4.5)', () => {
-    expect(hostEngines('win32', [], { liteRtLm: true, geniex: true }).slice(-2)).toEqual([
+    expect(hostEngines('win32', [], { liteRtLm: true, geniex: true }).slice(-3)).toEqual([
       'litert-lm',
       'geniex',
+      'strata',
     ])
     expect(hostEngines('win32', [], { geniex: true })).toEqual([
       'llamacpp-upstream',
@@ -89,6 +95,7 @@ describe('hostEngines', () => {
       'sd-cpp',
       'audio-cpp',
       'geniex',
+      'strata',
     ])
     expect(hostEngines('win32', [], { geniex: false })).not.toContain('geniex')
     expect(hostEngines('win32', [])).not.toContain('geniex')

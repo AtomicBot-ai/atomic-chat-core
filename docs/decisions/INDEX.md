@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [2026-11-17 — Select Strata releases by host compatibility](2026-11-17-select-strata-releases-by-host-compatibility.md)
+
 - [2026-11-17 — Export agent integrations for embedding hosts](2026-11-17-export-agent-integrations.md)
 
 - [2026-11-13 — Replay fragmented and partial tool turns through Foundry](2026-11-13-replay-fragmented-foundry-tool-turns.md)
@@ -260,3 +262,12 @@ add a new one that says which record it supersedes.
 - [An audio shutdown refusal is not an engine crash](2026-11-12-audio-shutdown-refusal-is-not-a-crash.md)
 - [Check MLX builds with the engine candidate workflow](2026-11-12-check-mlx-builds-with-the-engine-candidate.md) — `engine=mlx`: the fork's `vX.Y.Z`, conf's `mlxvlm-macos-arm64-<rev>` mirror; everything on macos-15, watched folders, folder live models
 - [Spell the sd.cpp argv for the installed build](2026-11-13-spell-the-sd-cpp-argv-for-the-installed-build.md) — `--backend te=cpu,vae=cpu` and `--llm` everywhere; `--flash-attn`/`--conv-direct` from build 982, the deprecated pair before; no `-M`
+
+- [2026-11-16 — Support the Strata CUDA catalog](2026-11-16-support-the-strata-cuda-catalog.md)
+- [2026-11-16 — Expand the Strata Qwen3.8 quantization allowlist](2026-11-16-expand-the-strata-qwen38-quantization-allowlist.md)
+- [2026-11-14 — Separate Strata acquisition, preparation and session ownership](2026-11-14-add-strata-contracts-and-isolated-runtime-bundles.md)
+- [2026-11-16 — Fit Strata Qwen3.6 Auto to CUDA memory](2026-11-16-fit-strata-qwen36-auto-to-cuda-memory.md)
+- [2026-11-16 — Estimate host memory for the Strata Qwen3.6 CUDA Q4 profile](2026-11-16-estimate-strata-qwen36-cuda-host-memory.md)
+- [2026-11-16 — Treat the Strata CUDA Qwen3.6 Auto RAM estimate as launch advice](2026-11-16-strata-qwen36-cuda-auto-ram-advice.md)
+- [2026-11-17 — Launch Windows Strata converters outside the staging directory](2026-11-17-launch-windows-strata-converters-outside-staging.md)
+- [2026-11-16 — Report confirmed Strata startup VRAM exhaustion](2026-11-16-report-strata-startup-vram-exhaustion.md)
