@@ -52,13 +52,24 @@
     { "flag": "--t5xxl", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--llm", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--llm_vision", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "--qwen2vl", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "--clip-on-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "--vae-on-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--vae-tiling", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--offload-to-cpu", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "--diffusion-fa", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "--diffusion-conv-direct", "severity": "break", "source": "src/diffusion/args.ts" },
+    {
+      "flag": "--diffusion-fa",
+      "severity": "break",
+      "source": "src/diffusion/args.ts",
+      "below_build": 982,
+      "note": "Builds before --flash-attn; from 982 on it is a deprecated spelling of --flash-attn off,diffusion=on."
+    },
+    {
+      "flag": "--diffusion-conv-direct",
+      "severity": "break",
+      "source": "src/diffusion/args.ts",
+      "below_build": 982,
+      "note": "Builds before --conv-direct; from 982 on it is deprecated for --conv-direct auto,diffusion=on,controlnet=on."
+    },
+    { "flag": "--flash-attn", "severity": "break", "source": "src/diffusion/args.ts", "from_build": 982 },
+    { "flag": "--conv-direct", "severity": "break", "source": "src/diffusion/args.ts", "from_build": 982 },
     { "flag": "--listen-ip", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--listen-port", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--lora-model-dir", "severity": "break", "source": "src/diffusion/args.ts" },
@@ -67,13 +78,7 @@
     { "flag": "--threads", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--backend", "severity": "break", "source": "src/diffusion/args.ts" },
     { "flag": "--verbose", "severity": "break", "source": "src/diffusion/args.ts" },
-    { "flag": "-v", "severity": "break", "source": "src/diffusion/args.ts" },
-    {
-      "flag": "-M",
-      "severity": "warn",
-      "source": "src/diffusion/args.ts",
-      "note": "Emitted only under ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG, until a live run shows sd-server wants it; sd-cli has it."
-    }
+    { "flag": "-v", "severity": "break", "source": "src/diffusion/args.ts" }
   ],
   "strings": [
     {

@@ -7,7 +7,7 @@
  *
  * Driven by argv plus env:
  *   FAKE_SD_MODE        ready | hang | exit-early | foreign | queue-full | fail-job | die-mid-job |
- *                       ggml-abort (recovers when `--backend cpu` is in the argv) |
+ *                       ggml-abort (recovers when a `--backend` makes the CPU the default device) |
  *                       gpu-fault (a Metal address fault in the job's own output, then the job fails;
  *                       the process stays up, as the real one does)
  *   FAKE_SD_ONCE_MARKER path; the mode applies only to the first process that creates the file, every
@@ -94,7 +94,13 @@ const modes = (env.FAKE_SD_MODES ?? 'img_gen')
   .map((m) => m.trim())
   .filter(Boolean)
 const vidFormats = env.FAKE_SD_VID_FORMATS ?? 'all'
-const onCpu = argv.includes('--backend') && argv[argv.indexOf('--backend') + 1] === 'cpu'
+// sd.cpp joins repeated `--backend` values with commas; an entry without `=` is the default device,
+// so `--backend te=cpu ... --backend cpu` runs everything on the CPU.
+const backendEntries = argv
+  .flatMap((arg, i) => (arg === '--backend' && i + 1 < argv.length ? [argv[i + 1]] : []))
+  .join(',')
+  .split(',')
+const onCpu = backendEntries.some((entry) => entry.trim().toLowerCase() === 'cpu')
 const effectiveMode = mode === 'ggml-abort' && onCpu ? 'ready' : mode
 
 // ── the loader, as sd.cpp prints it with -v ───────────────────────────────────

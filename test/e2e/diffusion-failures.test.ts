@@ -113,7 +113,10 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('an image engi
     const { ready, pid } = await sd.loadedOwner(ctx, {
       env: { FAKE_SD_MODE: 'ggml-abort', FAKE_SD_ARGV_FILE: argvFile },
     })
-    expect(sd.sdArgv(argvFile)).not.toContain('--backend')
+    // The device process: only the CPU modules on macOS (the text encoder off Metal), no bare `cpu`.
+    const backends = (argv: string[]) => argv.flatMap((a, i) => (a === '--backend' ? [argv[i + 1]] : []))
+    const moduleBackends = process.platform === 'darwin' ? ['te=cpu'] : []
+    expect(backends(sd.sdArgv(argvFile))).toEqual(moduleBackends)
     const events = await sd.collectEvents(ctx, ready)
     const job = await sd.runJob(ctx, ready)
     expect(job.state).toBe('completed')
@@ -127,6 +130,8 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')('an image engi
     expect(alive(pid)).toBe(false)
     const argv = sd.sdArgv(argvFile)
     expect(argv.slice(-2)).toEqual(['--backend', 'cpu'])
+    // sd.cpp joins them: the module entries stay, the bare `cpu` is the default for everything else.
+    expect(backends(argv)).toEqual([...moduleBackends, 'cpu'])
     const status = await sd.sdStatus(ctx, ready)
     expect(status.model.state).toBe('loaded')
     expect(status.model.loaded).toMatchObject({ pid: pids[1], cpuFallback: true })

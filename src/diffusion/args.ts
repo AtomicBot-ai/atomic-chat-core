@@ -3,18 +3,18 @@
  * tested without a binary or a model file. Port of `args.rs` in `tauri-plugin-atomic-diffusion` (app
  * commit `ec1fd3ea7`, and the host switch of `process.rs`), itself a port of Studio's `sd_cpp_args.py`.
  *
- * Every flag emitted here is listed in `test/fixtures/sdcpp/required-flags.txt`, which the live test
- * holds against the pinned binary's `--help`.
+ * Every flag emitted here is in `test/fixtures/sdcpp/engine-contract.json` with the builds that get it
+ * (and in `required-flags.txt`); the live test holds the binary's `--help` to the flags of its build.
  */
 
 import type {
   DiffusionBackend,
   DiffusionFamilyDefaults,
-  DiffusionModality,
   DiffusionOffloadPolicy,
   ImageGenerateRequest,
   VideoGenerateRequest,
 } from '../contracts/index.js'
+import { sdcppBuildOf } from './compat.js'
 import type { ResolvedInputs, ServerSpec } from './types.js'
 import { decodeTilingParams } from './video-tiling.js'
 import type { VideoDecodeTiling } from './video-tiling.js'
@@ -24,11 +24,12 @@ import { defaultStrength, usesInitImage, usesMask, usesReferences, workflowOf } 
 export const METAL_TE_GPU_ENV = 'ATOMIC_DIFFUSION_METAL_TE_GPU'
 
 /**
- * Opt-in for `-M vid_gen` on a video load. `sd-server` infers its modes from the model, and the flag
- * is documented for `sd-cli`; it is emitted only when this is `1`/`true`/`yes`/`on`, until the live
- * test has shown whether the server wants it.
+ * The first build with `--flash-attn` and `--conv-direct` (leejet/stable-diffusion.cpp#2134 and the
+ * per-module flash attention next to it, both 2026-10-13). From it on `--diffusion-fa` and
+ * `--diffusion-conv-direct` are deprecated spellings of what {@link speedFlags} passes; the builds
+ * before it know only those, and conf served two of them (849 and 883), which stay installed.
  */
-export const VID_GEN_MODE_FLAG_ENV = 'ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG'
+export const MODULE_ASSIGNMENT_FLAGS_BUILD = 982
 
 const truthy = (value: string | undefined): boolean =>
   ['1', 'true', 'yes', 'on'].includes((value ?? '').trim().toLowerCase())
@@ -39,23 +40,47 @@ export interface ArgsHost {
   env: Record<string, string | undefined>
 }
 
-function dedup(flags: readonly string[]): string[] {
-  return [...new Set(flags)]
-}
+/** A module this core moves to the CPU backend: the text encoders (`te`) or the VAE. */
+export type CpuModule = 'te' | 'vae'
 
 /**
- * The memory policy as sd.cpp offload flags. `group` streams the model (`--offload-to-cpu`) with
- * flash attention; `model` also puts CLIP and the VAE on the CPU and tiles the VAE.
+ * The memory policy as sd.cpp flags. `group` streams the weights from RAM (`--offload-to-cpu`);
+ * `model` also tiles the VAE, and {@link offloadCpuModules} runs the text encoder and the VAE on the
+ * CPU. Flash attention, which both used to add, comes from {@link speedFlags} under every policy.
  */
 export function offloadFlags(policy: DiffusionOffloadPolicy): string[] {
-  if (policy === 'group') return ['--offload-to-cpu', '--diffusion-fa']
-  if (policy === 'model')
-    return ['--offload-to-cpu', '--clip-on-cpu', '--vae-on-cpu', '--diffusion-fa', '--vae-tiling']
+  if (policy === 'group') return ['--offload-to-cpu']
+  if (policy === 'model') return ['--offload-to-cpu', '--vae-tiling']
   return []
 }
 
-/** Numerically exact speed-ups: flash attention, and direct convolution in the diffusion model. */
-export function speedFlags(): string[] {
+/** The modules `policy` runs on the CPU backend: the text encoder and the VAE under `model`. */
+export function offloadCpuModules(policy: DiffusionOffloadPolicy): CpuModule[] {
+  return policy === 'model' ? ['te', 'vae'] : []
+}
+
+/**
+ * `modules` on the CPU backend as one `--backend te=cpu,vae=cpu`. `--clip-on-cpu` and `--vae-on-cpu`,
+ * deprecated for this spelling, did nothing but prepend the same entries to `--backend` on every build
+ * conf has served (849 on). sd.cpp joins a repeated `--backend` with commas and a module's own entry
+ * beats the bare default, so the CPU recovery's `--backend cpu`, appended later, still moves the rest.
+ */
+export function cpuBackendFlags(modules: readonly CpuModule[]): string[] {
+  const wanted = new Set(modules)
+  const entries = (['te', 'vae'] as const).filter((m) => wanted.has(m)).map((m) => `${m}=cpu`)
+  return entries.length === 0 ? [] : ['--backend', entries.join(',')]
+}
+
+/**
+ * Numerically exact speed-ups: flash attention in the diffusion model only, direct convolution in the
+ * diffusion model and ControlNet. From {@link MODULE_ASSIGNMENT_FLAGS_BUILD} on they are the module
+ * assignments `--diffusion-fa` and `--diffusion-conv-direct` are deprecated for (the flash-attention
+ * one is byte for byte what `--diffusion-fa` sets); older builds, and a tag that names no build, get
+ * the old two flags.
+ */
+export function speedFlags(build: number | undefined): string[] {
+  if (build !== undefined && build >= MODULE_ASSIGNMENT_FLAGS_BUILD)
+    return ['--flash-attn', 'off,diffusion=on', '--conv-direct', 'auto,diffusion=on,controlnet=on']
   return ['--diffusion-fa', '--diffusion-conv-direct']
 }
 
@@ -65,14 +90,9 @@ export function speedFlags(): string[] {
  * FLUX.2, T5 for FLUX.1) takes the whole server down on the first prompt. The encoder runs once per
  * prompt and the denoiser every step, so pinning only the encoder keeps Metal where it matters.
  */
-export function metalTextEncoderFlags(isMacos: boolean, envOverride: string | undefined): string[] {
+export function metalTextEncoderCpuModules(isMacos: boolean, envOverride: string | undefined): CpuModule[] {
   if (!isMacos) return []
-  return truthy(envOverride) ? [] : ['--clip-on-cpu']
-}
-
-/** `-M vid_gen` for a video model, only while the environment opts in. */
-export function videoModeFlags(modality: DiffusionModality, envOverride: string | undefined): string[] {
-  return modality === 'video' && truthy(envOverride) ? ['-M', 'vid_gen'] : []
+  return truthy(envOverride) ? [] : ['te']
 }
 
 /** An Apple M5 CPU brand string: `Apple M5`, `Apple M5 Max`. */
@@ -149,8 +169,9 @@ export function isGgmlUnsupportedOpAbort(text: string): boolean {
 
 /**
  * The `sd-server` argv, without the binary. Model files first, then the listener, the scratch
- * directories sd-server insists on iterating, threads, the hardware flags (de-duplicated, stable
- * order), `-v` so the per-step sampling lines are printed, and the caller's `extraArgs` last.
+ * directories sd-server insists on iterating, threads, the hardware flags (each once, stable order,
+ * spelled for the build `spec.tag` names), `-v` so the per-step sampling lines are printed, and the
+ * caller's `extraArgs` last. No mode flag: sd-server takes its modes from the model, and `-M` is sd-cli's.
  */
 export function buildServerArgs(
   spec: ServerSpec,
@@ -160,15 +181,16 @@ export function buildServerArgs(
 ): string[] {
   const { files } = spec
   const args = ['--diffusion-model', files.diffusionModel]
+  // `--qwen2vl` is a deprecated alias of `--llm`: one slot, the last flag wins. Qwen-Image's
+  // Qwen2.5-VL encoder goes in as `--llm`, and a spec naming both still gets its `qwen2vl` file.
   const optional: Array<[string, string | undefined]> = [
     ['--vae', files.vae],
     ['--audio-vae', files.audioVae],
     ['--embeddings-connectors', files.embeddingsConnectors],
     ['--clip_l', files.clipL],
     ['--t5xxl', files.t5xxl],
-    ['--llm', files.llm],
+    ['--llm', files.qwen2vl || files.llm],
     ['--llm_vision', files.llmVision],
-    ['--qwen2vl', files.qwen2vl],
   ]
   for (const [flag, value] of optional) if (value) args.push(flag, value)
   if (files.vaeFormat) args.push('--vae-format', files.vaeFormat)
@@ -176,13 +198,13 @@ export function buildServerArgs(
   for (const flag of ['--lora-model-dir', '--hires-upscalers-dir', '--embd-dir']) args.push(flag, scratchDir)
   if (spec.threads !== undefined) args.push('--threads', String(spec.threads))
   args.push(
-    ...dedup([
-      ...offloadFlags(spec.offload),
-      ...speedFlags(),
-      ...metalTextEncoderFlags(host.platform === 'darwin', host.env[METAL_TE_GPU_ENV]),
-    ])
+    ...offloadFlags(spec.offload),
+    ...cpuBackendFlags([
+      ...offloadCpuModules(spec.offload),
+      ...metalTextEncoderCpuModules(host.platform === 'darwin', host.env[METAL_TE_GPU_ENV]),
+    ]),
+    ...speedFlags(sdcppBuildOf(spec.tag))
   )
-  args.push(...videoModeFlags(spec.modality, host.env[VID_GEN_MODE_FLAG_ENV]))
   args.push('-v', ...spec.extraArgs)
   return args
 }
@@ -342,20 +364,25 @@ export function buildVidGenRequest(
   return body
 }
 
-function lastOptionValue(args: readonly string[], option: string): string | undefined {
-  let value: string | undefined
+function optionValues(args: readonly string[], option: string): string[] {
+  const values: string[] = []
   let i = 0
   while (i < args.length) {
     const arg = args[i] as string
     if (arg === option) {
-      value = args[i + 1] ?? value
+      const value = args[i + 1]
+      if (value !== undefined) values.push(value)
       i += 2
       continue
     }
-    if (arg.startsWith(`${option}=`)) value = arg.slice(option.length + 1)
+    if (arg.startsWith(`${option}=`)) values.push(arg.slice(option.length + 1))
     i += 1
   }
-  return value
+  return values
+}
+
+function lastOptionValue(args: readonly string[], option: string): string | undefined {
+  return optionValues(args, option).at(-1)
 }
 
 function compact(value: string, limit: number): string {
@@ -385,7 +412,8 @@ export function commandSummaryForLog(args: readonly string[]): string {
     const value = lastOptionValue(args, option)
     if (value !== undefined) fields.push(`${label}=${compact(value, 16)}`)
   }
-  const backend = lastOptionValue(args, '--backend')
-  if (backend !== undefined) fields.push(`backend=${compact(backend, 32)}`)
+  // sd.cpp joins a repeated `--backend` with commas: the CPU modules', then the recovery's `cpu`.
+  const backends = optionValues(args, '--backend')
+  if (backends.length > 0) fields.push(`backend=${compact(backends.join(','), 32)}`)
   return fields.join(' ')
 }

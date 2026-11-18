@@ -75,7 +75,8 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   await runtime.shutdown()
-  await rm(root, { recursive: true, force: true })
+  // Windows keeps a stopped child's files locked for a moment (EPERM on rmdir): retried.
+  await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 })
 async function load(modelId = id, overrides: Record<string, unknown> = {}) {
   const pending = runtime.load(modelId, { timeoutSecs: 10, overrides })

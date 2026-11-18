@@ -99,7 +99,11 @@ describe.skipIf(!posix)('spawnServer', () => {
     expect(tail).toContain('  |####      | 40/100 - 637.50MB/s')
     expect(tail).toContain('  |##########| 100/100 - 637.50MB/s')
     expect(tail.at(-1)).toBe(`[INFO   ] server.cpp:100 - listening on 127.0.0.1:${handle.port}`)
-    expect(log[0]).toMatch(/^info: starting sd-server: model=z-image-turbo-Q4_K_M.gguf port=\d+$/)
+    // On macOS the text encoder is pinned to the CPU, and the summary says so.
+    const pinned = process.platform === 'darwin' ? ' backend=te=cpu' : ''
+    expect(log[0]).toMatch(
+      new RegExp(`^info: starting sd-server: model=z-image-turbo-Q4_K_M.gguf port=\\d+${pinned}$`)
+    )
 
     // A listener gets what the server prints from then on.
     handle.setLineListener((line) => seen.push(line))

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { makeTmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import type { TmpDataFolder } from '../../test/helpers/tmp-data-folder.js'
 import { AtomicCore } from '../core/index.js'
@@ -15,6 +16,25 @@ afterEach(async () => {
   await Promise.all(cores.splice(0).map((c) => c.shutdown()))
   await data.cleanup()
 })
+
+const alive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function until<T>(probe: () => Promise<T | undefined>, timeoutMs = 5_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = await probe()
+    if (value !== undefined) return value
+    if (Date.now() > deadline) throw new Error('timed out')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 
 async function runningCore(): Promise<AtomicCore> {
   const core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0 })
@@ -233,19 +253,36 @@ describe('attachToOwner', () => {
 
   it('attaches to the winning owner when its own launcher exits after losing the race', async () => {
     const core = await runningCore()
-    const ready = await readFile(data.layout.core.instanceLock, 'utf8')
-    await rm(data.layout.core.instanceLock)
-    const script = `require('node:fs').writeFileSync(${JSON.stringify(
-      data.layout.core.instanceLock
-    )}, ${JSON.stringify(ready)}); process.exit(3)`
-    const owner = await attachToOwner({
+    const lock = data.layout.core.instanceLock
+    const ready = await readFile(lock, 'utf8')
+    // The winner still starts when the loser exits, so only the loser's exit can end the first wait
+    // and the launcher always takes the path that waits for the winner. With a ready record in place
+    // before the exit, either side could win that race, and the path ran on some machines only.
+    const starting = JSON.stringify({ ...(JSON.parse(ready) as Record<string, unknown>), state: 'starting' })
+    const loserPidFile = join(data.root, 'loser.pid')
+    await rm(lock)
+    const script = [
+      `const fs = require('node:fs')`,
+      `fs.writeFileSync(${JSON.stringify(lock)}, ${JSON.stringify(starting)})`,
+      `fs.writeFileSync(${JSON.stringify(loserPidFile)}, String(process.pid))`,
+      `process.exit(3)`,
+    ].join('; ')
+    const attaching = attachToOwner({
       layout: data.layout,
       clientName: 'race-loser',
       launch: true,
       selfCommand: [process.execPath, '-e', script],
-      timeoutMs: 2000,
+      timeoutMs: 5000,
     })
+    // The winner becomes ready only once the loser is gone: reaped, so its exit has been seen here.
+    const loser = await until(
+      async () => Number(await readFile(loserPidFile, 'utf8').catch(() => '')) || undefined
+    )
+    await until(async () => (alive(loser) ? undefined : true))
+    await writeFile(lock, ready)
+    const owner = await attaching
     expect(owner.record.instance_id).toBe(core.instanceId)
+    expect(owner.record.state).toBe('ready')
     expect(owner.launched).toBe(false)
   })
 

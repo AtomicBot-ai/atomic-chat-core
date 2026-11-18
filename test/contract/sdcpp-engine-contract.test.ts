@@ -9,8 +9,10 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  buildServerArgs,
   CAPABILITIES_PATH,
   classifyExit,
+  cpuBackendExtraArgs,
   cliBinaryName,
   GpuFaultWatch,
   IMG_GEN_PATH,
@@ -21,12 +23,19 @@ import {
   parseTileAnnouncement,
   probeOutputIsSdcpp,
   READY_PATH,
+  sdcppBuildOf as coreBuildOf,
   serverBinaryName,
   VID_GEN_PATH,
 } from '../../src/diffusion/index.js'
 import { diffusionBackendLadder } from '../../src/engine-builds/index.js'
 import type { DiffusionBackendSelectionInput } from '../../src/engine-builds/index.js'
-import { parseSdVersion, sdcppBackendArchives } from '../../scripts/lib/sdcpp-surface.mjs'
+import {
+  parseSdVersion,
+  sdcppBackendArchives,
+  sdcppBuildOf,
+  sdFlagsForBuild,
+} from '../../scripts/lib/sdcpp-surface.mjs'
+import { sampleSpec } from '../helpers/diffusion-fixtures.js'
 import type { SdcppContract } from '../../scripts/lib/sdcpp-surface.mjs'
 
 interface Contract {
@@ -60,13 +69,51 @@ describe('the sd.cpp engine contract: flags', () => {
     .map((line) => line.trim())
     .filter((line) => line !== '' && !line.startsWith('#'))
 
-  it('breaks on exactly the flags of required-flags.txt and their -v, and only warns about -M', () => {
+  it('breaks on exactly the flags of required-flags.txt and their -v, and warns about none', () => {
     const breaks = contract.flags.filter((f) => f.severity === 'break').map((f) => f.flag)
     expect(new Set(breaks)).toEqual(new Set([...requiredFlags, '-v']))
     expect(breaks).toHaveLength(requiredFlags.length + 1)
-    expect(contract.flags.filter((f) => f.severity !== 'break')).toEqual([
-      expect.objectContaining({ flag: '-M', severity: 'warn' }),
-    ])
+    expect(contract.flags.filter((f) => f.severity !== 'break')).toEqual([])
+  })
+
+  it('names, for each build, exactly the flags buildServerArgs spells for it', () => {
+    const everything = {
+      diffusionModel: '/m/a.gguf',
+      vae: '/m/b',
+      vaeFormat: 'flux2',
+      clipL: '/m/c',
+      t5xxl: '/m/d',
+      llm: '/m/e',
+      llmVision: '/m/g',
+      qwen2vl: '/m/f',
+      audioVae: '/m/h',
+      embeddingsConnectors: '/m/i',
+    }
+    const tags = [
+      'master-849-d04e895',
+      'master-981-0000000',
+      'master-982-0518b34',
+      'master-1088-32d516c-af0b1071',
+    ]
+    for (const tag of [...tags, 'unknown']) {
+      const emitted = new Set<string>()
+      for (const offload of ['none', 'group', 'model'] as const)
+        for (const platform of ['darwin', 'linux'] as const) {
+          const spec = sampleSpec({
+            tag,
+            files: everything,
+            offload,
+            threads: 4,
+            extraArgs: cpuBackendExtraArgs([]),
+          })
+          for (const arg of buildServerArgs(spec, 1, '/s', { platform, env: {} }))
+            if (arg.startsWith('-')) emitted.add(arg)
+        }
+      // `--verbose` is the long spelling of the `-v` the argv says.
+      const named = sdFlagsForBuild(contract, sdcppBuildOf(tag)).map((f) => f.flag)
+      expect(emitted, tag).toEqual(new Set(named.filter((flag) => flag !== '--verbose')))
+      expect(sdcppBuildOf(tag), tag).toBe(coreBuildOf(tag))
+    }
   })
 
   it('knows every flag literal of the argv builder', () => {

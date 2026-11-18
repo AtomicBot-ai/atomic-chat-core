@@ -12,3 +12,6 @@ export * from './catalog-sources.js'
 
 export * from './fastflowlm-installation.js'
 export { fastFlowLmHostRequest, fastFlowLmHostReceipt } from './fastflowlm-host-step.js'
+
+export * from './strata-contracts.js'
+export * from './strata-digest.js'

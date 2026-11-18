@@ -215,18 +215,19 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       expect(existsSync(modelFile)).toBe(true)
     }, 60_000)
 
-    it('emits -M vid_gen only when the environment opts in, and honours a video output folder of its own', async () => {
+    it('loads a video model without sd-cli’s -M, and honours a video output folder of its own', async () => {
       const argvFile = join(ctx.dataFolder, 'sd-argv.json')
       const clips = join(ctx.dataFolder, 'Movies', 'Atomic')
-      const { ready } = await sd.loadedOwner(ctx, {
+      const { ready, modelFile } = await sd.loadedOwner(ctx, {
         video: true,
         env: { FAKE_SD_ARGV_FILE: argvFile },
+        // The switch that used to add `-M vid_gen` is gone: sd-server takes its modes from the model.
         daemonEnv: { ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG: '1' },
         config: { videoOutputDir: clips },
       })
       const argv = sd.sdArgv(argvFile)
-      expect(argv[argv.indexOf('-M') + 1]).toBe('vid_gen')
-      expect(argv.indexOf('-M')).toBeLessThan(argv.indexOf('-v'))
+      expect(argv[argv.indexOf('--diffusion-model') + 1]).toBe(modelFile)
+      expect(argv).not.toContain('-M')
       expect((await sd.sdStatus(ctx, ready)).videoOutputDir).toBe(clips)
       expect((await sd.sdStatus(ctx, ready)).outputDir).toBe(join(ctx.dataFolder, 'images'))
       const clip = await sd.runVideoJob(ctx, ready)

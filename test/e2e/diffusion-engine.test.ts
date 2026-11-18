@@ -161,6 +161,45 @@ describe.skipIf(!existsSync(BIN) || process.platform === 'win32')(
       expect((await sd.sdStatus(ctx, ready)).activeJob).toBeNull()
     }, 60_000)
 
+    it('spells the speed flags the way build 849 reads them: --diffusion-fa and --diffusion-conv-direct', async () => {
+      const argvFile = join(ctx.dataFolder, 'sd-argv.json')
+      await sd.loadedOwner(ctx, { tag: sd.OLD_TAG, env: { FAKE_SD_ARGV_FILE: argvFile } })
+      const argv = sd.sdArgv(argvFile)
+      expect(argv).toContain('--diffusion-fa')
+      expect(argv).toContain('--diffusion-conv-direct')
+      for (const flag of ['--flash-attn', '--conv-direct', '--clip-on-cpu', '--vae-on-cpu'])
+        expect(argv, flag).not.toContain(flag)
+    }, 60_000)
+
+    it('spells them as module assignments from build 982 on, with no deprecated flag left, and hands a qwen2vl file over as --llm', async () => {
+      const argvFile = join(ctx.dataFolder, 'sd-argv.json')
+      const encoder = await sd.writeSdFile(
+        ctx,
+        'shared/Qwen--Qwen2.5-VL-7B/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf'
+      )
+      await sd.loadedOwner(ctx, {
+        tag: 'master-1088-32d516c-af0b1071',
+        env: { FAKE_SD_ARGV_FILE: argvFile },
+        files: { qwen2vl: encoder },
+      })
+      const argv = sd.sdArgv(argvFile)
+      const valueOf = (flag: string) => argv[argv.indexOf(flag) + 1]
+      expect(valueOf('--flash-attn')).toBe('off,diffusion=on')
+      expect(valueOf('--conv-direct')).toBe('auto,diffusion=on,controlnet=on')
+      expect(valueOf('--llm')).toBe(encoder)
+      for (const flag of [
+        '--diffusion-fa',
+        '--diffusion-conv-direct',
+        '--clip-on-cpu',
+        '--vae-on-cpu',
+        '--qwen2vl',
+      ])
+        expect(argv, flag).not.toContain(flag)
+      // The text encoder leaves Metal through --backend now; elsewhere nothing is pinned.
+      if (process.platform === 'darwin') expect(valueOf('--backend')).toBe('te=cpu')
+      else expect(argv).not.toContain('--backend')
+    }, 60_000)
+
     it('refuses Qwen-Image past one megapixel on a Metal engine before anything runs', async () => {
       const envFile = join(ctx.dataFolder, 'sd-env.json')
       const { ready, pid } = await sd.loadedOwner(ctx, {

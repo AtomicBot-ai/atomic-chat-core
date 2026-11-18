@@ -29,8 +29,11 @@ const ENGINE_FLOORS: ReadonlyMap<string, EngineFloor> = new Map([
   ['p-h3-image', H3_IMAGE],
 ])
 
-/** `master-<build>-<hash>` → the build number; anything else → undefined. */
-function buildOf(tag: string): number | undefined {
+/**
+ * `master-<build>-<hash>` → the build number; anything else → undefined. Also the build the argv is
+ * spelled for (`buildServerArgs`), and `sdcppBuildOf` in `scripts/lib/sdcpp-surface.mjs` reads tags alike.
+ */
+export function sdcppBuildOf(tag: string): number | undefined {
   if (!tag.startsWith('master-')) return undefined
   const rest = tag.slice('master-'.length)
   const dash = rest.indexOf('-')
@@ -47,7 +50,7 @@ function buildOf(tag: string): number | undefined {
 export function checkEngineCompatibility(family: string, tag: string): void {
   const floor = ENGINE_FLOORS.get(family)
   if (!floor) return
-  const build = buildOf(tag)
+  const build = sdcppBuildOf(tag)
   if (build !== undefined && build >= floor.build) return
   throw diffusionError(
     'ENGINE_UPDATE_REQUIRED',

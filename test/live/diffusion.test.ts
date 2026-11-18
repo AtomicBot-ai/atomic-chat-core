@@ -28,7 +28,6 @@
  *   ATOMIC_LIVE_SD_VIDEO_LLM=/path/to/gemma-3-12b-it-qat-UD-Q4_K_XL.gguf  (LTX; Wan takes ATOMIC_LIVE_SD_VIDEO_T5XXL)
  *   ATOMIC_LIVE_SD_EMBEDDINGS_CONNECTORS=/path/to/connectors.safetensors  (LTX-2.3)
  *   ATOMIC_LIVE_SD_VIDEO_FAMILY=ltx-2                                     (optional; or wan2.2-ti2v-5b)
- *   ATOMIC_LIVE_SD_VIDEO_MODE_FLAG=1                                      (optional; also pass -M vid_gen to sd-server)
  *
  * The engine tree is copied into the temporary data folder (installs live under `<data>`); the
  * model files are read where they are. Nothing is written outside the temporary folder.
@@ -39,7 +38,7 @@ import { request } from 'node:http'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { prepareSdcppTree, writeInstallRecord } from '../../src/diffusion/install.js'
-import { findSdOption, parseSdHelp } from '../../scripts/lib/sdcpp-surface.mjs'
+import { findSdOption, parseSdHelp, sdcppBuildOf, sdFlagsForBuild } from '../../scripts/lib/sdcpp-surface.mjs'
 import type { SdcppContract } from '../../scripts/lib/sdcpp-surface.mjs'
 import { CoreClient } from '../../src/client/index.js'
 import type { CoreEvents, ImageJob, VideoJob } from '../../src/contracts/index.js'
@@ -170,7 +169,10 @@ describe.skipIf(!ENABLED)('a real stable-diffusion.cpp engine', () => {
     const contract = JSON.parse(
       await readFile(new URL('../fixtures/sdcpp/engine-contract.json', import.meta.url), 'utf8')
     ) as SdcppContract
-    const required = contract.flags.filter((f) => f.severity === 'break').map((f) => f.flag)
+    // The flags the core spells for this build: --flash-attn from 982 on, --diffusion-fa before it.
+    const required = sdFlagsForBuild(contract, sdcppBuildOf(TAG))
+      .filter((f) => f.severity === 'break')
+      .map((f) => f.flag)
     const missing = required.filter((flag) => !findSdOption(options, flag))
     expect(missing, 'flags the pinned engine no longer knows').toEqual([])
   }, 130_000)
@@ -355,8 +357,6 @@ describe.skipIf(!VIDEO_ENABLED)('a real stable-diffusion.cpp engine serving vide
     const dir = join(videoData.layout.diffusion.backendsDir, TAG, 'live')
     await mkdir(dir, { recursive: true })
     await cp(ENGINE, dir, { recursive: true })
-    if (process.env['ATOMIC_LIVE_SD_VIDEO_MODE_FLAG'] === '1')
-      process.env['ATOMIC_DIFFUSION_VID_GEN_MODE_FLAG'] = '1'
     videoCore = await AtomicCore.create({ dataFolder: videoData.root, controlPort: 0, ...CORE_ENV })
     videoClient = new CoreClient({ baseUrl: videoCore.control.url, token: videoCore.controlToken })
     for (const name of [
