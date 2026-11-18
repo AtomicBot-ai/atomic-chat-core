@@ -23,7 +23,6 @@ def owner_pipe():
     while os.read(0,1): pass
     os._exit(130)
 if os.read(0,1)!=b'g': os._exit(130)
-threading.Thread(target=owner_pipe,daemon=True).start()
 def writable(path):
     if not isinstance(path,(str,bytes,os.PathLike)): raise PermissionError('converter file descriptor mutation refused')
     dest=os.path.realpath(os.fsdecode(path))
@@ -41,6 +40,11 @@ def audit(event,values):
         writable(values[0]); writable(values[1])
     if event=='os.symlink': raise PermissionError('converter symlinks are disabled')
 sys.addaudithook(audit)
+# On Windows NumPy's native module can hang if another thread has a pending stdin read.
+# Load it under the audit hook before starting the watchdog; the converter reuses the import.
+if sys.platform=='win32' and tool in ('tools/iq_pack.py','tools/dflash2_pack.py'):
+    import numpy
+threading.Thread(target=owner_pipe,daemon=True).start()
 script=os.path.join(root,tool)
 sys.path[:0]=[os.path.dirname(script),root,os.path.join(root,'third_party','llama.cpp','gguf-py')]
 sys.argv=[script]+args

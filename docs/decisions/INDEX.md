@@ -278,6 +278,7 @@ add a new one that says which record it supersedes.
 - [2026-11-16 — Estimate host memory for the Strata Qwen3.6 CUDA Q4 profile](2026-11-16-estimate-strata-qwen36-cuda-host-memory.md)
 - [2026-11-16 — Treat the Strata CUDA Qwen3.6 Auto RAM estimate as launch advice](2026-11-16-strata-qwen36-cuda-auto-ram-advice.md)
 - [2026-11-17 — Launch Windows Strata converters outside the staging directory](2026-11-17-launch-windows-strata-converters-outside-staging.md)
+- [2026-11-18 — Initialize NumPy before watching stdin in Windows Strata converters](2026-11-18-initialize-numpy-before-windows-strata-stdin-watch.md)
 - [2026-11-16 — Report confirmed Strata startup VRAM exhaustion](2026-11-16-report-strata-startup-vram-exhaustion.md)
 
 - [Report optimal-backend cache write failures as core IO_ERROR with their cause](2026-11-18-optimal-backend-write-failures-are-core-io-errors.md)
