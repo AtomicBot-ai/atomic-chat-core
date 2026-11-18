@@ -175,6 +175,7 @@ describe('SettingsStore.open', () => {
       'litert-lm': canonicalProviderDefaults('litert-lm'),
       'geniex': canonicalProviderDefaults('geniex'),
       'fastflowlm': canonicalProviderDefaults('fastflowlm'),
+      'strata': canonicalProviderDefaults('strata'),
     })
     // canonical, not raw: the schema ships timeout "1800" and fit_ctx 4096
     expect(store.get('llamacpp-upstream')).toMatchObject({
@@ -619,4 +620,18 @@ it('persists FastFlowLM launch settings and canonicalizes their numeric input', 
     prefix_slots: 0,
     prefix_min_gain: 0,
   })
+})
+
+it('persists canonical Strata settings and retains the old revision on invalid update or import', async () => {
+  const { store, fs } = await openFresh()
+  await store.update('strata', { context_length: '8192' })
+  const before = fs.files.get(PATH)
+  const revision = store.snapshot().revision
+  for (const patch of [{ args: ['--experts', '2'] }, { parallel_requests: 0 }, { memory_mode: 'fast' }]) {
+    await expect(store.update('strata', patch)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    await expect(store.importProvider('strata', patch)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    expect(fs.files.get(PATH)).toBe(before)
+    expect(store.snapshot().revision).toBe(revision)
+  }
+  expect(store.get('strata').context_length).toBe(8192)
 })

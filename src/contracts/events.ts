@@ -1,3 +1,4 @@
+import type { StrataPreparationOperation } from './strata.js'
 /**
  * Event catalog. Every event the core emits is listed here with its payload. The app's
  * `CoreEventBridge` maps these onto the legacy `@janhq/core` names (PLAN.md §3.5).
@@ -203,6 +204,8 @@ export interface CoreEvents {
 
   /** Full preparation operation, also returned by GET /runtimes/fastflowlm/operations/:id. */
   'fastflowlm:operation': FastFlowLmOperation
+  /** Full durable preparation state; reconnect recovers through GET /strata/preparations. */
+  'strata:preparation-changed': StrataPreparationOperation
 
   /**
    * An sd.cpp or MLX build was installed, removed, or cleaned up at start (spec `engine-builds`):

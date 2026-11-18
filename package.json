@@ -1,6 +1,6 @@
 {
   "name": "@atomic-chat/core",
-  "version": "0.23.6",
+  "version": "0.24.2",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AtomicBot-ai/atomic-chat-core.git"
@@ -30,6 +30,10 @@
     "./host": {
       "types": "./dist/host/index.d.ts",
       "import": "./dist/host/index.js"
+    },
+    "./integrations": {
+      "types": "./dist/integrations/index.d.ts",
+      "import": "./dist/integrations/index.js"
     },
     "./models": {
       "types": "./dist/models/index.d.ts",

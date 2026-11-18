@@ -319,6 +319,7 @@ export function dataLayout(root: string): DataLayout {
             tmpDir: join(providerRoot, 'tmp'),
             logsDir: join(providerRoot, 'logs'),
           }
+        case 'strata':
         case 'fastflowlm':
         case 'geniex':
           // Clients own the model trees. The core keeps builds and runtime state alongside them.

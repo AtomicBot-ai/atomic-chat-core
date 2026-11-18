@@ -959,13 +959,21 @@ export class BackendService {
             'BACKEND_IN_USE',
             'Unload the model running from this build before removing it.'
           )
+        const platform = this.deps.platform ?? process.platform
         const target = getBackendDir(
           this.deps.layout.provider(this.deps.provider),
           pack.backend,
           pack.version
         )
         const existed = await this.isInstalled(pack.version, pack.backend)
-        await rm(target, { recursive: true, force: true })
+        // The pack was running until a moment ago: Windows still holds its `llama-server.exe`, the
+        // freshly written DLLs a scanner is reading, or the directory the indexer is walking. Wait
+        // that out exactly as the install's moves do; a hold that outlasts the ladder is rethrown
+        // unchanged, so the same `disk_file_locked` report the app already renders stays possible.
+        await retryTransientFs(() => rm(target, { recursive: true, force: true }), {
+          ...(this.deps.moveRetry ?? {}),
+          platform,
+        })
         if (existed) this.deps.onChanged?.('uninstall')
         return existed
       })

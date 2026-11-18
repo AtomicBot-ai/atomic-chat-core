@@ -26,6 +26,8 @@ export interface BuildArchive {
   name: string
   sha256: string
   size: number
+  /** Exact expanded payload when the manifest supplies it. */
+  unpackedBytes?: number
 }
 
 export interface StagedInstall {
@@ -35,7 +37,7 @@ export interface StagedInstall {
   /** The build first, companions after; all unpack into the same directory. */
   archives: BuildArchive[]
   signal?: AbortSignal
-  regularFilesOnly?: boolean
+  regularFilesOnly?: boolean | 'sibling-symlinks'
   /** Hold the runtime load lock across the rename and activation. */
   commit?: (swap: () => Promise<boolean>) => Promise<boolean>
   activate?: (replaced: boolean) => Promise<void>
@@ -53,7 +55,14 @@ export interface StagedInstall {
 
 /** `replaced` — the target existed (a forced reinstall) and was swapped for the new tree. */
 export async function installStaged(plan: StagedInstall): Promise<{ replaced: boolean }> {
-  const needed = plan.archives.reduce((sum, archive) => sum + archive.size, 0) * DISK_SPACE_FACTOR
+  const needed = plan.archives.reduce(
+    (sum, archive) =>
+      sum +
+      (archive.unpackedBytes === undefined
+        ? archive.size * DISK_SPACE_FACTOR
+        : archive.size + archive.unpackedBytes),
+    0
+  )
   const free = await plan.availableSpace(plan.dataFolder).catch(() => undefined)
   if (free !== undefined && free < needed)
     throw new AtomicCoreError(

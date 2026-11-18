@@ -12,6 +12,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      maintenance:
+        description: 'Publish on the maintenance channel for this minor version'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -149,21 +154,28 @@ jobs:
         if: env.HAS_NPM_TOKEN == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          MAINTENANCE: ${{ inputs.maintenance == true }}
+        run: |
+          dist_tag=latest
+          if [ "$MAINTENANCE" = true ]; then dist_tag="maintenance-${VERSION%.*}"; fi
+          npm publish --access public --provenance --tag "$dist_tag"
 
       # From a dispatch this also creates the tag on the commit it built.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          MAINTENANCE: ${{ inputs.maintenance == true }}
         run: |
           verify=""
           if [ "$GITHUB_REF_TYPE" = tag ]; then verify="--verify-tag"; fi
+          latest=true
+          if [ "$MAINTENANCE" = true ]; then latest=false; fi
           gh release create "$TAG" release/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$TAG" \
             --generate-notes \
-            --latest \
+            --latest="$latest" \
             $verify
 
   notify-finish:

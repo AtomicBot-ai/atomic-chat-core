@@ -21,7 +21,7 @@ export const UNSUPPORTED_ARCHIVE_MESSAGE = 'Unsupported file format. Only .tar.g
 export async function extractArchive(
   archivePath: string,
   outputDir: string,
-  regularFilesOnly = false
+  regularFilesOnly: boolean | 'sibling-symlinks' = false
 ): Promise<void> {
   await mkdir(outputDir, { recursive: true })
   if (archivePath.endsWith('.tar.gz') || archivePath.endsWith('.tgz')) {
@@ -35,7 +35,15 @@ export async function extractArchive(
             filter: (name, entry) => {
               if (
                 !('type' in entry) ||
-                (entry.type !== 'File' && entry.type !== 'Directory') ||
+                (entry.type !== 'File' &&
+                  entry.type !== 'Directory' &&
+                  !(
+                    regularFilesOnly === 'sibling-symlinks' &&
+                    entry.type === 'SymbolicLink' &&
+                    typeof entry.linkpath === 'string' &&
+                    safeEngineMember(entry.linkpath) &&
+                    !entry.linkpath.includes('/')
+                  )) ||
                 !safeEngineMember(name)
               ) {
                 invalid = name
@@ -50,7 +58,7 @@ export async function extractArchive(
     return
   }
   if (archivePath.endsWith('.zip') || archivePath.endsWith('.whl')) {
-    await extractZip(archivePath, outputDir, regularFilesOnly)
+    await extractZip(archivePath, outputDir, !!regularFilesOnly)
     return
   }
   throw new Error(UNSUPPORTED_ARCHIVE_MESSAGE)
