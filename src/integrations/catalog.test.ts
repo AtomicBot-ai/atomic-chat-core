@@ -145,6 +145,18 @@ describe('childEnv', () => {
     expect(runArgsFor(agent('goose'), 'm')).toEqual(['session'])
   })
 
+  it('passes the embedding host endpoint and model to Muse', () => {
+    expect(runArgsFor(agent('muse'), 'org/m', 'http://127.0.0.1:1339/v1')).toEqual([
+      '--provider',
+      'meta',
+      '--base-url',
+      'http://127.0.0.1:1339/v1',
+      '--model',
+      'org/m',
+    ])
+    expect(runArgsFor(agent('muse'), 'org/m')).toEqual([])
+  })
+
   it('gives Codex no key variable for a keyless server, whose profile names none', () => {
     expect(childEnv(agent('codex'), 'http://h/v1', 'm', '')).toEqual({})
   })
