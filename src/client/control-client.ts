@@ -1,3 +1,11 @@
+import type {
+  StrataCheckRequest,
+  StrataCheckResult,
+  StrataPreparationRequest,
+  StrataPreparationOperation,
+  StrataMaintenanceRequest,
+  StrataMaintenance,
+} from '../contracts/index.js'
 /**
  * Browser-safe client of the control API (`/atomic/v1`). The CLI uses it over plain `fetch`; the
  * Tauri adapter will hand it an `invoke`-backed transport so the control token never enters the
@@ -147,6 +155,8 @@ export interface CoreSnapshot {
    */
   environments?: EnvironmentSnapshot[]
   environment_operations?: EnvironmentOperation[]
+  strata_preparations?: StrataPreparationOperation[]
+  strata_maintenance?: StrataMaintenance[]
 }
 
 export interface CoreEventMessage {
@@ -278,6 +288,55 @@ export class CoreClient {
   removeEngineBuild(engine: EngineBuildId, tag: string, backendId: string): Promise<EngineBuildRemoveResult> {
     return this.call(`/engine-builds/${engine}/${encodeURIComponent(tag)}/${encodeURIComponent(backendId)}`, {
       method: 'DELETE',
+    })
+  }
+
+  checkStrataModel(request: StrataCheckRequest): Promise<StrataCheckResult> {
+    return this.call(`/models/strata/check`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  beginStrataPreparation(request: StrataPreparationRequest): Promise<StrataPreparationOperation> {
+    return this.call(`/strata/preparations`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  strataPreparations(): Promise<StrataPreparationOperation[]> {
+    return this.call(`/strata/preparations`)
+  }
+
+  strataPreparation(id: string): Promise<StrataPreparationOperation> {
+    return this.call(`/strata/preparations/${encodeURIComponent(id)}`)
+  }
+
+  cancelStrataPreparation(id: string): Promise<StrataPreparationOperation> {
+    return this.call(`/strata/preparations/${encodeURIComponent(id)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
+  resumeStrataPreparation(id: string): Promise<StrataPreparationOperation> {
+    return this.call(`/strata/preparations/${encodeURIComponent(id)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
+  beginStrataMaintenance(request: StrataMaintenanceRequest): Promise<StrataMaintenance> {
+    return this.call(`/models/strata/maintenance`, { method: 'POST', body: JSON.stringify(request) })
+  }
+
+  listStrataMaintenance(): Promise<StrataMaintenance[]> {
+    return this.call(`/models/strata/maintenance`)
+  }
+
+  strataMaintenance(id: string): Promise<StrataMaintenance> {
+    return this.call(`/models/strata/maintenance/${encodeURIComponent(id)}`)
+  }
+
+  completeStrataMaintenance(id: string): Promise<StrataMaintenance> {
+    return this.call(`/models/strata/maintenance/${encodeURIComponent(id)}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     })
   }
 

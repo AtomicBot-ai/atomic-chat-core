@@ -1,6 +1,8 @@
 {
   "_comment": "Files exempt from the sibling-test rule. Key = repo-relative path, value = reason. Keep this short.",
   "files": {
+    "src/runtime/strata/strata-http.ts": "The gateway is exercised over real loopback HTTP by test/contract/strata-http.test.ts, including upstream readiness, credential isolation and cancellation.",
+    "src/server/control/routes/strata.ts": "The registered routes are exercised through the core's real HTTP server and client by test/contract/strata-control.test.ts and test/e2e/strata-maintenance.test.ts.",
     "src/server/public/static-assets.generated.ts": "Generated string constants (scripts/import-app-static.mjs); the served bytes are pinned by sha256 in the proxy-http replay fixtures.",
     "src/runtime/litert-lm/host/ffi-bun.ts": "bun:ffi bindings and the TinyCC stream shim; run only inside the compiled binaries, so covered by test/integration/litert-host.test.ts against a real library (LITERT_LM_TEST_LIB), not by vitest under Node.",
     "src/runtime/foundry-local/host/ffi-bun.ts": "bun:ffi bindings; run only inside the compiled binaries, so covered by test/e2e/foundry-host.test.ts against a real library (FOUNDRY_LOCAL_TEST_LIB), not by vitest under Node.",

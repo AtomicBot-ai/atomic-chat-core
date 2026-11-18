@@ -1,3 +1,4 @@
+import type { ModelYmlStrata } from './strata.js'
 /**
  * `<data>/llamacpp/models/<id>/model.yml` — the file that defines a model. Shared with the app;
  * see PLAN.md §8.1. Canonical shape: guest-js/types.ts:142-171 (+ `capabilities` from cli/mod.rs).
@@ -48,6 +49,7 @@ export interface ModelYml {
   /** A GenieX model (`<data>/geniex/models/<model_id or variant_id>/`), written by the app or `atc`. */
   geniex?: ModelYmlGeniex
   fastflowlm?: ModelYmlFastFlowLm
+  strata?: ModelYmlStrata
 }
 
 export interface ModelYmlAtomicRuntime {
