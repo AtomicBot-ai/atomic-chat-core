@@ -656,6 +656,8 @@ export class Downloader {
     try {
       for (;;) {
         let streamError: string | undefined
+        // The caught object itself, so the report keeps the code that classifies the failure.
+        let streamCause: unknown
         try {
           const { done, value } = await reader.read()
           if (done) {
@@ -687,6 +689,7 @@ export class Downloader {
           if ((e as Error).message === DOWNLOAD_CANCELLED || (e as Error).message.startsWith('Error: ['))
             throw e
           if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
+          streamCause = e
           streamError = (e as Error).message
         }
         if (streamError === undefined) continue
@@ -710,7 +713,7 @@ export class Downloader {
           if (retryCount >= MAX_STREAM_RETRIES) {
             throw new Error(
               `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`,
-              { cause: streamError }
+              { cause: streamCause ?? streamError }
             )
           }
           if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
