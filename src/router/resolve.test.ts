@@ -89,7 +89,7 @@ describe('modelIdsMatch', () => {
 })
 
 describe('LOCAL_SEARCH_ORDER', () => {
-  it('searches TurboQuant, upstream, MLX, TensorRT-LLM, PrismML, vLLM, SGLang, Foundry Local, then LiteRT-LM last so no existing route moves', () => {
+  it('appends Strata after the existing local providers without changing their precedence', () => {
     // vllm after atomic-prism, which core 0.10.0 shipped (change add-vllm-runtime, D11); sglang after
     // vllm by the same rule (change add-sglang-runtime, D8); foundry-local after sglang (add-foundry-local, D5);
     // litert-lm after foundry-local (add-litert-lm-runtime, task 6.1); geniex last (add-geniex-runtime, task 6.1).
@@ -105,6 +105,7 @@ describe('LOCAL_SEARCH_ORDER', () => {
       'litert-lm',
       'geniex',
       'fastflowlm',
+      'strata',
     ])
   })
 })
@@ -149,4 +150,14 @@ describe('resolveRemoteMedia', () => {
     expect(resolveRemoteMedia('aimlapi/y', 'image', mixed)).toBeUndefined()
     expect(resolveRemoteMedia('x', 'image', mixed)).toEqual({ provider: 'aimlapi', model: 'x' })
   })
+})
+
+it('routes an explicitly selected Strata model locally even when a cloud provider lists that id', () => {
+  expect(
+    resolveSelectedRoute(
+      'strata-model',
+      new Map([['strata-model', 'strata']]),
+      new Map([['cloud', provider('cloud', ['strata-model'])]])
+    )
+  ).toEqual({ kind: 'local', provider: 'strata' })
 })

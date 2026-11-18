@@ -1,3 +1,5 @@
+import { parseStrataManifest, checkStrataImmutability } from './strata-manifest.js'
+import type { StrataManifest } from './strata-manifest.js'
 /**
  * The conf manifests the engine-builds module installs from: `backends/sdcpp-manifest.json`
  * (stable-diffusion.cpp, which the desktop used to read itself) and `backends/mlx-manifest.json`
@@ -670,6 +672,7 @@ export interface ManifestKind<T> {
 
 /** The manifest document of each registered engine. */
 export interface ManifestOf {
+  'strata': StrataManifest
   'sd-cpp': SdcppManifest
   'mlx': MlxManifest
   'foundry-local': FoundryLocalManifest
@@ -720,6 +723,28 @@ export function manifestKinds(layout: DataLayout): {
       parse: (data) =>
         parseLiteRtLmManifest(data, { coreVersion: CORE_VERSION, abis: SUPPORTED_LITERT_LM_ABI }),
       cacheFile: join(layout.provider('litert-lm').root, 'litert-lm-manifest.cache.json'),
+    },
+    'strata': {
+      label: 'Strata manifest',
+      url: 'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/strata-manifest.json',
+      urlEnv: 'ATOMIC_STRATA_MANIFEST_URL',
+      parse: (data) => parseStrataManifest(data, CORE_VERSION),
+      cacheFile: join(layout.provider('strata').root, 'strata-manifest.cache.json'),
+      immutableSource: {
+        url(value) {
+          const url = new URL(value)
+          if (
+            !['https:', 'file:'].includes(url.protocol) ||
+            url.username ||
+            url.password ||
+            (url.protocol === 'file:' &&
+              (url.hostname || !value.startsWith('file:///') || url.pathname.startsWith('//')))
+          )
+            throw new Error('Expected HTTPS or a local Strata manifest file URL.')
+          return url.href
+        },
+        check: checkStrataImmutability,
+      },
     },
     'fastflowlm': {
       label: 'FastFlowLM manifest',

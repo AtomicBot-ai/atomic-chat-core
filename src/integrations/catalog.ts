@@ -376,8 +376,12 @@ export function childEnv(
 /**
  * The arguments that start `agent` on `model`: its fixed `runArgs`, plus `--model atomic/<id>` for
  * Kilo, which otherwise opens on the model it last used before the one its config selects.
+ * Embedding hosts pass their API URL to start Muse against their model catalogue.
  */
-export function runArgsFor(agent: Agent, model: string): string[] {
+export function runArgsFor(agent: Agent, model: string, apiUrl?: string): string[] {
+  // An embedding host can provide the model catalogue that Muse needs before its first turn.
+  if (agent.id === 'muse' && apiUrl)
+    return ['--provider', 'meta', '--base-url', apiUrl, ...(model ? ['--model', model] : [])]
   return agent.id === 'kilo' && model ? ['--model', `atomic/${model}`, ...agent.runArgs] : [...agent.runArgs]
 }
 

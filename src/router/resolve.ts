@@ -33,6 +33,7 @@ export type LocalProvider =
   | 'litert-lm'
   | 'geniex'
   | 'fastflowlm'
+  | 'strata'
 
 /**
  * The order local providers are searched in when a request names only a model. The same model id
@@ -59,6 +60,7 @@ export const LOCAL_SEARCH_ORDER: readonly LocalProvider[] = [
   'litert-lm',
   'geniex',
   'fastflowlm',
+  'strata',
 ]
 
 /**

@@ -5,7 +5,8 @@
  * `prism.hadamard.*` keys, Q2_0 group-64 vs the legacy group-128 layout).
  */
 
-export type GgufMetaValue = string | number | boolean | { u64: bigint } | { strings: string[] }
+export type GgufMetaValue =
+  string | number | boolean | { u64: bigint } | { strings: string[] } | { uints: number[] }
 
 export interface GgufTensorSpec {
   name: string
@@ -70,6 +71,11 @@ function writeValue(w: Writer, value: GgufMetaValue) {
   } else if ('u64' in value) {
     w.u32(10)
     w.u64(value.u64)
+  } else if ('uints' in value) {
+    w.u32(9)
+    w.u32(4)
+    w.u64(value.uints.length)
+    for (const v of value.uints) w.u32(v)
   } else {
     w.u32(9)
     w.u32(8)
