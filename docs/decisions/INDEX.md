@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [Strip a leading UTF-8 BOM when reading credentials.json](2026-11-17-strip-utf8-bom-when-reading-credentials-json.md)
+
 - [2026-11-17 — Select Strata releases by host compatibility](2026-11-17-select-strata-releases-by-host-compatibility.md)
 
 - [2026-11-17 — Export agent integrations for embedding hosts](2026-11-17-export-agent-integrations.md)
