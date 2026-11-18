@@ -62,6 +62,7 @@ describe('package exports', () => {
       './client',
       './contracts',
       './host',
+      './integrations',
       './models',
       './foundry-host',
       './litert-host',
@@ -76,6 +77,14 @@ describe('package exports', () => {
     expect(resolved['@atomic-chat/core/models']).toMatch(/\/dist\/models\/index\.js$/)
   })
 
+  it('resolves the public integrations module for embedding hosts', async () => {
+    const resolved = await resolveFromPackage(['@atomic-chat/core/integrations'])
+    expect(resolved['@atomic-chat/core/integrations']).toMatch(/\/dist\/integrations\/index\.js$/)
+    const integrations = await import('../../src/integrations/index.js')
+    expect(typeof integrations.configureAgent).toBe('function')
+    expect(integrations.registeredAgents()).toContain('hermes')
+  })
+
   // It imports every entry point's whole module graph, cold: past the 5 s default on Windows runners.
   it(
     'keeps ModelRegistry and fetchHfGgufFiles in ./models, and no entry point hands out the downloader',
@@ -86,6 +95,7 @@ describe('package exports', () => {
         './client': await import('../../src/client/index.js'),
         './contracts': await import('../../src/contracts/index.js'),
         './host': await import('../../src/host/index.js'),
+        './integrations': await import('../../src/integrations/index.js'),
         './models': await import('../../src/models/index.js'),
       }
       const models = entries['./models'] as Record<string, unknown>
@@ -110,6 +120,7 @@ describe('package exports', () => {
       'client/index.ts',
       'contracts/index.ts',
       'host/index.ts',
+      'integrations/index.ts',
       'models/index.ts',
     ]) {
       const text = await readFile(new URL(`src/${entry}`, ROOT), 'utf8')
