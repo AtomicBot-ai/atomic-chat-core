@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { AtomicCoreError } from '../contracts/index.js'
+import { DOWNLOAD_CANCELLED } from '../downloads/index.js'
 import { classifyFailure, diagnosticTags, failureObserver } from './diagnostics.js'
 
 const context = { component: 'http', operation: 'request' } as const
@@ -229,5 +230,85 @@ describe('MLX install probe bounded diagnostics', () => {
     )
     expect(error.code).toBe('ENGINE_INSTALL_FAILED')
     expect(error.message).toBe('The downloaded mlx-server does not run on this Mac.')
+  })
+})
+
+describe('backend install cancellation bounded diagnostics', () => {
+  const install = { component: 'backend', operation: 'install' } as const
+
+  it('tags the backend install cancellation sentinel with a finite diagnostic code', () => {
+    // `downloadOne` throws this plain Error when the install's task signal is aborted; the backend
+    // installer reports it unchanged through `onFailure` before the engine layer turns it into
+    // AtomicCoreError('CANCELLED'). The envelope replaces the exception value with the reason, so
+    // the message itself is the only evidence the event can carry.
+    const cancelled = new Error(DOWNLOAD_CANCELLED)
+    const diagnostic = classifyFailure(cancelled, install)
+    const tags = diagnosticTags(cancelled, diagnostic)
+
+    expect(cancelled.message).toBe('Download cancelled')
+    expect(tags).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'backend',
+      operation: 'install',
+      failure_category: 'unknown',
+      failure_reason: 'unknown',
+      diagnostic_code: 'DOWNLOAD_SENTINEL_CANCELLED',
+    })
+    expect(JSON.stringify(tags)).not.toContain('Download cancelled')
+  })
+
+  it('finds the sentinel through a wrapper without adding private text or changing the error', () => {
+    const cause = new Error(DOWNLOAD_CANCELLED)
+    const error = new AtomicCoreError(
+      'ENGINE_INSTALL_FAILED',
+      'The engine install failed.',
+      '/private/fixture/download',
+      { cause }
+    )
+    const tags = diagnosticTags(error, classifyFailure(error, install))
+
+    expect(tags).toMatchObject({
+      diagnostic_code: 'DOWNLOAD_SENTINEL_CANCELLED',
+      cause_code: 'ENGINE_INSTALL_FAILED',
+    })
+    expect(JSON.stringify(tags)).not.toContain('/private')
+    expect(error.toJSON()).toEqual({
+      code: 'ENGINE_INSTALL_FAILED',
+      message: 'The engine install failed.',
+      details: '/private/fixture/download',
+    })
+  })
+
+  it('keeps a cyclic chain bounded and the cancellation tags finite', () => {
+    const sentinel = new Error(DOWNLOAD_CANCELLED)
+    const wrapper = new Error('/private/fixture/wrapper', { cause: sentinel })
+    sentinel.cause = wrapper
+
+    const tags = diagnosticTags(wrapper, classifyFailure(wrapper, install))
+    expect(tags).toMatchObject({ diagnostic_code: 'DOWNLOAD_SENTINEL_CANCELLED' })
+    expect(tags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(tags)).not.toContain('/private')
+    expect(JSON.stringify(tags)).not.toContain('Download cancelled')
+  })
+
+  it('reports the cancellation exactly as before, so the observer stays an observer', () => {
+    const capture = vi.fn()
+    const observe = failureObserver({ capture })
+    const cancelled = new Error(DOWNLOAD_CANCELLED)
+
+    observe(cancelled, install)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'operation',
+        error: cancelled,
+        level: 'error',
+        diagnostic: expect.objectContaining({
+          category: 'unknown',
+          reason: 'unknown',
+        }),
+      })
+    )
+    expect(cancelled.message).toBe('Download cancelled')
   })
 })
