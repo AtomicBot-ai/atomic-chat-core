@@ -281,3 +281,4 @@ add a new one that says which record it supersedes.
 - [2026-11-16 — Report confirmed Strata startup VRAM exhaustion](2026-11-16-report-strata-startup-vram-exhaustion.md)
 
 - [Report optimal-backend cache write failures as core IO_ERROR with their cause](2026-11-18-optimal-backend-write-failures-are-core-io-errors.md)
+- [2026-11-17 — Account for staged Strata sources in compatibility checks](2026-11-17-credit-strata-staging-in-preflight.md)

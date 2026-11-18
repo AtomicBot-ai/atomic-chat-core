@@ -93,8 +93,15 @@ export interface ModelYmlStrata {
 }
 export type StrataPreparationStatus =
   'files-ready' | 'preparing' | 'ready' | 'preparation-required' | 'failed'
-export type StrataCheckRequest = { descriptor: StrataModelDescriptor } | { model_id: string }
+export type StrataCheckRequest =
+  | {
+      descriptor: StrataModelDescriptor
+      /** Reusable source bytes already occupying disk in the caller's staging directory. */
+      staged_bytes?: number
+    }
+  | { model_id: string }
 export interface StrataResourceEstimate {
+  /** Remaining source bytes for this request, after any reported staging credit. */
   download_bytes: number
   derivative_bytes: number
   temporary_bytes: number

@@ -363,9 +363,13 @@ with recursively sorted object keys, preserved array order, and no whitespace
 or trailing newline. `strataCanonicalDescriptor` and `strataSourceDigest` provide
 the shared client implementation. It is not a readiness marker.
 
-- `POST /atomic/v1/models/strata/check`: `{descriptor}` or `{model_id}`; returns
-  verdict/reason, requirements, capabilities, preparation status, separate disk
-  and RAM/VRAM/unified-memory estimates, compatible devices and evidence.
+- `POST /atomic/v1/models/strata/check` accepts `{descriptor, staged_bytes?}` or `{model_id}`. It
+  returns verdict/reason, requirements, capabilities, preparation status, disk and
+  RAM/VRAM/unified-memory estimates, compatible devices and evidence. For a descriptor
+  check, `staged_bytes` is the client's reusable source byte count on the destination
+  volume. It defaults to zero and must be an integer from zero through the descriptor's
+  total source size. It reduces only remaining download bytes and the disk estimate.
+  Source hashes and preparation readiness are still verified on disk.
 - `POST /atomic/v1/strata/preparations`: `{request_id, model_id, source_digest,
   maintenance_id?}`; `202` with the operation. List/get use `GET` at the same
   root and `/:id`; cancel/resume use `POST /:id/{cancel,resume}` with `{}`.

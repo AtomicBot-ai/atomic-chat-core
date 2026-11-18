@@ -13,6 +13,7 @@ interface Inputs {
   installed: boolean
   prepared: boolean
   previousBytes: number
+  stagedBytes?: number
   memoryMode?: StrataMemoryMode
   minimumVramBytes?: number | undefined
 }
@@ -55,7 +56,7 @@ export function strataRamModeBytes(d: StrataModelDescriptor): number {
 /** Conservative planning estimates for the pinned recipes. Values are not hardware qualification. */
 export function estimateStrata(d: StrataModelDescriptor, input: Inputs): StrataResourceEstimate {
   const weights = d.files.filter((f) => f.role === 'weights').reduce((total, file) => total + file.size, 0)
-  const download_bytes = input.installed ? 0 : d.requirements.download_bytes
+  const download_bytes = input.installed ? 0 : d.requirements.download_bytes - (input.stagedBytes ?? 0)
   let derivative_bytes = 0
   let temporary_bytes = 0
   if (!input.prepared) {

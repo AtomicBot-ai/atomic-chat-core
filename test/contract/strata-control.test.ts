@@ -39,6 +39,26 @@ it('connects Strata check and operation endpoints to the owner without a runtime
   })
 })
 
+it('accepts only a bounded staged byte count on the Strata descriptor check', async () => {
+  const core = await createCore()
+  const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+  const descriptor = parseStrataDescriptor(Object.values(catalog.models)[0]!.definition)
+  await expect(client.checkStrataModel({ descriptor, staged_bytes: 1 })).resolves.toMatchObject({
+    verdict: 'engine-not-installed',
+  })
+  await expect(client.checkStrataModel({ model_id: 'absent' })).resolves.toMatchObject({
+    verdict: 'invalid-installation',
+  })
+  for (const staged_bytes of [-1, 0.5, '1', descriptor.requirements.download_bytes + 1]) {
+    await expect(
+      client.request('POST', '/models/strata/check', { descriptor, staged_bytes })
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+  }
+  await expect(
+    client.request('POST', '/models/strata/check', { model_id: 'model', staged_bytes: 0 })
+  ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+})
+
 it('restores an interrupted Strata preparation and exposes its revision after restart', async () => {
   const first = await createCore()
   await first.shutdown()
