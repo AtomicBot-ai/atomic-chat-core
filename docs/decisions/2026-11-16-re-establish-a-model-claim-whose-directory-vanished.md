@@ -15,11 +15,11 @@ title: "Re-establish a model claim whose directory vanished"
   failed identically until the model was unloaded. Nothing in the core removes a live claim
   directory: only `ModelClaimHandle.release()` does, serialized against the load or awaited by
   `releaseAll()` after the runtimes stop.
-- **Decision:** In `writeClaim`, treat `ENOENT` from the record write as a vanished directory:
-  re-create `path` with `mkdir(path, { recursive: true })` and write the record once more. A second
-  failure, and every other errno, keep the existing `claimIoError('write', …)` wrapping, so a full
-  volume, a file where the folder belongs, or an unwritable folder stay coded `IO_ERROR`s and still
-  refuse the load.
+- **Decision:** Stage updates under a unique name and check the existing record's claim ID before
+  replacing it. If the directory is removed after that check, the staged file disappears with it.
+  On `ENOENT`, use the same exclusive claim-directory creation as initial acquisition and retry the
+  write once. An incumbent or a process that wins creation makes the update return
+  `CORE_ALREADY_RUNNING`; other filesystem failures retain their coded `IO_ERROR` and errno cause.
 - **Consequences:** A load whose engine is up keeps its claim recorded and returns its session
   instead of failing, and later attaches no longer inherit a broken handle. The retry is bounded to
   one attempt, so a path that keeps disappearing surfaces as the same `IO_ERROR` instead of looping.
