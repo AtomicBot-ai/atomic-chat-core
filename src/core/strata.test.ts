@@ -46,13 +46,39 @@ it('checks a descriptor without writing and reports disk, unified memory and pla
       emit: () => {},
     })
     const request = { descriptor }
-    expect(await strata.check(request)).toMatchObject({
+    const uncredited = await strata.check(request)
+    expect(uncredited).toMatchObject({
       verdict: 'insufficient-disk',
       estimates: { download_bytes: descriptor.requirements.download_bytes, ram_bytes: 0, vram_bytes: 0 },
       qualification: descriptor.qualification,
     })
-    freeBytes = 128 * 2 ** 30
+    const original = uncredited.estimates!
+    const staged = Math.floor(original.download_bytes / 2)
+    freeBytes = original.required_disk_bytes - staged
+    expect(await strata.check(request)).toMatchObject({ verdict: 'insufficient-disk' })
+    expect(await strata.check({ ...request, staged_bytes: staged })).toMatchObject({
+      verdict: 'ok',
+      estimates: {
+        ...original,
+        download_bytes: original.download_bytes - staged,
+        required_disk_bytes: freeBytes,
+      },
+    })
+    freeBytes = original.derivative_bytes + original.temporary_bytes
+    expect(await strata.check({ ...request, staged_bytes: original.download_bytes })).toMatchObject({
+      verdict: 'ok',
+      estimates: { ...original, download_bytes: 0, required_disk_bytes: freeBytes },
+    })
+    freeBytes--
+    expect(await strata.check({ ...request, staged_bytes: original.download_bytes })).toMatchObject({
+      verdict: 'insufficient-disk',
+    })
+    freeBytes++
     facts.devices[0]!.memoryBytes = 8 * 2 ** 30
+    expect(await strata.check({ ...request, staged_bytes: original.download_bytes })).toMatchObject({
+      verdict: 'insufficient-memory',
+    })
+    freeBytes = 128 * 2 ** 30
     expect(await strata.check(request)).toMatchObject({ verdict: 'insufficient-memory' })
     facts.osVersion = '14.9'
     expect(await strata.check(request)).toMatchObject({ verdict: 'platform-unsupported' })

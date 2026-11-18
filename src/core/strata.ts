@@ -411,10 +411,18 @@ export async function wireStrata(options: Options) {
     },
   })
   const check = async (raw: unknown): Promise<StrataCheckResult> => {
-    if (!raw || typeof raw !== 'object' || Object.keys(raw).length !== 1)
+    const body = raw as Record<string, unknown> | null
+    const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : []
+    const modelId =
+      keys.length === 1 && keys[0] === 'model_id' && typeof body?.model_id === 'string'
+        ? body.model_id
+        : undefined
+    const hasDescriptor =
+      keys.includes('descriptor') && keys.every((key) => key === 'descriptor' || key === 'staged_bytes')
+    if (!body || (!modelId && !hasDescriptor))
       throw new AtomicCoreError('INVALID_ARGUMENT', 'Send a Strata descriptor or model_id.')
-    const body = raw as Record<string, unknown>
-    let descriptor: StrataModelDescriptor | undefined
+    let descriptor: StrataModelDescriptor
+    let stagedBytes = 0
     const result: StrataCheckResult = {
       verdict: 'ok',
       reason: null,
@@ -431,7 +439,6 @@ export async function wireStrata(options: Options) {
       verdict,
       reason,
     })
-    const modelId = typeof body.model_id === 'string' ? body.model_id : undefined
     let entry: StrataModelEntry | undefined
     if (modelId) {
       if (maintenance.list().some((o) => o.model_id === modelId && o.state !== 'completed'))
@@ -447,6 +454,20 @@ export async function wireStrata(options: Options) {
         descriptor = parseStrataDescriptor(body.descriptor)
       } catch (error) {
         throw new AtomicCoreError('INVALID_ARGUMENT', (error as Error).message)
+      }
+      if (keys.includes('staged_bytes')) {
+        const count = body.staged_bytes
+        if (
+          typeof count !== 'number' ||
+          !Number.isSafeInteger(count) ||
+          count < 0 ||
+          count > descriptor.requirements.download_bytes
+        )
+          throw new AtomicCoreError(
+            'INVALID_ARGUMENT',
+            'Strata staged_bytes must be an integer between zero and the total source size.'
+          )
+        stagedBytes = count
       }
     }
     result.capabilities = descriptor.capabilities
@@ -513,6 +534,7 @@ export async function wireStrata(options: Options) {
       installed: !!entry,
       prepared: !!ready,
       previousBytes,
+      stagedBytes,
       memoryMode: settings.memory_mode,
       minimumVramBytes: memory.minimumVramBytes,
     })
