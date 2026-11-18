@@ -1,3 +1,4 @@
+import { registerStrataRoutes } from './routes/strata.js'
 /**
  * Composes the control route table from its families. Registration order is the matching order
  * (`Router.find` takes the first pattern that fits, e.g. `/settings/status` before
@@ -56,6 +57,14 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
     optimal_backends: deps.backends.optimalSnapshot(),
     environments: deps.environmentsSnapshot?.() ?? [],
     environment_operations: deps.environmentOperations?.() ?? [],
+    ...(deps.strata
+      ? {
+          strata_preparations: deps.strata.preparations.store
+            .snapshot()
+            .preparations.map((row) => row.operation),
+          strata_maintenance: deps.strata.maintenance.list(),
+        }
+      : {}),
   })
   const ctx: ControlRouteContext = { p, now, startedAt, snapshot, self }
 
@@ -64,6 +73,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerLifecycleRoutes(router, deps, ctx)
   registerClientRoutes(router, deps, ctx)
   registerFastFlowLmRoutes(router, deps, ctx)
+  registerStrataRoutes(router, deps, ctx)
   registerModelRoutes(router, deps, ctx)
   registerModelCompatibilityRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)

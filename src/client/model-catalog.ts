@@ -1,3 +1,4 @@
+import { parseStrataDefinition, projectStrataCollection } from './strata-contracts.js'
 import {
   type FastFlowLmCatalogOptions,
   parseFastFlowLmDefinition,
@@ -83,6 +84,8 @@ export function parseAtomicModelCatalog(
       if (flmVariants.has(variant_id)) throw new Error('Duplicate FastFlowLM variant')
       flmVariants.add(variant_id)
     }
+    if (entry.kind === 'strata' || entry.kind === 'strata-cuda')
+      parseStrataDefinition(entry as unknown as AtomicCatalogEntry)
     sources(entry.definition)
     if (entry.kind === 'chat' && (!Array.isArray(entry.files) || entry.files.length === 0))
       throw new Error('Missing catalog file plan')
@@ -101,7 +104,7 @@ export function parseAtomicModelCatalog(
       }
   }
   const catalog = value as unknown as AtomicModelCatalog
-  for (const name of ['recommended', 'fastflowlm-models', ...Object.keys(fields)])
+  for (const name of ['recommended', 'fastflowlm-models', 'strata-models', ...Object.keys(fields)])
     projectAtomicModelCollection(catalog, name, true, options)
   return catalog
 }
@@ -113,6 +116,7 @@ export function projectAtomicModelCollection(
   pinned = true,
   options: FastFlowLmCatalogOptions = {}
 ): AtomicCatalogRecord {
+  if (name === 'strata-models') return projectStrataCollection(catalog)
   if (name === 'fastflowlm-models') return projectFastFlowLmCollection(catalog, options)
   const collection = catalog.collections[name]
   if (!collection || !record(collection.header) || collection.header.schema_version !== 1)

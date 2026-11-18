@@ -89,8 +89,8 @@ export class OptimalBackendStore {
       const next = Object.fromEntries(this.entries)
       next[provider] = current
       const temporary = `${this.path}.tmp-${randomUUID()}`
-      await mkdir(dirname(this.path), { recursive: true })
       try {
+        await mkdir(dirname(this.path), { recursive: true })
         await writeFile(
           temporary,
           `${JSON.stringify({ schemaVersion: 2, providers: next }, null, 2)}\n`,
@@ -99,7 +99,14 @@ export class OptimalBackendStore {
         await rename(temporary, this.path)
       } catch (error) {
         await rm(temporary, { force: true }).catch(() => {})
-        throw error
+        // The wire code must be one the app knows, and the filesystem reason has to stay reachable:
+        // the reporter walks the cause chain (a full disk is operational/disk_full, not an IO fault).
+        throw new AtomicCoreError(
+          'IO_ERROR',
+          `Cannot write the optimal-backend cache at ${this.path}`,
+          error instanceof Error ? error.message : String(error),
+          { cause: error }
+        )
       }
       this.entries.set(provider, current)
       this.onChange(provider, current)

@@ -11,6 +11,12 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [Strip a leading UTF-8 BOM when reading credentials.json](2026-11-17-strip-utf8-bom-when-reading-credentials-json.md)
+
+- [2026-11-17 — Select Strata releases by host compatibility](2026-11-17-select-strata-releases-by-host-compatibility.md)
+
+- [2026-11-17 — Export agent integrations for embedding hosts](2026-11-17-export-agent-integrations.md)
+
 - [2026-11-13 — Replay fragmented and partial tool turns through Foundry](2026-11-13-replay-fragmented-foundry-tool-turns.md)
 
 - [2026-11-12 — Group parallel tool results before passing history to Foundry](2026-11-12-group-foundry-parallel-tool-results.md)
@@ -41,6 +47,7 @@ add a new one that says which record it supersedes.
 
 - [2026-11-04 — Run only GPU builds the card can run, and retry a failed GPU load once on the next build](2026-11-04-run-only-gpu-builds-the-card-can-run-and-retry-once.md)
 - [2026-11-04 — Smoke-test Windows engine packs, retry locked moves, and find GPUs without PowerShell](2026-11-04-smoke-test-windows-packs-and-probe-gpus-without-powershell.md)
+- [Wait out a Windows hold before deleting a backend pack](2026-11-13-removing-a-backend-pack-waits-out-a-windows-hold.md)
 - **2026-11-02** — [Classify tensor-layout mismatches without claiming corruption](2026-11-02-tensor-layout-error.md) — "wrong number of tensors" is `MODEL_ARCH_NOT_SUPPORTED` on upstream llama.cpp too; truncation, invalid magic and EOF stay corrupt.
 
 - [2026-11-03 — Serve coding agents with their window, bounded output and two shared-KV slots](2026-11-03-serve-coding-agents-with-their-window-and-bounded-output.md)
@@ -251,11 +258,26 @@ add a new one that says which record it supersedes.
 - [Preserve error cause on staged engine-build install failures](2026-11-06-preserve-cause-on-staged-engine-install-errors.md)
 - [Tag MLX install probe failures with finite diagnostic codes](2026-11-12-extend-bounded-diagnostics-to-mlx-install-probe.md)
 - [Wrap model-claim filesystem failures as coded IO errors](2026-11-12-wrap-model-claim-filesystem-failures-as-coded-io-errors.md)
+- [Tag Foundry Local host load failures at their source](2026-11-17-foundry-local-host-load-failures-get-finite-codes.md)
+- [Re-establish a model claim whose directory vanished](2026-11-16-re-establish-a-model-claim-whose-directory-vanished.md)
 - [Accept the app's client keys next to the server key](2026-11-12-accept-app-client-keys-next-to-the-server-key.md) — `PUT /atomic/v1/server/client-keys`: in-memory extra keys next to a non-empty `api_key`; keyring wins, keyless stays open
 - [Downloads report the disk reason they already tag](2026-11-11-downloads-report-their-own-disk-reason.md)
+- [Keep the stream failure that ended a download retry ladder](2026-11-16-downloads-keep-the-stream-failure-that-ended-a-retry-ladder.md)
+- [A superseded download stands back before it publishes](2026-11-15-a-superseded-download-does-not-publish.md)
 - [Refuse to replace a backend pack a session runs from](2026-11-12-refuse-replacing-in-use-backend-pack.md)
 - [Browser stack frames keep their served asset path](2026-11-12-keep-browser-asset-paths-in-stack-frames.md)
+- [Publishing a released instance lock writes nothing](2026-11-17-publishing-a-released-instance-lock-writes-nothing.md)
 - [An audio shutdown refusal is not an engine crash](2026-11-12-audio-shutdown-refusal-is-not-a-crash.md)
 - [Check MLX builds with the engine candidate workflow](2026-11-12-check-mlx-builds-with-the-engine-candidate.md) — `engine=mlx`: the fork's `vX.Y.Z`, conf's `mlxvlm-macos-arm64-<rev>` mirror; everything on macos-15, watched folders, folder live models
 - [Spell the sd.cpp argv for the installed build](2026-11-13-spell-the-sd-cpp-argv-for-the-installed-build.md) — `--backend te=cpu,vae=cpu` and `--llm` everywhere; `--flash-attn`/`--conv-direct` from build 982, the deprecated pair before; no `-M`
-- [Tag Foundry Local host load failures with finite diagnostic codes](2026-11-17-foundry-local-host-load-failures-get-finite-codes.md)
+
+- [2026-11-16 — Support the Strata CUDA catalog](2026-11-16-support-the-strata-cuda-catalog.md)
+- [2026-11-16 — Expand the Strata Qwen3.8 quantization allowlist](2026-11-16-expand-the-strata-qwen38-quantization-allowlist.md)
+- [2026-11-14 — Separate Strata acquisition, preparation and session ownership](2026-11-14-add-strata-contracts-and-isolated-runtime-bundles.md)
+- [2026-11-16 — Fit Strata Qwen3.6 Auto to CUDA memory](2026-11-16-fit-strata-qwen36-auto-to-cuda-memory.md)
+- [2026-11-16 — Estimate host memory for the Strata Qwen3.6 CUDA Q4 profile](2026-11-16-estimate-strata-qwen36-cuda-host-memory.md)
+- [2026-11-16 — Treat the Strata CUDA Qwen3.6 Auto RAM estimate as launch advice](2026-11-16-strata-qwen36-cuda-auto-ram-advice.md)
+- [2026-11-17 — Launch Windows Strata converters outside the staging directory](2026-11-17-launch-windows-strata-converters-outside-staging.md)
+- [2026-11-16 — Report confirmed Strata startup VRAM exhaustion](2026-11-16-report-strata-startup-vram-exhaustion.md)
+
+- [Report optimal-backend cache write failures as core IO_ERROR with their cause](2026-11-18-optimal-backend-write-failures-are-core-io-errors.md)

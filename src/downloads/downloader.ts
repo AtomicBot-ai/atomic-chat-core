@@ -94,7 +94,7 @@ type StageReport = (kind: DownloadStage['kind'], attempt: number) => void
 
 interface Task {
   controller: AbortController
-  superseded: boolean
+  done: Promise<void>
   /** The last combined progress this task reported, for `snapshot()`. */
   progress?: DownloadProgress
 }
@@ -267,7 +267,7 @@ export class Downloader {
 
   /** Task ids currently running. */
   active(): string[] {
-    return [...this.tasks.keys()]
+    return [...this.tasks].filter(([, task]) => !task.controller.signal.aborted).map(([taskId]) => taskId)
   }
 
   /**
@@ -275,16 +275,15 @@ export class Downloader {
    * reconnects mid-transfer reads from the control snapshot instead of waiting for the next event.
    */
   snapshot(): DownloadProgress[] {
-    return [...this.tasks.entries()].map(
-      ([taskId, task]) => task.progress ?? { taskId, transferred: 0, total: 0, percent: 0 }
+    return this.active().map(
+      (taskId) => this.tasks.get(taskId)?.progress ?? { taskId, transferred: 0, total: 0, percent: 0 }
     )
   }
 
   /** Cancel a running task. Keeps partials and finished files. */
   cancel(taskId: string): boolean {
     const task = this.tasks.get(taskId)
-    if (!task) return false
-    this.tasks.delete(taskId)
+    if (!task || task.controller.signal.aborted) return false
     task.controller.abort()
     return true
   }
@@ -294,15 +293,17 @@ export class Downloader {
    * observes a cancellation but leaves the files to the newcomer).
    */
   async download(taskId: string, items: DownloadItem[], options: DownloadOptions = {}): Promise<void> {
-    const existing = this.tasks.get(taskId)
-    if (existing) {
-      existing.superseded = true
-      existing.controller.abort()
-    }
-    const task: Task = { controller: new AbortController(), superseded: false }
+    const previous = this.tasks.get(taskId)
+    const controller = new AbortController()
+    // An aborted attempt can still have filesystem work in flight. Hand off the shared files only
+    // once it has closed its writer and settled any publish or validation cleanup.
+    const drained = previous?.done.catch(() => {}) ?? Promise.resolve()
+    const done = drained.then(() => this.run(taskId, items, options, controller.signal))
+    const task: Task = { controller, done }
     this.tasks.set(taskId, task)
+    previous?.controller.abort()
     try {
-      await this.run(taskId, items, options, task.controller.signal)
+      await done
     } catch (error) {
       if (!task.controller.signal.aborted)
         this.deps.onFailure?.(error, { component: 'downloads', operation: 'download' })
@@ -313,6 +314,7 @@ export class Downloader {
   }
 
   private async run(taskId: string, items: DownloadItem[], options: DownloadOptions, signal: AbortSignal) {
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     const { dataFolder, platform, log } = this.deps
     const resume = options.resume ?? false
     const headers = options.headers ?? {}
@@ -396,6 +398,7 @@ export class Downloader {
       )
     )
     if (failed) throw firstError
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     const results = settled.map((outcome) => (outcome as PromiseFulfilledResult<string>).value)
 
     if (items.some((it) => it.sha256 != null || it.size != null)) {
@@ -409,6 +412,8 @@ export class Downloader {
     const verifications = await Promise.allSettled(
       items.map((item, i) => verifyDownloadedFile(item, results[i] as string, this.deps.verify, signal))
     )
+    // Cancelling validation must keep the finished files, even if a verifier rejected on abort.
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     for (let i = 0; i < verifications.length; i++) {
       const v = verifications[i]
       if (v && v.status === 'rejected') {
@@ -653,21 +658,22 @@ export class Downloader {
     let retryCount = 0
     let sinceReset = 0
 
+    const stopReading = () => void reader.cancel().catch(() => {})
+    signal.addEventListener('abort', stopReading)
     try {
       for (;;) {
+        if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
         let streamError: string | undefined
+        // The caught object itself, so the report keeps the code that classifies the failure.
+        let streamCause: unknown
         try {
           const { done, value } = await reader.read()
+          if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
           if (done) {
             if (expectedSize > 0 && totalTransferred < expectedSize) {
               streamError = `stream ended after ${totalTransferred} of ${expectedSize} bytes`
             } else break
           } else if (value) {
-            if (signal.aborted) {
-              await writer.close().catch(() => {})
-              this.deps.log('info', `Download cancelled: ${item.url}`)
-              throw new Error(DOWNLOAD_CANCELLED)
-            }
             // Writes are awaited one at a time, so `totalTransferred` is where this chunk starts.
             await writer.write(value, totalTransferred)
             delta += value.byteLength
@@ -687,6 +693,7 @@ export class Downloader {
           if ((e as Error).message === DOWNLOAD_CANCELLED || (e as Error).message.startsWith('Error: ['))
             throw e
           if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
+          streamCause = e
           streamError = (e as Error).message
         }
         if (streamError === undefined) continue
@@ -710,7 +717,7 @@ export class Downloader {
           if (retryCount >= MAX_STREAM_RETRIES) {
             throw new Error(
               `Download failed after ${MAX_STREAM_RETRIES} retries at byte ${durable}: ${streamError}`,
-              { cause: streamError }
+              { cause: streamCause ?? streamError }
             )
           }
           if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
@@ -776,9 +783,11 @@ export class Downloader {
 
       await writer.close()
     } finally {
+      signal.removeEventListener('abort', stopReading)
       await writer.close().catch(() => {})
       await reader.cancel().catch(() => {})
     }
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     const persisted = (
       await stat(tmpPath).catch((e) => {
         throw disk(e)
@@ -796,6 +805,7 @@ export class Downloader {
     }
     progress.set(fileId, totalTransferred)
     emitProgress()
+    if (signal.aborted) throw new Error(DOWNLOAD_CANCELLED)
     await rename(tmpPath, savePath).catch((e) => {
       throw disk(e)
     })

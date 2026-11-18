@@ -1,3 +1,4 @@
+import strataSchema from './schema/strata.json' with { type: 'json' }
 /**
  * Provider setting schemas: the app's four extension `settings.json` descriptor arrays embedded verbatim
  * as JSON (`schema/*.json`), the per-key defaults, and the canonical value types the runtime expects.
@@ -42,6 +43,7 @@ export const LOCAL_PROVIDER_IDS: readonly LocalProviderId[] = [
   'litert-lm',
   'geniex',
   'fastflowlm',
+  'strata',
 ]
 
 const CONTROLLER_TYPES = new Set(['checkbox', 'input', 'dropdown', 'slider'])
@@ -78,6 +80,7 @@ const SCHEMAS: Record<LocalProviderId, readonly SettingDescriptor[]> = {
   'foundry-local': toDescriptors('foundry-local', foundryLocalSchema),
   'litert-lm': toDescriptors('litert-lm', liteRtLmSchema),
   'fastflowlm': toDescriptors('fastflowlm', fastflowlmSchema),
+  'strata': toDescriptors('strata', strataSchema),
   'geniex': toDescriptors('geniex', geniexSchema),
 }
 
@@ -273,6 +276,14 @@ export const CANONICAL_VALUE_TYPES: Record<LocalProviderId, Readonly<Record<stri
   'sglang': SGLANG_VALUE_TYPES,
   'foundry-local': FOUNDRY_LOCAL_VALUE_TYPES,
   'litert-lm': LITERT_LM_VALUE_TYPES,
+  'strata': {
+    context_length: 'number',
+    gpu_id: 'string',
+    memory_mode: 'string',
+    parallel_requests: 'number',
+    vision: 'string',
+    timeout: 'number',
+  },
   'fastflowlm': {
     ctx_len: 'number',
     timeout: 'number',

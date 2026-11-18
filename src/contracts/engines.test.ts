@@ -24,6 +24,7 @@ describe('engine lifecycle contracts', () => {
       'litert-lm',
       'geniex',
       'fastflowlm',
+      'strata',
       'tensorrt-llm',
       'vllm',
       'sglang',
@@ -45,6 +46,7 @@ describe('engine lifecycle contracts', () => {
       'litert-lm',
       'geniex',
       'fastflowlm',
+      'strata',
     ])
   })
 

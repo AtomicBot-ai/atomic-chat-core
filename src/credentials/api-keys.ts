@@ -41,6 +41,9 @@ export class ApiKeyStore {
   /**
    * Read the file, or start empty when it is absent. A file that cannot be parsed is refused rather
    * than silently replaced: overwriting it would throw away every key the user entered.
+   *
+   * A leading UTF-8 byte-order mark is dropped before parsing, as `SettingsStore.open` does: Windows
+   * Notepad and PowerShell 5.1 `-Encoding UTF8` write one, and `JSON.parse` rejects it.
    */
   static async open(path: string, options: { now?: () => number } = {}): Promise<ApiKeyStore> {
     const now = options.now ?? Date.now
@@ -54,7 +57,7 @@ export class ApiKeyStore {
     }
     let parsed: unknown
     try {
-      parsed = JSON.parse(text)
+      parsed = JSON.parse(text.replace(/^\uFEFF/, ''))
     } catch (e) {
       throw new AtomicCoreError(
         'IO_ERROR',

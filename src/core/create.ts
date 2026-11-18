@@ -5,6 +5,7 @@
  */
 
 import { lstat } from 'node:fs/promises'
+import { wireStrata } from './strata.js'
 import {
   FastFlowLmRuntime,
   FlmMaintenance,
@@ -77,6 +78,7 @@ import {
   probeFastFlowLm,
   probeNpu,
   probeSystemInfo,
+  probeStrataHost,
   probeUnifiedMemory,
 } from '../hardware/index.js'
 import {
@@ -865,7 +867,24 @@ export async function createAtomicCore(
         })
       : undefined
     if (flmRuntime) runtimes.set('fastflowlm', flmRuntime)
+    const strataFacts = async () =>
+      probeStrataHost((await hardware.info()).info, nodeProbeDeps({ platform, arch: process.arch, env }))
+    const strata = await wireStrata({
+      layout,
+      platform,
+      env,
+      instanceId: lock.instanceId,
+      builds: () => engineBuilds,
+      facts: strataFacts,
+      settings: () => settings.get('strata'),
+      trustedHosts: managedTrustedHosts,
+      claimGpu: gpuResidency.hook('strata'),
+      emit: (name, payload) => emitter.emit(name, payload),
+    })
+    runtimes.set('strata', strata.runtime)
+    registries.set('strata', new ModelRegistry(layout, 'strata'))
     const engineBuilds: EngineBuildsService = new EngineBuildsService({
+      strataHardware: strataFacts,
       env,
       dataFolder: layout.root,
       roots: {
@@ -874,6 +893,7 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalPaths.backendsDir,
         'litert-lm': layout.provider('litert-lm').backendsDir,
         'fastflowlm': layout.provider('fastflowlm').backendsDir,
+        'strata': layout.provider('strata').backendsDir,
         'geniex': layout.provider('geniex').backendsDir,
         'audio-cpp': layout.audio.backendsDir,
       },
@@ -894,6 +914,7 @@ export async function createAtomicCore(
         }),
         'litert-lm': liteRtManifest,
         'fastflowlm': new EngineManifestSource(engineManifestKinds.fastflowlm, { env, fetchFor, log }),
+        'strata': new EngineManifestSource(engineManifestKinds.strata, { env, fetchFor, log }),
         'geniex': new EngineManifestSource(engineManifestKinds.geniex, { env, fetchFor, log }),
         'audio-cpp': new EngineManifestSource(engineManifestKinds['audio-cpp'], { env, fetchFor, log }),
       },
@@ -928,6 +949,7 @@ export async function createAtomicCore(
         'foundry-local': foundryLocalRuntime ? foundryLocalRuntime.engineHost() : IDLE_ENGINE_HOST,
         'litert-lm': liteRtLmRuntime ? liteRtLmRuntime.engineHost() : IDLE_ENGINE_HOST,
         'fastflowlm': flmRuntime?.engineHost() ?? IDLE_ENGINE_HOST,
+        'strata': strata.runtime.engineHost(),
         'geniex': geniexRuntime ? geniexRuntime.engineHost() : IDLE_ENGINE_HOST,
         'audio-cpp': audio.engineHost(),
       },
@@ -1242,7 +1264,9 @@ export async function createAtomicCore(
         fastFlowLmMaintenance,
         fastFlowLmOperations,
         fastFlowLmPreparation: async () => (await flmPreparation()).plan,
+        strata,
         nativeModelChecks: {
+          strata: strata.check,
           fastflowlm: (body) => checkFastFlowLmModel(body, flmModels, flmProbe),
           ...(foundryLocalAccelerators
             ? {
