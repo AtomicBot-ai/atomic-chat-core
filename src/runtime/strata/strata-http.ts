@@ -6,6 +6,7 @@ import { strataRequest } from './strata-policy.js'
 
 const chat = { method: 'POST', path: '/v1/chat/completions' }
 const routes: readonly ManagedRoute[] = [chat, { method: 'GET', path: '/v1/models' }]
+const telemetryTimeoutMs = 2000
 
 export function strataHttp(
   upstreamPort: number,
@@ -25,27 +26,39 @@ export function strataHttp(
   }
   return {
     policy,
-    async proveHttp(status: { instanceId?: string }, signal: AbortSignal): Promise<boolean> {
+    async httpHealthFailure(
+      status: { instanceId?: string },
+      signal: AbortSignal
+    ): Promise<string | undefined> {
+      if (!status.instanceId) return 'Strata Control did not report an instance ID.'
+      const timeout = AbortSignal.timeout(telemetryTimeoutMs)
+      let response: Response
       try {
-        if (!status.instanceId) return false
-        const response = await fetcher('http://127.0.0.1:' + upstreamPort + '/v1/telemetry', {
+        response = await fetcher('http://127.0.0.1:' + upstreamPort + '/v1/telemetry', {
           headers: { authorization: 'Bearer ' + upstreamKey },
-          signal: AbortSignal.any([signal, AbortSignal.timeout(2000)]),
+          signal: AbortSignal.any([signal, timeout]),
           redirect: 'error',
         })
-        if (!response.ok) return false
-        const telemetry = (await response.json()) as {
-          instance?: { id?: unknown }
-          model?: { id?: unknown; loaded?: unknown }
-        }
-        return (
-          telemetry.instance?.id === status.instanceId &&
-          telemetry.model?.id === modelId &&
-          telemetry.model.loaded === true
-        )
       } catch {
-        return false
+        return timeout.aborted
+          ? `Strata telemetry timed out after ${telemetryTimeoutMs} ms.`
+          : 'Could not reach Strata telemetry.'
       }
+      if (!response.ok) return `Strata telemetry returned HTTP ${response.status}.`
+      let telemetry: {
+        instance?: { id?: unknown }
+        model?: { id?: unknown; loaded?: unknown }
+      } | null
+      try {
+        telemetry = (await response.json()) as typeof telemetry
+      } catch {
+        return timeout.aborted
+          ? `Strata telemetry timed out after ${telemetryTimeoutMs} ms.`
+          : 'Could not read the Strata telemetry JSON.'
+      }
+      if (telemetry?.instance?.id !== status.instanceId) return 'Strata telemetry instance ID did not match.'
+      if (telemetry.model?.id !== modelId) return 'Strata telemetry model ID did not match.'
+      if (telemetry.model.loaded !== true) return 'Strata telemetry reported that the model was not loaded.'
     },
     async expose() {
       const apiKey = generateGatewayKey()

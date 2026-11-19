@@ -29,7 +29,7 @@ export interface StrataRuntimeLaunch {
   logPath?: string
   timeoutMs: number
   owner: Pick<StrataOwnedControl, 'start' | 'status' | 'stop'>
-  proveHttp(status: StrataControlStatus, signal: AbortSignal): Promise<boolean>
+  httpHealthFailure(status: StrataControlStatus, signal: AbortSignal): Promise<string | undefined>
   expose(): Promise<Endpoint>
   policy?: SessionRoutePolicy
 }
@@ -47,7 +47,9 @@ interface Options {
   ): Promise<StrataRuntimeLaunch>
   claimGpu?: GpuClaimHook
   emit?: EmitFn
+  log?: (level: 'info' | 'warn', message: string) => void
   pollMs?: number
+  monitorPollMs?: number
 }
 interface Held {
   launch: StrataRuntimeLaunch
@@ -63,6 +65,14 @@ interface Pending {
 }
 const busy = () =>
   new AtomicCoreError('GPU_BUSY', 'Strata process exit is unconfirmed. The selected GPU is still held.')
+const healthFailureLimit = 3
+
+function controlFailure(reason: string, detail?: unknown): string {
+  // Control may include native diagnostics. Only log short status codes, never raw process output.
+  return typeof detail === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(detail)
+    ? `${reason.replace(/\.$/, '')} (${detail}).`
+    : reason
+}
 
 async function startupMemoryError(logPath: string): Promise<AtomicCoreError | undefined> {
   const file = await open(logPath, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
@@ -217,7 +227,11 @@ export class StrataRuntime implements LocalRuntime {
         await launch.owner.start(launch.timeoutMs, startup)
         while (!startup.aborted) {
           const status = await launch.owner.status()
-          if (status.state === 'ready' && status.hostPid && (await launch.proveHttp(status, startup))) {
+          if (
+            status.state === 'ready' &&
+            status.hostPid &&
+            !(await launch.httpHealthFailure(status, startup))
+          ) {
             startup.throwIfAborted()
             active.endpoint = await launch.expose()
             startup.throwIfAborted()
@@ -269,23 +283,42 @@ export class StrataRuntime implements LocalRuntime {
     }
   }
 
-  private async monitor(modelId: string, row: Held, instanceId: string | undefined, signal: AbortSignal) {
+  private async healthFailure(row: Held, instanceId: string | undefined, signal: AbortSignal) {
+    let status: StrataControlStatus
     try {
-      while (!signal.aborted) {
-        await sleep(5000, undefined, { signal, ref: false })
-        const status = await row.launch.owner.status()
-        if (
-          status.state === 'ready' &&
-          status.instanceId === instanceId &&
-          (await row.launch.proveHttp(status, signal))
-        )
-          continue
-        break
-      }
-    } catch {
-      // Treat a lost identity as unusable. Stop confirmation remains a separate check.
+      status = await row.launch.owner.status()
+    } catch (error) {
+      return error instanceof AtomicCoreError
+        ? controlFailure(error.message, error.details)
+        : 'Strata Control status check failed.'
     }
-    if (!signal.aborted && row.session) {
+    if (signal.aborted) return
+    if (status.state !== 'ready')
+      return controlFailure(`Strata Control reported ${status.state}.`, status.error)
+    if (status.instanceId !== instanceId) return 'Strata Control instance ID did not match.'
+    return row.launch.httpHealthFailure(status, signal)
+  }
+
+  private async monitor(modelId: string, row: Held, instanceId: string | undefined, signal: AbortSignal) {
+    let failures = 0
+    while (!signal.aborted && row.session) {
+      try {
+        await sleep(this.options.monitorPollMs ?? 5000, undefined, { signal, ref: false })
+      } catch {
+        return // Explicit unload or shutdown cancelled the timer.
+      }
+      const failure = await this.healthFailure(row, instanceId, signal)
+      if (signal.aborted || !row.session) return
+      if (!failure) {
+        if (failures)
+          this.options.log?.('info', `Strata ${modelId} health check recovered after ${failures} failure(s).`)
+        failures = 0
+        continue
+      }
+      failures++
+      const message = `Strata ${modelId} health check ${failures}/${healthFailureLimit} failed. ${failure}`
+      this.options.log?.('warn', message)
+      if (failures < healthFailureLimit) continue
       const pid = row.session.pid
       delete row.session
       this.options.emit?.('session:died', {
@@ -294,9 +327,10 @@ export class StrataRuntime implements LocalRuntime {
         pid,
         exit_code: null,
         signal: null,
-        message: 'The Strata runtime no longer reports the loaded instance.',
+        message,
       })
       await this.stop(modelId, row)
+      return
     }
   }
 

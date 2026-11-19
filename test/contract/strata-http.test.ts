@@ -49,8 +49,10 @@ it('proves HTTP instance and model, isolates credentials, and forwards another r
   )
   try {
     const signal = new AbortController().signal
-    await expect(http.proveHttp({ instanceId: 'wrong' }, signal)).resolves.toBe(false)
-    await expect(http.proveHttp({ instanceId: 'instance' }, signal)).resolves.toBe(true)
+    await expect(http.httpHealthFailure({ instanceId: 'wrong' }, signal)).resolves.toBe(
+      'Strata telemetry instance ID did not match.'
+    )
+    await expect(http.httpHealthFailure({ instanceId: 'instance' }, signal)).resolves.toBeUndefined()
     const endpoint = await http.expose()
     try {
       const url = 'http://127.0.0.1:' + endpoint.port

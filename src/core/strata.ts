@@ -45,6 +45,7 @@ import type { StrataHostFacts, StrataLaunchIntent } from '../runtime/strata/inde
 import type { StrataBackend, StrataCheckResult, StrataModelDescriptor } from '../contracts/index.js'
 import type { StrataModelEntry } from '../models/index.js'
 import { CORE_VERSION } from '../version.js'
+import type { CoreLogger } from './types.js'
 
 interface Options {
   layout: DataLayout
@@ -58,6 +59,7 @@ interface Options {
   trustedHosts: string[]
   claimGpu: GpuClaimHook
   emit: EmitFn
+  log?: CoreLogger
 }
 
 const insufficientStrataVram = (requiredBytes: number) =>
@@ -312,6 +314,7 @@ export async function wireStrata(options: Options) {
   const runtime: StrataRuntime = new StrataRuntime({
     claimGpu: options.claimGpu,
     emit: options.emit,
+    ...(options.log ? { log: options.log } : {}),
     guardLoad: (id, work) => maintenance.withLoad(id, work),
     stopPreparations: () => preparations.shutdown(),
     retained: () => journal.list().filter((entry) => entry.core.instanceId !== instanceId),
