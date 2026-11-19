@@ -1,4 +1,4 @@
-import { strataCudaProfile } from '../../client/strata-contracts.js'
+import { strataCudaProfile, strataProfileId } from '../../client/strata-contracts.js'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { parseStrataDescriptor } from '../../client/index.js'
 import { AtomicCoreError, type StrataBackend } from '../../contracts/index.js'
@@ -52,12 +52,13 @@ export function strataPreparationPlan(
     'pack/tokenizer/tokenizer.json',
     'pack/tokenizer/chat_template.jinja',
   ].map((path) => ({ path }))
-  const profile = strataCudaProfile(d.variant_id)
+  const profileId = strataProfileId(d)
+  const profile = strataCudaProfile(profileId)
   if (profile && backend !== 'cuda')
     throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'The Strata preparation profile requires CUDA.')
   if (profile?.readyPack) return { gpuRequired: false, steps: [], readyPack: true }
   if (d.family === 'qwen36') {
-    if (!['cuda', 'hip'].includes(backend) || (!profile && d.variant_id !== 'ud-q4-k-xl-mtp'))
+    if (!['cuda', 'hip'].includes(backend) || (!profile && profileId !== 'ud-q4-k-xl-mtp'))
       throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'Unsupported Qwen3.6 preparation profile.')
     return {
       gpuRequired: false,
@@ -72,11 +73,11 @@ export function strataPreparationPlan(
     }
   }
   if (d.family === 'qwen38') {
-    const sharedQuant = ['q2-0-dflash2', 'iq3-s-dflash2'].includes(d.variant_id)
+    const sharedQuant = ['q2-0-dflash2', 'iq3-s-dflash2'].includes(profileId)
     const additionalQuant =
       (backend === 'metal' && sharedQuant) ||
-      (backend === 'cuda' && (sharedQuant || d.variant_id === 'iq2-xs-dflash2'))
-    if (d.variant_id !== 'iq3-xxs-dflash2' && !additionalQuant && !profile)
+      (backend === 'cuda' && (sharedQuant || profileId === 'iq2-xs-dflash2'))
+    if (profileId !== 'iq3-xxs-dflash2' && !additionalQuant && !profile)
       throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'Unsupported Qwen3.8 preparation profile.')
     return {
       gpuRequired: false,
@@ -96,7 +97,7 @@ export function strataPreparationPlan(
             '--out',
             output('pack'),
             ...(backend === 'metal' ? [] : ['--experts-bin']),
-            ...(/^(unsloth|gyro)-/.test(d.variant_id) ? ['--compat-bf16'] : []),
+            ...(/^(unsloth|gyro)-/.test(profileId) ? ['--compat-bf16'] : []),
           ],
           outputs: [
             ...tokenizer,
@@ -131,7 +132,7 @@ export function strataPreparationPlan(
       ],
     }
   }
-  if (backend === 'sycl' || (!profile && d.variant_id !== 'ista-2-00bpw-dspark'))
+  if (backend === 'sycl' || (!profile && profileId !== 'ista-2-00bpw-dspark'))
     throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'Unsupported DeepSeek preparation profile.')
   const expertProfile = d.files.find((f) => f.path === d.inputs.expert_profile)
   const draftArgs =

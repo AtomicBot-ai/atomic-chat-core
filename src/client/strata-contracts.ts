@@ -72,6 +72,19 @@ const cudaProfiles = {
   }
 >
 
+const baseProfiles = {
+  'iq3-xxs-dflash2': 'qwen38',
+  'q2-0-dflash2': 'qwen38',
+  'iq3-s-dflash2': 'qwen38',
+  'iq2-xs-dflash2': 'qwen38',
+  'ud-q4-k-xl-mtp': 'qwen36',
+  'ista-2-00bpw-dspark': 'deepseek41',
+} as const
+
+export function strataProfileId(d: StrataModelDescriptor): string {
+  return d.profile_id ?? d.variant_id
+}
+
 const packFiles = [
   'pack/dense.bin',
   'pack/experts.bin',
@@ -136,6 +149,7 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
   keys(d, [
     'family',
     'variant_id',
+    'profile_id',
     'name',
     'license',
     'gated',
@@ -157,7 +171,17 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
   const recipe = recipes[family]
   check(id(d.variant_id) && safePath(d.variant_id), 'variant id')
   // These profiles are qualified for the CUDA catalog of this release.
-  const profile = strataCudaProfile(d.variant_id)
+  const profileId = d.profile_id === undefined ? d.variant_id : d.profile_id
+  check(id(profileId), 'profile id')
+  const profile = strataCudaProfile(profileId)
+  if (d.profile_id !== undefined) {
+    const profileFamily =
+      profile?.family ??
+      (Object.hasOwn(baseProfiles, profileId)
+        ? baseProfiles[profileId as keyof typeof baseProfiles]
+        : undefined)
+    check(profileFamily === family, 'unknown or incompatible profile')
+  }
   check(!profile || profile.family === family, 'profile family')
   const drafting = profile?.drafting ?? recipe.drafting
   const weightCount = profile?.weights ?? recipe.weights
@@ -277,7 +301,7 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
     const prefix = String(inputs.weights[0]).replace(/-00001-of-\d{5}\.gguf$/, '')
     const final = String(splitCount).padStart(5, '0')
     const engram =
-      d.variant_id === 'ista-coder-dspark'
+      profileId === 'ista-coder-dspark'
         ? 'DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf'
         : `${prefix}-${final}-of-${final}.gguf`
     check(
@@ -384,14 +408,16 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
 
 export function parseStrataDefinition(entry: AtomicCatalogEntry): StrataModelDescriptor {
   check(
-    (entry.kind === 'strata' || entry.kind === 'strata-cuda') &&
+    (entry.kind === 'strata' || entry.kind === 'strata-cuda' || entry.kind === 'strata-profile') &&
       entry.format === 'strata' &&
       entry.files === undefined &&
       entry.omit_revisions === undefined,
     'catalog format'
   )
   const d = parseStrataDescriptor(entry.definition)
-  check(Boolean(strataCudaProfile(d.variant_id)) === (entry.kind === 'strata-cuda'), 'entry kind')
+  check((d.profile_id !== undefined) === (entry.kind === 'strata-profile'), 'entry profile')
+  if (!d.profile_id)
+    check(Boolean(strataCudaProfile(d.variant_id)) === (entry.kind === 'strata-cuda'), 'entry kind')
   check(
     Object.keys(entry.variants).length === 1 &&
       Object.hasOwn(entry.variants, d.variant_id) &&
@@ -408,6 +434,7 @@ export function projectStrataCollection(catalog: AtomicModelCatalog) {
   for (const [name, kind] of [
     ['strata-models', 'strata'],
     ['strata-cuda-models', 'strata-cuda'],
+    ['strata-profile-models', 'strata-profile'],
   ] as const) {
     const collection = catalog.collections[name]
     if (collection === undefined) continue
@@ -422,13 +449,13 @@ export function projectStrataCollection(catalog: AtomicModelCatalog) {
         record(ref) &&
           typeof ref.model === 'string' &&
           Object.hasOwn(catalog.models, ref.model) &&
-          catalog.models[ref.model]?.kind === kind &&
-          !seen.has(ref.model),
+          catalog.models[ref.model]?.kind === kind,
         'collection reference'
       )
       const d = parseStrataDefinition(catalog.models[ref.model]!)
       check(ref.variant === d.variant_id, 'collection variant')
-      seen.add(ref.model)
+      check(!seen.has(d.variant_id), 'duplicate variant id')
+      seen.add(d.variant_id)
       models.push(d)
     }
   }
