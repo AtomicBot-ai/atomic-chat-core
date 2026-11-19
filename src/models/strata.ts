@@ -1,4 +1,4 @@
-import { strataCudaProfile } from '../client/strata-contracts.js'
+import { strataCudaProfile, strataProfileId } from '../client/strata-contracts.js'
 import { parseStrataDescriptor } from '../client/index.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { ModelYmlStrata } from '../contracts/index.js'
@@ -118,7 +118,7 @@ export class StrataRegistry {
   async verify(id: string, signal?: AbortSignal): Promise<StrataModelEntry> {
     const entry = await this.get(id)
     const descriptor = entry.strata.descriptor
-    const externalEngram = strataCudaProfile(descriptor.variant_id)?.externalEngram
+    const externalEngram = strataCudaProfile(strataProfileId(descriptor))?.externalEngram
       ? descriptor.inputs.engram
       : undefined
     const headers = new Map<string, GgufMetadata>()

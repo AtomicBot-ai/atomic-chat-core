@@ -65,6 +65,8 @@ export interface StrataRequirements {
 export interface StrataModelDescriptor {
   family: StrataFamily
   variant_id: string
+  /** Existing engine profile used by a separately installable catalog variant. */
+  profile_id?: string
   name: string
   license: string
   gated: boolean

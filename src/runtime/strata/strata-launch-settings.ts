@@ -1,4 +1,4 @@
-import { strataCudaProfile } from '../../client/strata-contracts.js'
+import { strataCudaProfile, strataProfileId } from '../../client/strata-contracts.js'
 import { isAbsolute, join } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type { StrataModelDescriptor } from '../../contracts/index.js'
@@ -37,7 +37,8 @@ export function strataLaunchConfig(descriptor: StrataModelDescriptor, input: Lau
     reject('The selected GPU could not be mapped to a verified Strata device.')
   if (![input.bundle, input.source, input.prepared, input.state].every((path) => isAbsolute(path)))
     reject('Strata launch requires absolute paths.')
-  const readyPack = strataCudaProfile(descriptor.variant_id)?.readyPack
+  const profileId = strataProfileId(descriptor)
+  const readyPack = strataCudaProfile(profileId)?.readyPack
   const expertsBytes =
     descriptor.files.find((file) => readyPack && file.path === 'pack/experts.bin')?.size ?? 0
   const GiB = 2 ** 30
@@ -93,7 +94,7 @@ export function strataLaunchConfig(descriptor: StrataModelDescriptor, input: Lau
         source(i.embedding!)
       )
     } else {
-      const pleIndex = i.weights.length === 1 || descriptor.variant_id.startsWith('swift-') ? 0 : 1
+      const pleIndex = i.weights.length === 1 || profileId.startsWith('swift-') ? 0 : 1
       if (i.weights.length <= 2) args.push('--ple-gguf', source(i.weights[pleIndex]!))
     }
     if (i.expert_profile) args.push('--expert-profile', source(i.expert_profile))
