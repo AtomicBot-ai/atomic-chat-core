@@ -282,3 +282,4 @@ add a new one that says which record it supersedes.
 
 - [Report optimal-backend cache write failures as core IO_ERROR with their cause](2026-11-18-optimal-backend-write-failures-are-core-io-errors.md)
 - [2026-11-17 — Account for staged Strata sources in compatibility checks](2026-11-17-credit-strata-staging-in-preflight.md)
+- [2026-11-19 — Reuse Strata engine profiles from the model catalog](2026-11-19-reuse-strata-profiles-from-the-model-catalog.md)

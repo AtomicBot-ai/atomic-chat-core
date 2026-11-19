@@ -84,7 +84,7 @@ export function parseAtomicModelCatalog(
       if (flmVariants.has(variant_id)) throw new Error('Duplicate FastFlowLM variant')
       flmVariants.add(variant_id)
     }
-    if (entry.kind === 'strata' || entry.kind === 'strata-cuda')
+    if (entry.kind === 'strata' || entry.kind === 'strata-cuda' || entry.kind === 'strata-profile')
       parseStrataDefinition(entry as unknown as AtomicCatalogEntry)
     sources(entry.definition)
     if (entry.kind === 'chat' && (!Array.isArray(entry.files) || entry.files.length === 0))

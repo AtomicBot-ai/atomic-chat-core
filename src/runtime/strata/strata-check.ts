@@ -1,4 +1,4 @@
-import { strataCudaProfile } from '../../client/strata-contracts.js'
+import { strataCudaProfile, strataProfileId } from '../../client/strata-contracts.js'
 import type {
   StrataBackend,
   StrataMemoryMode,
@@ -29,7 +29,7 @@ export function planStrataMemory(
   gpuBytes: number,
   settings: StrataSettings
 ): { settings: StrataSettings; minimumVramBytes?: number } {
-  if (backend !== 'cuda' || descriptor.variant_id !== 'ud-q4-k-xl-mtp') return { settings }
+  if (backend !== 'cuda' || strataProfileId(descriptor) !== 'ud-q4-k-xl-mtp') return { settings }
   const compact = gpuBytes < QWEN36_CUDA_EXTENDED_VRAM
   const autoContext = compact
     ? Math.min(descriptor.context_length, QWEN36_CUDA_TEXT_CONTEXT)
@@ -44,7 +44,7 @@ export function planStrataMemory(
 }
 
 export function strataRamModeBytes(d: StrataModelDescriptor): number {
-  const readyPack = strataCudaProfile(d.variant_id)?.readyPack
+  const readyPack = strataCudaProfile(strataProfileId(d))?.readyPack
   const weights = d.files
     .filter((file) =>
       readyPack ? ['ple', 'embedding', 'pack'].includes(file.role) : file.role === 'weights'
@@ -55,6 +55,8 @@ export function strataRamModeBytes(d: StrataModelDescriptor): number {
 
 /** Conservative planning estimates for the pinned recipes. Values are not hardware qualification. */
 export function estimateStrata(d: StrataModelDescriptor, input: Inputs): StrataResourceEstimate {
+  const profileId = strataProfileId(d)
+  const readyPack = strataCudaProfile(profileId)?.readyPack
   const weights = d.files.filter((f) => f.role === 'weights').reduce((total, file) => total + file.size, 0)
   const download_bytes = input.installed ? 0 : d.requirements.download_bytes - (input.stagedBytes ?? 0)
   let derivative_bytes = 0
@@ -64,7 +66,7 @@ export function estimateStrata(d: StrataModelDescriptor, input: Inputs): StrataR
       case 'qwen38':
         // Dense tensors can widen to F32. Non-Metal also packs experts from every shard.
         derivative_bytes = 64 * 2 ** 20
-        if (!strataCudaProfile(d.variant_id)?.readyPack)
+        if (!readyPack)
           derivative_bytes +=
             (d.inputs.drafting === 'dflash2' ? 522_458_112 : 0) +
             (input.backend === 'metal' ? 8 * GiB : weights + 8 * GiB)
@@ -82,10 +84,8 @@ export function estimateStrata(d: StrataModelDescriptor, input: Inputs): StrataR
   }
   // The pinned CUDA Q4 recipe keeps about 18.75 GiB of routed experts in host memory.
   // Round up the arena plus 12 GiB for the OS and runtime (31 GiB).
-  const qwen36Q4Ram =
-    input.backend === 'cuda' && d.variant_id === 'ud-q4-k-xl-mtp' ? Math.ceil(18.75 + 12) : 32
-  const qwen36Ram = d.variant_id === 'q8-0-mtp' ? 52 : d.variant_id === 'ud-q6-k-xl-mtp' ? 44 : qwen36Q4Ram
-  const readyPack = strataCudaProfile(d.variant_id)?.readyPack
+  const qwen36Q4Ram = input.backend === 'cuda' && profileId === 'ud-q4-k-xl-mtp' ? Math.ceil(18.75 + 12) : 32
+  const qwen36Ram = profileId === 'q8-0-mtp' ? 52 : profileId === 'ud-q6-k-xl-mtp' ? 44 : qwen36Q4Ram
   const ram =
     readyPack && input.memoryMode === 'ram'
       ? strataRamModeBytes(d)
@@ -94,7 +94,7 @@ export function estimateStrata(d: StrataModelDescriptor, input: Inputs): StrataR
   const qwen36Vram = input.backend === 'cuda' ? QWEN36_CUDA_TEXT_VRAM : 8 * GiB
   // One card must hold the DeepSeek Q8 dense weights; the 2-bit variants use a smaller dense set.
   const vram =
-    d.variant_id === 'unsloth-ud-q8-k-xl'
+    profileId === 'unsloth-ud-q8-k-xl'
       ? 16_000 * 2 ** 20
       : d.family === 'deepseek41'
         ? 8 * GiB

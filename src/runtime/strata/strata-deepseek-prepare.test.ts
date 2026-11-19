@@ -37,3 +37,17 @@ it('uses the full four-shard DeepSeek recipe with explicit Engram, DSpark and vi
   expect(d.inputs.experts_per_token).toBe(6)
   expect(() => strataPreparationPlan(d, 'sycl', sourceDir, stagingDir)).toThrow()
 })
+
+it('prepares a catalog-defined installation with its explicit profile and enforces the profile backend', () => {
+  const base = parseStrataDescriptor(Object.values(catalog.models)[2]!.definition)
+  const d = { ...base, variant_id: 'another-publisher-flash', profile_id: base.variant_id }
+  expect(strataPreparationPlan(d, 'metal', sourceDir, stagingDir)).toEqual(
+    strataPreparationPlan(base, 'metal', sourceDir, stagingDir)
+  )
+  expect(parseStrataDescriptor(d).variant_id).toBe('another-publisher-flash')
+  const cuda = { ...d, profile_id: 'ista-1-75bpw-dspark', compatible_variants: ['linux-x64-cuda13'] }
+  expect(strataPreparationPlan(cuda, 'cuda', sourceDir, stagingDir).steps[0]?.id).toBe('deepseek-pack')
+  expect(() => strataPreparationPlan(cuda, 'metal', sourceDir, stagingDir)).toThrow(/CUDA/)
+  expect(() => parseStrataDescriptor({ ...d, profile_id: 'unknown' })).toThrow(/profile/)
+  expect(() => parseStrataDescriptor({ ...d, profile_id: 'iq3-xxs-dflash2' })).toThrow(/profile/)
+})
