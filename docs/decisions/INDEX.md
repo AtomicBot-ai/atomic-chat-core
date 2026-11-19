@@ -289,3 +289,4 @@ add a new one that says which record it supersedes.
 - [2026-11-17 — Account for staged Strata sources in compatibility checks](2026-11-17-credit-strata-staging-in-preflight.md)
 - [2026-11-19 — Reuse Strata engine profiles from the model catalog](2026-11-19-reuse-strata-profiles-from-the-model-catalog.md)
 - [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)
+- [Start Windows DeepSeek from existing Strata packs](2026-11-19-start-windows-deepseek-from-existing-strata-packs.md)

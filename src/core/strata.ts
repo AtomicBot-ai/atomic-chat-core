@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { randomBytes } from 'node:crypto'
-import { lstat, readFile, realpath, writeFile } from 'node:fs/promises'
+import { lstat, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, isAbsolute, join, relative } from 'node:path'
 import { modelDirFromId } from '../config/index.js'
 import type { DataLayout } from '../config/index.js'
@@ -31,6 +31,7 @@ import {
   StrataRuntime,
   strataHttp,
   strataLaunchConfig,
+  stageStrataWindowsPack,
   estimateStrata,
   planStrataMemory,
   strataResourceRefusal,
@@ -102,6 +103,9 @@ export async function wireStrata(options: Options) {
     if (!startId) throw new AtomicCoreError('IO_ERROR', 'Cannot establish the core owner identity.')
     return { instanceId, pid: process.pid, startId }
   }
+  const runtimePack = (profile: string) => join(root, 'control', profile + '.pack')
+  const removeRuntimePack = (profile: string) =>
+    rm(runtimePack(profile), { recursive: true, force: true }).catch(() => {})
   const controlOptions = (intent: StrataLaunchIntent, build: Build) => ({
     platform,
     bundleDir: build.dir,
@@ -130,7 +134,8 @@ export async function wireStrata(options: Options) {
       if (!build?.strata) continue
       try {
         await verifyStrataBundle(build.dir, build.strata.release, build.strata.variant, true)
-        await (await owner(entry, build)).owned.reconcile(instanceId)
+        const stopped = await (await owner(entry, build)).owned.reconcile(instanceId)
+        if (stopped && platform === 'win32') await removeRuntimePack(entry.profile)
       } catch {
         // Keep unresolved claims visible even when the old build is damaged or unavailable.
       }
@@ -380,22 +385,40 @@ export async function wireStrata(options: Options) {
         ramBytes: facts.ramBytes,
         ...(gpuOrdinal !== undefined ? { gpuOrdinal } : {}),
       }
-      const config = strataLaunchConfig(descriptor, launch)
       const configPath = join(state, intent.profile + '.run.json')
       const logPath = join(state, intent.profile + '.log')
-      await writeFile(
-        configPath,
-        JSON.stringify({
-          ...config,
-          log: logPath,
-          lib_dirs: await libraryDirs(config.exe),
-        }) + '\n',
-        { flag: 'wx', mode: 0o600 }
-      )
-      await control.create(configPath)
+      const configure = async (preparedDir: string) => {
+        const config = strataLaunchConfig(descriptor, { ...launch, prepared: preparedDir })
+        await writeFile(
+          configPath,
+          JSON.stringify({ ...config, log: logPath, lib_dirs: await libraryDirs(config.exe) }) + '\n',
+          { flag: 'wx', mode: 0o600 }
+        )
+        await control.create(configPath)
+      }
+      const windowsDeepseek = platform === 'win32' && descriptor.family === 'deepseek41'
+      if (!windowsDeepseek) await configure(prepared)
+      let staged = false
+      const launchOwner = windowsDeepseek
+        ? {
+            start: async (timeoutMs: number, startup?: AbortSignal) => {
+              const directory = runtimePack(intent.profile)
+              staged = await stageStrataWindowsPack(prepared, directory)
+              startup?.throwIfAborted()
+              await configure(staged ? directory : prepared)
+              return owned.start(timeoutMs, startup)
+            },
+            status: () => owned.status(),
+            stop: async () => {
+              const stopped = await owned.stop()
+              if (stopped && staged) await removeRuntimePack(intent.profile)
+              return stopped
+            },
+          }
+        : owned
       return {
         build: build.dir,
-        owner: owned,
+        owner: launchOwner,
         gpuId: device.id,
         timeoutMs: settings.timeout * 1000,
         modelPath: join(entry.dir, descriptor.inputs.weights[0]!),
