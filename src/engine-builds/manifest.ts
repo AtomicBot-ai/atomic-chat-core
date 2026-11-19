@@ -654,6 +654,12 @@ export function foundryLocalAssetUrl(
     : `https://github.com/${manifest.upstream_repo}/releases/download/${release.tag}/${asset.name}`
 }
 
+/** Keep the accepted source document alongside the engine-specific view of it. */
+interface ManifestDocument<T> {
+  document: unknown
+  manifest: T
+}
+
 /** Which manifest: everything that differs between the engines. */
 export interface ManifestKind<T> {
   /** A legacy disk document may omit fields the network parser deliberately drops. */
@@ -666,7 +672,7 @@ export interface ManifestKind<T> {
   /** Pin the source URL and reject changes to an already published build identity. */
   immutableSource?: {
     url(value: string): string
-    check(previous: T, next: T): void
+    check(previous: ManifestDocument<T>, next: ManifestDocument<T>): void
   }
 }
 
@@ -743,7 +749,7 @@ export function manifestKinds(layout: DataLayout): {
             throw new Error('Expected HTTPS or a local Strata manifest file URL.')
           return url.href
         },
-        check: checkStrataImmutability,
+        check: (previous, next) => checkStrataImmutability(previous.document, next.document),
       },
     },
     'fastflowlm': {
@@ -752,7 +758,7 @@ export function manifestKinds(layout: DataLayout): {
       urlEnv: 'ATOMIC_FASTFLOWLM_MANIFEST_URL',
       immutableSource: {
         url: (value) => fastFlowLmSources('linux', { ATOMIC_FASTFLOWLM_MANIFEST_URL: value }).builds,
-        check(previous, next) {
+        check({ manifest: previous }, { manifest: next }) {
           const published = new Map(previous.releases.map((r) => [r.version, r]))
           for (const r of next.releases) {
             const old = published.get(r.version)
@@ -810,7 +816,7 @@ export interface ManifestReadOptions {
 
 export class EngineManifestSource<T> {
   /** Only a document the source itself gave; a cache fallback is retried on the next read. */
-  private memory: { fetchedAt: number; manifest: T } | null = null
+  private memory: (ManifestDocument<T> & { fetchedAt: number }) | null = null
   private readonly cachePath: string
   private readonly pinnedUrl?: string
   private inFlight: Promise<ManifestRead<T>> | null = null
@@ -858,16 +864,18 @@ export class EngineManifestSource<T> {
     const url = this.pinnedUrl ?? this.sourceUrl()
     let error: string
     try {
-      const manifest = this.kind.parse(
-        JSON.parse(await this.fetchText(this.kind.immutableSource?.url(url) ?? url, proxy))
+      const document: unknown = JSON.parse(
+        await this.fetchText(this.kind.immutableSource?.url(url) ?? url, proxy)
       )
+      const manifest = this.kind.parse(document)
+      const accepted = { manifest, document: this.kind.immutableSource ? document : manifest }
       if (this.kind.immutableSource) {
-        const previous = this.memory?.manifest ?? (await this.cached())
-        if (previous) this.kind.immutableSource.check(previous, manifest)
+        const previous = this.memory ?? (await this.readCache())
+        if (previous) this.kind.immutableSource.check(previous, accepted)
       }
       const fetchedAt = now()
-      this.memory = { fetchedAt, manifest }
-      await this.writeCache(manifest, fetchedAt)
+      this.memory = { fetchedAt, ...accepted }
+      await this.writeCache(accepted.document, fetchedAt)
       return { manifest, source: 'remote', fetched_at: fetchedAt, error: null }
     } catch (e) {
       error = `${this.kind.label} from ${url}: ${e instanceof Error ? e.message : String(e)}`
@@ -900,12 +908,13 @@ export class EngineManifestSource<T> {
     return response.text()
   }
 
-  private async readCache(): Promise<{ fetchedAt: number; manifest: T } | null> {
+  private async readCache(): Promise<(ManifestDocument<T> & { fetchedAt: number }) | null> {
     try {
       const raw = JSON.parse(await (this.deps.readFile ?? defaultReadFile)(this.cachePath)) as unknown
       if (!isRecord(raw) || typeof raw['fetched_at'] !== 'number') return null
       return {
         fetchedAt: raw['fetched_at'],
+        document: raw['manifest'],
         manifest: (this.kind.parseCached ?? this.kind.parse)(raw['manifest']),
       }
     } catch {
@@ -914,7 +923,7 @@ export class EngineManifestSource<T> {
   }
 
   /** Write-then-rename; a failure only costs the offline fallback, so it is logged, not thrown. */
-  private async writeCache(manifest: T, fetchedAt: number): Promise<void> {
+  private async writeCache(manifest: unknown, fetchedAt: number): Promise<void> {
     const path = this.cachePath
     const temporary = `${path}.tmp-${process.pid}-${fetchedAt}`
     try {

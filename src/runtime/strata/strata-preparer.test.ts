@@ -44,7 +44,10 @@ async function fixture() {
     }
   })
   const preparer = new StrataPreparer({
-    registry: { get: async () => entry, verify: async () => entry },
+    registry: {
+      get: async () => entry,
+      verify: async () => ({ ...entry, contextLimit: descriptor.context_length }),
+    },
     cache,
     context: async () => ({
       python: '/bundle/python',

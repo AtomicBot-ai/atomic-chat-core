@@ -51,3 +51,33 @@ it('prepares a catalog-defined installation with its explicit profile and enforc
   expect(() => parseStrataDescriptor({ ...d, profile_id: 'unknown' })).toThrow(/profile/)
   expect(() => parseStrataDescriptor({ ...d, profile_id: 'iq3-xxs-dflash2' })).toThrow(/profile/)
 })
+
+it('prepares pinned DeepSeek shards and external Engram for text-only Metal', () => {
+  const base = parseStrataDescriptor(Object.values(catalog.models)[2]!.definition)
+  const files = base.files.filter(({ role }) => role !== 'vision' && role !== 'drafter')
+  const inputs = { ...base.inputs, drafting: 'none' as const }
+  delete inputs.vision
+  delete inputs.drafter
+  const d = {
+    ...base,
+    variant_id: 'deepseek41-metal-text',
+    profile_id: 'ista-2-00bpw-metal-text',
+    compatible_variants: ['macos-arm64-metal'],
+    capabilities: { ...base.capabilities, vision: false },
+    files,
+    sources: base.sources.filter(({ id }) => files.some(({ source }) => source === id)),
+    requirements: {
+      ...base.requirements,
+      download_bytes: files.reduce((total, file) => total + file.size, 0),
+    },
+    inputs,
+  }
+  const args = strataPreparationPlan(d, 'metal', sourceDir, stagingDir).steps[0]!.args
+  expect(args).toEqual(expect.arrayContaining(['--engram', join(sourceDir, inputs.engram!)]))
+  expect(args).not.toContain('--dspark-gguf')
+  expect(args).not.toContain('--mmproj')
+  expect(() => strataPreparationPlan(d, 'cuda', sourceDir, stagingDir)).toThrow(/profile/)
+  expect(() => parseStrataDescriptor({ ...d, capabilities: { ...d.capabilities, vision: true } })).toThrow(
+    /vision/
+  )
+})

@@ -478,6 +478,7 @@ export interface ModelCompatibilityControl {
 
 export interface ControlServerDeps {
   strata?: {
+    contextLimit: (id: string) => Promise<number>
     preparations: Pick<StrataPreparationService, 'store' | 'list' | 'get' | 'begin' | 'cancel' | 'resume'>
     maintenance: Pick<StrataMaintenanceService, 'list' | 'get' | 'begin' | 'complete'>
   }

@@ -61,7 +61,7 @@ import type { ManagedCheckEngine, ResolvedCheckpoint } from '../managed-models/i
 import type { TensorrtLlmHostFacts } from '../tensorrt-llm/host-facts.js'
 import type { ReadyInstallation } from '../tensorrt-llm/installation.js'
 import type { ManagedModel } from '../managed-models/model-dir.js'
-import { verifyModelFilesAndCompatibility } from '../tensorrt-llm/prelaunch.js'
+import { readCheckpointMaxContext, verifyModelFilesAndCompatibility } from '../tensorrt-llm/prelaunch.js'
 import type { ManagedEngineSettings, ManagedEngineSpec } from './spec.js'
 
 export interface ManagedTextRuntimeDeps {
@@ -414,7 +414,10 @@ export class ManagedTextRuntime<
       architecture: null,
     }
     try {
-      const [ready, model] = await Promise.all([this.deps.readyInstallation(), this.deps.model(modelId)])
+      const model = await this.deps.model(modelId)
+      const maxCtxTrain = await readCheckpointMaxContext(model.dir)
+      if (maxCtxTrain !== undefined) base.maxCtxTrain = maxCtxTrain
+      const ready = await this.deps.readyInstallation()
       const settings = this.engine.settings({})
       return {
         ...base,

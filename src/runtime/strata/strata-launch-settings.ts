@@ -7,6 +7,7 @@ import { parseStrataSettings } from '../../settings/index.js'
 import { strataRamModeBytes } from './strata-check.js'
 
 interface LaunchInput {
+  contextLimit?: number
   bundle: string
   prepared: string
   source: string
@@ -29,7 +30,8 @@ const reject = (message: string): never => {
 export function strataLaunchConfig(descriptor: StrataModelDescriptor, input: LaunchInput) {
   const settings = parseStrataSettings(input.settings)
   const context = settings.context_length || descriptor.context_length
-  if (context > descriptor.context_length) reject('Strata context exceeds the verified model limit.')
+  if (context > (input.contextLimit ?? descriptor.context_length))
+    reject('Strata context exceeds the verified model limit.')
   if (!descriptor.requirements.memory_modes.includes(settings.memory_mode))
     reject('The Strata recipe does not support this memory mode.')
   const metal = input.backend === 'metal'
@@ -156,7 +158,7 @@ export function strataLaunchConfig(descriptor: StrataModelDescriptor, input: Lau
             exe: join(qwenDir, (input.backend === 'hip' ? 'strata-vision-hip' : 'strata-vision') + exeSuffix),
             ...(input.backend === 'hip' ? { cuda_device: input.gpuOrdinal } : {}),
             model: native,
-            mmproj: source(i.vision),
+            mmproj: source(i.vision!),
             gpu: true,
             elastic: false,
             max_tokens: 1024,

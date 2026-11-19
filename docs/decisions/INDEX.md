@@ -11,6 +11,10 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- [Prepare text-only DeepSeek on Metal](2026-11-19-strata-metal-deepseek-text.md)
+
+- [Use the GGUF context limit for manual Strata loads](2026-11-19-strata-gguf-context-limit.md)
+
 - [Strip a leading UTF-8 BOM when reading credentials.json](2026-11-17-strip-utf8-bom-when-reading-credentials-json.md)
 
 - [2026-11-17 — Select Strata releases by host compatibility](2026-11-17-select-strata-releases-by-host-compatibility.md)
@@ -284,3 +288,4 @@ add a new one that says which record it supersedes.
 - [Report optimal-backend cache write failures as core IO_ERROR with their cause](2026-11-18-optimal-backend-write-failures-are-core-io-errors.md)
 - [2026-11-17 — Account for staged Strata sources in compatibility checks](2026-11-17-credit-strata-staging-in-preflight.md)
 - [2026-11-19 — Reuse Strata engine profiles from the model catalog](2026-11-19-reuse-strata-profiles-from-the-model-catalog.md)
+- [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)

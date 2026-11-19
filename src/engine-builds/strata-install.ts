@@ -154,7 +154,8 @@ export async function readStrataBuilds(root: string, coreVersion: string): Promi
         await regular(dir, 'install.json')
         const row = JSON.parse(await readFile(join(dir, 'install.json'), 'utf8'))
         const release = parseStrataManifest({ schema_version: 1, releases: [row.release] }, coreVersion)
-          .releases[0]!
+          .releases[0]
+        if (!release) continue
         const selected = release.variants.find((v) => v.id === row.variant_id)
         if (
           !selected ||

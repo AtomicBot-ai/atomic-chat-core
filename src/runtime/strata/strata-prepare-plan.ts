@@ -132,16 +132,20 @@ export function strataPreparationPlan(
       ],
     }
   }
-  if (backend === 'sycl' || (!profile && profileId !== 'ista-2-00bpw-dspark'))
+  const metalText = profileId === 'ista-2-00bpw-metal-text'
+  if (
+    backend === 'sycl' ||
+    (metalText ? backend !== 'metal' : !profile && profileId !== 'ista-2-00bpw-dspark')
+  )
     throw new AtomicCoreError('MODEL_INCOMPATIBLE', 'Unsupported DeepSeek preparation profile.')
   const expertProfile = d.files.find((f) => f.path === d.inputs.expert_profile)
+  const engramArgs =
+    d.inputs.engram && d.inputs.engram_metadata
+      ? ['--engram', source(d.inputs.engram), '--engram-meta', source(d.inputs.engram_metadata)]
+      : []
   const draftArgs =
     d.inputs.drafting === 'dspark'
       ? [
-          '--engram',
-          source(d.inputs.engram!),
-          '--engram-meta',
-          source(d.inputs.engram_metadata!),
           '--dspark-gguf',
           source(d.inputs.drafter!),
           '--dspark-noise-token',
@@ -161,9 +165,9 @@ export function strataPreparationPlan(
           sourceDir,
           '--shards',
           ...d.inputs.weights,
+          ...engramArgs,
           ...draftArgs,
-          '--mmproj',
-          source(d.inputs.vision),
+          ...(d.inputs.vision ? ['--mmproj', source(d.inputs.vision)] : []),
           // Disable upstream discovery of a sibling vision pack. The explicit GGUF supplies the geometry.
           '--vision',
           output('.tmp/unused-vision'),

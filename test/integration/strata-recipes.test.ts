@@ -212,7 +212,7 @@ it.skipIf(!bundle)(
         })
       )
       await put(
-        d.inputs.vision,
+        d.inputs.vision!,
         buildGguf({
           metadata: {
             'general.architecture': 'clip',

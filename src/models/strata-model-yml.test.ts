@@ -23,7 +23,9 @@ async function model(architecture = 'qwen4exp', metadataOnlyFirstShard = false) 
       index >= 0
         ? buildGguf({
             metadata: {
-              ...(index === 0 ? { 'general.architecture': architecture } : {}),
+              ...(index === 0
+                ? { 'general.architecture': architecture, [architecture + '.context_length']: 1048576 }
+                : {}),
               'split.no': index,
               'split.count': descriptor.inputs.weights.length,
               'split.tensors.count': descriptor.inputs.weights.length - Number(metadataOnlyFirstShard),
@@ -50,8 +52,13 @@ async function model(architecture = 'qwen4exp', metadataOnlyFirstShard = false) 
 it('discovers acquisition metadata and verifies all inputs without writing a readiness claim', async () => {
   const t = await model()
   const before = await readFile(join(t.dir, 'model.yml'), 'utf8')
+  expect(await t.registry.contextLimit('tiny')).toBe(1048576)
   expect(await t.registry.list()).toMatchObject([{ id: 'tiny', strata: t.block }])
-  expect(await t.registry.verify('tiny')).toMatchObject({ id: 'tiny', strata: t.block })
+  expect(await t.registry.verify('tiny')).toMatchObject({
+    id: 'tiny',
+    strata: t.block,
+    contextLimit: 1048576,
+  })
   expect(await readFile(join(t.dir, 'model.yml'), 'utf8')).toBe(before)
 })
 it.each(['hash', 'missing', 'wrong-architecture', 'digest'])(

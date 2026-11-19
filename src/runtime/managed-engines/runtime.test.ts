@@ -939,6 +939,23 @@ describe('ManagedTextRuntime (tensorrt-llm): what a session can do', () => {
     expect(runtime.routePolicy('qwen3')).toBeUndefined()
   })
 
+  it('reports the installed text config limit even before engine setup, preserving tools when the limit is missing', async () => {
+    build()
+    const config = join(data.layout.provider('tensorrt-llm').modelsDir, 'qwen3', 'config.json')
+    await writeFile(
+      config,
+      JSON.stringify({ max_position_embeddings: 65536, text_config: { max_position_embeddings: 20000 } })
+    )
+    expect(await runtime.capabilities('qwen3')).toMatchObject({ maxCtxTrain: 20000, tools: true })
+    await writeFile(config, '{')
+    const unknown = await runtime.capabilities('qwen3')
+    expect(unknown.tools).toBe(true)
+    expect(unknown.maxCtxTrain).toBeUndefined()
+    await writeFile(config, JSON.stringify({ n_positions: 4096 }))
+    installation = () => Promise.reject(new Error('not installed'))
+    expect(await runtime.capabilities('qwen3')).toMatchObject({ maxCtxTrain: 4096, tools: false })
+  })
+
   it('answers capabilities from the pinned descriptor, loaded or not', async () => {
     build()
     expect(await runtime.capabilities('qwen3')).toMatchObject({

@@ -13,7 +13,21 @@ describe('Strata manifest', () => {
     ['future adapter', 'adapter_contract_version', 2],
     ['future core', 'minimum_core_version', '999.0.0'],
     ['unknown ABI', 'preparation_abi', 'strata-v99'],
+  ])('skips %s before interpreting its payload', (_, key, value) => {
+    const [current] = fixture.releases
+    const newer = { ...current, release_id: 'strata-0.1.59-r3', [key]: value, future_field: true }
+    const older = { ...current, release_id: 'strata-0.1.59-r1' }
+    expect(parseStrataManifest({ ...fixture, releases: [older, newer, current] }, '0.23.6').releases).toEqual(
+      [current, older]
+    )
+    expect(parseStrataManifest({ ...fixture, releases: [newer] }, '0.23.6').releases).toEqual([])
+  })
+  it.each([
     ['inconsistent version', 'engine_version', '0.1.60'],
+    ['malformed minimum core', 'minimum_core_version', 'later'],
+    ['malformed adapter version', 'adapter_contract_version', '2'],
+    ['missing ABI', 'preparation_abi', ''],
+    ['unexpected v1 field', 'future_field', true],
   ])('rejects %s', (_, key, value) => {
     const m = structuredClone(fixture)
     Object.assign(m.releases[0]!, { [key]: value })

@@ -34,7 +34,8 @@ import { strataCanonicalDescriptor } from '../client/index.js'
 import { modelDirFromId, type DataLayout } from '../config/index.js'
 import { ModelRegistry } from './registry.js'
 import { parseModelYml, type ModelYmlDocument } from './model-yml.js'
-import { readGgufMetadataChunked, type GgufMetadata } from './gguf/index.js'
+import type { FileHandle } from 'node:fs/promises'
+import { ggufContextLength, readGgufMetadataChunked, type GgufMetadata } from './gguf/index.js'
 
 export interface StrataModelEntry {
   id: string
@@ -46,6 +47,17 @@ const incompatible = (reason: string): never => {
   throw new AtomicCoreError('MODEL_INCOMPATIBLE', reason)
 }
 const architecture = { qwen38: 'qwen4exp', qwen36: 'qwen35moe', deepseek41: 'deepseek41' }
+
+async function readHeader(handle: FileHandle): Promise<GgufMetadata> {
+  return readGgufMetadataChunked(
+    async (size) => {
+      const bytes = Buffer.alloc(size)
+      const { bytesRead } = await handle.read(bytes, 0, size, 0)
+      return bytes.subarray(0, bytesRead)
+    },
+    { maxBytes: 64 * 1024 * 1024 }
+  )
+}
 
 /** Acquisition is read-only here; only preparation can publish a separate readiness record. */
 export class StrataRegistry {
@@ -114,8 +126,21 @@ export class StrataRegistry {
     return entries
   }
 
+  /** A bounded header read for the selector. Load independently verifies the same shard. */
+  async contextLimit(id: string): Promise<number> {
+    const entry = await this.get(id)
+    const descriptor = entry.strata.descriptor
+    const file = await this.checkedFile(join(entry.dir, descriptor.inputs.weights[0]!))
+    try {
+      const { metadata } = await readHeader(file)
+      return ggufContextLength(metadata) ?? descriptor.context_length
+    } finally {
+      await file.close()
+    }
+  }
+
   /** Hash every declared input, then compare the shard geometry using the same opened handles. */
-  async verify(id: string, signal?: AbortSignal): Promise<StrataModelEntry> {
+  async verify(id: string, signal?: AbortSignal): Promise<StrataModelEntry & { contextLimit: number }> {
     const entry = await this.get(id)
     const descriptor = entry.strata.descriptor
     const externalEngram = strataCudaProfile(strataProfileId(descriptor))?.externalEngram
@@ -137,17 +162,7 @@ export class StrataRegistry {
           if (hash.digest('hex') !== expected.sha256)
             incompatible('Wrong Strata input hash: ' + expected.path)
           if (expected.role === 'weights' || expected.path === externalEngram) {
-            headers.set(
-              expected.path,
-              await readGgufMetadataChunked(
-                async (size) => {
-                  const bytes = Buffer.alloc(size)
-                  const result = await handle.read(bytes, 0, size, 0)
-                  return bytes.subarray(0, result.bytesRead)
-                },
-                { maxBytes: 64 * 1024 * 1024 }
-              )
-            )
+            headers.set(expected.path, await readHeader(handle))
           }
           const after = await handle.stat()
           if (
@@ -184,7 +199,7 @@ export class StrataRegistry {
         if (shards.length === 1 && Number(shard.metadata['split.count'] ?? 1) !== 1)
           incompatible('Missing Strata shards.')
       }
-      return entry
+      return { ...entry, contextLimit: ggufContextLength(shards[0]!.metadata) ?? descriptor.context_length }
     } catch (error) {
       signal?.throwIfAborted()
       if (error instanceof AtomicCoreError) throw error

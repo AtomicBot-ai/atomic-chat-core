@@ -79,6 +79,7 @@ const baseProfiles = {
   'iq2-xs-dflash2': 'qwen38',
   'ud-q4-k-xl-mtp': 'qwen36',
   'ista-2-00bpw-dspark': 'deepseek41',
+  'ista-2-00bpw-metal-text': 'deepseek41',
 } as const
 
 export function strataProfileId(d: StrataModelDescriptor): string {
@@ -183,11 +184,13 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
     check(profileFamily === family, 'unknown or incompatible profile')
   }
   check(!profile || profile.family === family, 'profile family')
-  const drafting = profile?.drafting ?? recipe.drafting
+  const metalText = profileId === 'ista-2-00bpw-metal-text'
+  const drafting = metalText ? 'none' : (profile?.drafting ?? recipe.drafting)
   const weightCount = profile?.weights ?? recipe.weights
   const splitCount = weightCount + Number(profile?.externalEngram ?? false)
-  const roles =
-    drafting !== 'none'
+  const roles = metalText
+    ? { engram: 'engram', engram_metadata: 'engram-metadata', expert_profile: 'expert-profile' }
+    : drafting !== 'none'
       ? { ...recipe.roles, ...(profile?.externalEngram ? { engram_metadata: 'weights' } : {}) }
       : profile?.readyPack
         ? { vision: 'vision', ple: 'ple', embedding: 'embedding', expert_profile: 'expert-profile' }
@@ -334,6 +337,8 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
       new Set(d.compatible_variants).size === d.compatible_variants.length,
     'host variants'
   )
+  if (metalText)
+    check(same(d.compatible_variants, ['macos-arm64-metal']), 'text-only DeepSeek requires Metal')
   for (const v of d.compatible_variants) {
     check(id(v), 'host variant')
     check(!profile || /-cuda(?:12|13)$/.test(v), 'CUDA-only profile')
@@ -351,6 +356,7 @@ export function parseStrataDescriptor(value: unknown): StrataModelDescriptor {
     'capabilities'
   )
   keys(caps, ['chat', 'tools', 'reasoning', 'vision', 'structured_output'])
+  if (metalText) check(caps.vision === false, 'text-only DeepSeek cannot declare vision')
   const req = d.requirements
   check(
     record(req) &&

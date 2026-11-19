@@ -24,7 +24,8 @@ export const strataDescriptor: EngineDescriptor<StrataManifest> = {
   },
   async hostChoice(ctx, manifest) {
     const unavailable = (reason: string) => ({ backend_id: null, ladder: [], reason })
-    if (!manifest?.releases.length) return unavailable('No Strata bundles have been published.')
+    if (!manifest?.releases.length)
+      return unavailable('No compatible Strata bundle is available for this core.')
     if (!ctx.strataHardware) return unavailable('Strata hardware requirements have not been checked.')
     const facts = await ctx.strataHardware()
     let reason: string | undefined

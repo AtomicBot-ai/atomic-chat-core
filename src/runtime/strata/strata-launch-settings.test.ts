@@ -18,6 +18,14 @@ const input = {
   settings: { context_length: 4096, vision: 'off' },
   ramBytes: 128 * 2 ** 30,
 }
+it('uses the catalog default and accepts manual context up to the verified GGUF limit', () => {
+  const descriptor = models[2]!
+  const launch = (context_length: number) =>
+    strataLaunchConfig(descriptor, { ...input, contextLimit: 1048576, settings: { context_length } }).args
+  expect(launch(0)).toContain(String(descriptor.context_length))
+  expect(launch(1048576)).toContain('1048576')
+  expect(() => launch(1048577)).toThrow(/context/i)
+})
 it('pins DeepSeek to six experts and uses the Metal-specific drafter policy', () => {
   const config = strataLaunchConfig(models[2]!, input)
   expect(config.args).toEqual([

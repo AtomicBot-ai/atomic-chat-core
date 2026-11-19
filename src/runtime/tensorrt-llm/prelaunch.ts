@@ -48,6 +48,8 @@ import type {
 import type { ManagedModel } from '../managed-models/model-dir.js'
 import type { JsonObject } from '../managed-models/quant-format.js'
 
+import { checkpointMaxContext } from '../managed-models/auto-limits.js'
+
 const CONFIG_FILE = 'config.json'
 const HF_QUANT_CONFIG_FILE = 'hf_quant_config.json'
 
@@ -112,6 +114,12 @@ async function readJsonObjectFile(path: string): Promise<JsonObject | null> {
     throw new AtomicCoreError('MANAGED_METADATA_INVALID', `${path} is not a JSON object.`, path)
   }
   return parsed as JsonObject
+}
+
+/** Model discovery only needs the text config, even when the engine is offline. */
+export async function readCheckpointMaxContext(dir: string): Promise<number | undefined> {
+  const config = await readJsonObjectFile(join(dir, CONFIG_FILE)).catch(() => null)
+  return config ? checkpointMaxContext(config) : undefined
 }
 
 /**

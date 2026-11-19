@@ -2327,7 +2327,15 @@ describe('Strata atomic bundles', () => {
     incompatible.variants[0]!.bundle.url = MIRROR + '/strata/incompatible-strata.tar.gz'
     h.manifests.strata = {
       manifest: parseStrataManifest(
-        { schema_version: 1, releases: [old.release, release, incompatible] },
+        {
+          schema_version: 1,
+          releases: [
+            { ...release, release_id: 'strata-0.1.59-r5', minimum_core_version: '99.0.0' },
+            old.release,
+            release,
+            incompatible,
+          ],
+        },
         '0.24.0'
       ),
       source: 'remote',

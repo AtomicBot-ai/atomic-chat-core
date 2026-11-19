@@ -366,6 +366,7 @@ export async function wireStrata(options: Options) {
       const port = await randomFreePort([])
       const key = randomBytes(32).toString('hex')
       const launch = {
+        contextLimit: verified.contextLimit,
         bundle: build.dir,
         source: entry.dir,
         prepared,
@@ -575,5 +576,12 @@ export async function wireStrata(options: Options) {
       return refuse(capacity, 'The estimated Strata working memory exceeds this host’s capacity.')
     return result
   }
-  return { runtime, registry, preparations, maintenance, check }
+  return {
+    runtime,
+    registry,
+    preparations,
+    maintenance,
+    check,
+    contextLimit: (id: string) => registry.contextLimit(id),
+  }
 }

@@ -39,7 +39,7 @@ export interface StrataInputs {
   weights: string[]
   tokenizer_from: string
   chat_template_from: string
-  vision: string
+  vision?: string
   drafting: 'dflash2' | 'mtp-embedded' | 'dspark' | 'none'
   drafter?: string
   drafter_config?: string

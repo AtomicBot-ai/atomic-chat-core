@@ -19,6 +19,9 @@ export function registerStrataRoutes(
   const service = deps.strata
   if (!service) return
   const { preparations, maintenance } = service
+  router.get(p('/models/strata/:id/context-limit'), async (_req, res, { params }) =>
+    sendJson(res, 200, { max_context_length: await service.contextLimit(params.id!) })
+  )
   const prep = '/strata/preparations'
   const guard = '/models/strata/maintenance'
   router.get(p(prep), (_req, res) => sendJson(res, 200, preparations.list()))

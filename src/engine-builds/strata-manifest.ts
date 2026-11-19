@@ -154,15 +154,38 @@ export function strataBuildKey(tag: string): number[] | null {
   return key?.every(Number.isSafeInteger) ? key : null
 }
 
-/** Validate the production contract, including cross-component compatibility. Candidates are not installs. */
-export function parseStrataManifest(raw: unknown, coreVersion: string): StrataManifest {
+/** Release identity and compatibility fields must remain readable across adapter contracts. */
+function releaseRecords(raw: unknown) {
   object(raw, ['schema_version', 'releases'], ['$schema'])
-  check(
-    raw.schema_version === 1 && Array.isArray(raw.releases) && version(coreVersion),
-    'schema/core version'
-  )
-  const releaseIds = new Set<string>()
-  for (const r of raw.releases) {
+  check(raw.schema_version === 1 && Array.isArray(raw.releases), 'schema version/releases')
+  const ids = new Set<string>()
+  return raw.releases.map((r: unknown) => {
+    check(record(r) && typeof r.release_id === 'string' && strataBuildKey(r.release_id), 'invalid release')
+    check(!ids.has(r.release_id), 'duplicate release')
+    ids.add(r.release_id)
+    return r
+  })
+}
+
+/** Validate compatible payloads and order the installable candidates by descending build number. */
+export function parseStrataManifest(raw: unknown, coreVersion: string): StrataManifest {
+  check(version(coreVersion), 'core version')
+  const releases: StrataRelease[] = []
+  for (const r of releaseRecords(raw)) {
+    check(
+      version(r.engine_version) &&
+        String(r.release_id).startsWith(`strata-${r.engine_version}-r`) &&
+        version(r.minimum_core_version) &&
+        positive(r.adapter_contract_version) &&
+        text(r.preparation_abi),
+      'invalid version/ABI'
+    )
+    if (
+      compare(r.minimum_core_version, coreVersion) > 0 ||
+      r.adapter_contract_version !== 1 ||
+      r.preparation_abi !== 'strata-v1'
+    )
+      continue
     object(r, [
       'release_id',
       'engine_version',
@@ -173,20 +196,6 @@ export function parseStrataManifest(raw: unknown, coreVersion: string): StrataMa
       'components',
       'variants',
     ])
-    check(
-      typeof r.release_id === 'string' && strataBuildKey(r.release_id) && !releaseIds.has(r.release_id),
-      'duplicate/invalid release'
-    )
-    releaseIds.add(r.release_id)
-    check(
-      version(r.engine_version) &&
-        r.release_id.startsWith(`strata-${r.engine_version}-r`) &&
-        version(r.minimum_core_version) &&
-        compare(r.minimum_core_version, coreVersion) <= 0 &&
-        r.adapter_contract_version === 1 &&
-        r.preparation_abi === 'strata-v1',
-      'unsupported version/ABI'
-    )
     strings(r.control_versions)
     check(r.control_versions.every(version), 'Control versions')
     check(
@@ -378,20 +387,21 @@ export function parseStrataManifest(raw: unknown, coreVersion: string): StrataMa
         )
     }
     check(used.size === components.size, 'unused component')
+    releases.push(structuredClone(r) as unknown as StrataRelease)
   }
-  const result = structuredClone(raw) as unknown as StrataManifest
-  result.releases.sort((a, b) => {
+  releases.sort((a, b) => {
     const aa = strataBuildKey(a.release_id)!,
       bb = strataBuildKey(b.release_id)!
     for (let i = 0; i < aa.length; i++) if (aa[i] !== bb[i]) return bb[i]! - aa[i]!
     return 0
   })
-  return result
+  return { schema_version: 1, releases }
 }
 
-export function checkStrataImmutability(previous: StrataManifest, next: StrataManifest): void {
-  for (const r of next.releases) {
-    const old = previous.releases.find((p) => p.release_id === r.release_id)
+export function checkStrataImmutability(previous: unknown, next: unknown): void {
+  const published = new Map(releaseRecords(previous).map((r) => [r.release_id, r]))
+  for (const r of releaseRecords(next)) {
+    const old = published.get(r.release_id)
     if (old && !isDeepStrictEqual(old, r))
       throw new Error('Immutable Strata release changed: ' + r.release_id)
   }
