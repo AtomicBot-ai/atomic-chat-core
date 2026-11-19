@@ -2,14 +2,17 @@ import { expect, it, vi } from 'vitest'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { AtomicCoreError } from '../../contracts/index.js'
 import { StrataRuntime } from './strata-runtime.js'
 import type { StrataControlStatus } from './strata-control-plan.js'
 import type { GpuClaimHook } from '../shared/index.js'
 const ready = { state: 'ready', hostPid: 111, ownerId: 'a'.repeat(32), instanceId: 'b'.repeat(32) } as const
-function fixture(logPath?: string) {
+function fixture(logPath?: string, monitorPollMs?: number) {
   const status = vi.fn(async (): Promise<StrataControlStatus> => ready)
   const stop = vi.fn(async () => true)
-  const proof = vi.fn(async () => true)
+  const httpHealth = vi.fn(async (): Promise<string | undefined> => undefined)
+  const emit = vi.fn()
+  const log = vi.fn()
   const close = vi.fn(async () => {})
   const expose = vi.fn(async () => ({ port: 10300, apiKey: 'gateway-key', close }))
   const start = vi.fn(async () => ({ state: 'starting' as const }))
@@ -22,13 +25,16 @@ function fixture(logPath?: string) {
       timeoutMs: 1_000,
       owner: { start, status, stop },
       ...(logPath ? { logPath } : {}),
-      proveHttp: proof,
+      httpHealthFailure: httpHealth,
       expose,
     }),
     pollMs: 1,
+    ...(monitorPollMs === undefined ? {} : { monitorPollMs }),
     claimGpu,
+    emit,
+    log,
   })
-  return { runtime, status, stop, proof, expose, start, close, claimGpu }
+  return { runtime, status, stop, httpHealth, expose, start, close, claimGpu, emit, log }
 }
 it.each([
   {
@@ -68,7 +74,7 @@ it.each([
 it('publishes the owner PID and gateway only after Control and HTTP independently report readiness', async () => {
   const f = fixture()
   f.status.mockResolvedValueOnce({ state: 'starting' })
-  f.proof.mockResolvedValueOnce(false)
+  f.httpHealth.mockResolvedValueOnce('Strata telemetry returned HTTP 503.')
   const a = f.runtime.load('model')
   const b = f.runtime.load('model')
   expect(await a).toMatchObject({ pid: 111, port: 10300, api_key: 'gateway-key', model_id: 'model' })
@@ -80,9 +86,69 @@ it('publishes the owner PID and gateway only after Control and HTTP independentl
     expect.any(Function)
   )
   expect(f.status).toHaveBeenCalledTimes(3)
-  expect(f.proof).toHaveBeenCalledTimes(2)
+  expect(f.httpHealth).toHaveBeenCalledTimes(2)
   expect(f.expose).toHaveBeenCalledTimes(1)
   await f.runtime.shutdown()
+})
+
+it('keeps the gateway open during health failures and resets the count after recovery', async () => {
+  const f = fixture(undefined, 1)
+  const throttle = 'Strata telemetry returned HTTP 503.'
+  const timeout = 'Strata telemetry timed out after 2000 ms.'
+  const session = await f.runtime.load('model')
+  try {
+    f.httpHealth
+      .mockResolvedValueOnce(throttle)
+      .mockResolvedValueOnce(timeout)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(throttle)
+    await vi.waitFor(() => expect(f.log).toHaveBeenCalledTimes(5))
+    expect(f.log.mock.calls).toEqual([
+      ['warn', `Strata model health check 1/3 failed. ${throttle}`],
+      ['warn', `Strata model health check 2/3 failed. ${timeout}`],
+      ['info', 'Strata model health check recovered after 2 failure(s).'],
+      ['warn', `Strata model health check 1/3 failed. ${throttle}`],
+      ['info', 'Strata model health check recovered after 1 failure(s).'],
+    ])
+    expect(f.runtime.findSession('model')).toEqual(session)
+    expect(f.emit).toHaveBeenCalledOnce()
+    expect(f.close).not.toHaveBeenCalled()
+    expect(f.stop).not.toHaveBeenCalled()
+  } finally {
+    await f.runtime.shutdown()
+  }
+})
+
+it('withdraws the session after three consecutive failures and reports their causes', async () => {
+  const f = fixture(undefined, 1)
+  await f.runtime.load('model')
+  try {
+    f.status
+      .mockRejectedValueOnce(
+        new AtomicCoreError('MODEL_LOAD_FAILED', 'Strata Control command failed.', 'unavailable')
+      )
+      .mockResolvedValueOnce({ ...ready, instanceId: 'c'.repeat(32) })
+    f.httpHealth.mockResolvedValueOnce('Strata telemetry returned HTTP 503.')
+    await vi.waitFor(() => expect(f.stop).toHaveBeenCalledOnce())
+    expect(f.runtime.findSession('model')).toBeUndefined()
+    expect(f.runtime.gpuOccupancy()).toEqual([])
+    expect(f.close).toHaveBeenCalledOnce()
+    expect(f.log.mock.calls).toEqual([
+      ['warn', 'Strata model health check 1/3 failed. Strata Control command failed (unavailable).'],
+      ['warn', 'Strata model health check 2/3 failed. Strata Control instance ID did not match.'],
+      ['warn', 'Strata model health check 3/3 failed. Strata telemetry returned HTTP 503.'],
+    ])
+    expect(f.emit).toHaveBeenLastCalledWith('session:died', {
+      provider: 'strata',
+      model_id: 'model',
+      pid: 111,
+      exit_code: null,
+      signal: null,
+      message: 'Strata model health check 3/3 failed. Strata telemetry returned HTTP 503.',
+    })
+  } finally {
+    await f.runtime.shutdown()
+  }
 })
 it('cancels a queued Strata reload while a different model holds the runtime turn', async () => {
   const f = fixture()

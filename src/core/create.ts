@@ -880,6 +880,7 @@ export async function createAtomicCore(
       trustedHosts: managedTrustedHosts,
       claimGpu: gpuResidency.hook('strata'),
       emit: (name, payload) => emitter.emit(name, payload),
+      log,
     })
     runtimes.set('strata', strata.runtime)
     registries.set('strata', new ModelRegistry(layout, 'strata'))
