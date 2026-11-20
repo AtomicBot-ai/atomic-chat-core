@@ -291,3 +291,4 @@ add a new one that says which record it supersedes.
 - [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)
 - [Start Windows DeepSeek from existing Strata packs](2026-11-19-start-windows-deepseek-from-existing-strata-packs.md)
 - [Retry Strata session health checks before unloading](2026-11-19-retry-strata-session-health-checks.md)
+- [Resolve a minor-less family id when an engine update targets only a variant](2026-11-20-engine-update-resolves-family-backend-ids.md)
