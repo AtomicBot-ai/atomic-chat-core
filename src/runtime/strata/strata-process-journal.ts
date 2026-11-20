@@ -121,9 +121,22 @@ export class StrataProcessJournal {
     scopeId: string,
     verify: Verify = verifyProcessIdentity
   ): Promise<StrataProcessJournal> {
-    await mkdir(root, { recursive: true, mode: 0o700 })
-    if (!(await lstat(root)).isDirectory()) corrupt()
-    const canonical = await realpath(root)
+    let canonical: string
+    try {
+      await mkdir(root, { recursive: true, mode: 0o700 })
+      if (!(await lstat(root)).isDirectory()) corrupt()
+      canonical = await realpath(root)
+    } catch (error) {
+      // The journal root is the GPU-ownership evidence, so refusal stays fatal here. It must
+      // cross the core boundary as a coded error that keeps the filesystem cause.
+      if (error instanceof AtomicCoreError) throw error
+      throw new AtomicCoreError(
+        'IO_ERROR',
+        'Strata process journal is unavailable; GPU ownership remains blocked.',
+        undefined,
+        { cause: error }
+      )
+    }
     let state: State = { version: 1, scopeId, entries: [] }
     const path = join(canonical, 'processes.json')
     try {
