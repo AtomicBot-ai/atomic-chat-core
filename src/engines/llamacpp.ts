@@ -32,6 +32,7 @@ import type {
   EngineVersionsRequest,
   LlamacppProviderId,
 } from '../contracts/index.js'
+import { resolveLatestVersionBackend } from '../backend/index.js'
 import type { BackendAdvisor, BackendOperation, BackendService } from '../backend/index.js'
 import { DOWNLOAD_CANCELLED } from '../downloads/index.js'
 import type { EngineHandle } from './service.js'
@@ -193,6 +194,12 @@ export class LlamacppEngine implements EngineHandle {
   /**
    * The build to move to: the offer of the update check; an explicit `<version>/<variant>` (no family
    * check: the client chose); or only a variant — the newest of it in the provider's catalog.
+   *
+   * The "Latest <variant>" dropdown names *minor-less family ids* (`win-cuda-13-x64`) while the
+   * catalog lists *concrete assets* (`win-cuda-13.5-x64`), so a variant-only target resolves through
+   * `resolveLatestVersionBackend`: an exact id first, then the newest concrete member of its family —
+   * the same resolution `UPSTREAM_POLICY.resolveSentinel` and the app's `resolveLatestBackendString`
+   * use. A variant the catalog truly lacks is still `BACKEND_TAG_UNRESOLVED`.
    */
   private async target(request: EngineSwapUpdateRequest): Promise<EngineBuildKey | null> {
     const current = this.deps.currentVersionBackend().trim()
@@ -208,14 +215,14 @@ export class LlamacppEngine implements EngineHandle {
     const { version, variant } = request.target
     if (version !== undefined) return { version, variant }
     const catalog = await this.deps.advisor.catalog({ current_backend: current, ...common })
-    const newest = catalog.available.find((entry) => entry.backend === variant)
-    if (newest === undefined)
+    const newest = parseKey(resolveLatestVersionBackend(variant, catalog.available) ?? '')
+    if (newest === null)
       throw new AtomicCoreError(
         'BACKEND_TAG_UNRESOLVED',
         `The ${this.engine} catalog has no ${variant} build for this computer.`,
         variant
       )
-    return { version: newest.version, variant }
+    return newest
   }
 
   /**
