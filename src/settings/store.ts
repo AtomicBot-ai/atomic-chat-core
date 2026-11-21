@@ -580,7 +580,11 @@ export class SettingsStore {
       await this.fs.writeFile(tmp, text, { encoding: 'utf8', mode: 0o600 })
       await this.fs.rename(tmp, this.path)
     } catch (e) {
-      throw new AtomicCoreError('IO_ERROR', `cannot write ${this.path}: ${(e as Error).message}`)
+      // Keep the OS errno (`EPERM`, `EACCES`, `ENOSPC`, …) reachable for failure diagnostics; the
+      // wire body still carries only code and message.
+      throw new AtomicCoreError('IO_ERROR', `cannot write ${this.path}: ${(e as Error).message}`, undefined, {
+        cause: e,
+      })
     }
   }
 }
