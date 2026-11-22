@@ -291,3 +291,4 @@ add a new one that says which record it supersedes.
 - [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)
 - [Start Windows DeepSeek from existing Strata packs](2026-11-19-start-windows-deepseek-from-existing-strata-packs.md)
 - [Retry Strata session health checks before unloading](2026-11-19-retry-strata-session-health-checks.md)
+- **2026-11-22** — [Preserve the launch-check failure on refused backend installs](2026-11-22-preserve-launch-check-cause-on-backend-install-errors.md) — a refused install's wrapper keeps the check's error as its `cause`, so `backend install` is no longer reported as `unknown`.
