@@ -291,3 +291,4 @@ add a new one that says which record it supersedes.
 - [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)
 - [Start Windows DeepSeek from existing Strata packs](2026-11-19-start-windows-deepseek-from-existing-strata-packs.md)
 - [Retry Strata session health checks before unloading](2026-11-19-retry-strata-session-health-checks.md)
+- [Refuse a duplicate direct backend install](2026-11-22-refuse-a-duplicate-direct-backend-install.md)

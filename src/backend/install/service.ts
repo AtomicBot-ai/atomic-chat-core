@@ -412,6 +412,8 @@ export interface InstallBackendResult {
 
 export class BackendService {
   private operation: BackendOperation | null = null
+  /** Direct installs in flight, by `version/backend`; see `install`. */
+  private readonly installing = new Set<string>()
 
   constructor(private readonly deps: BackendServiceDeps) {}
 
@@ -491,13 +493,6 @@ export class BackendService {
     return packs.some((pack) => pack.version === version && pack.backend === backend)
   }
 
-  /**
-   * Download and unpack a backend.
-   *
-   * Idempotent by default: a pack already on disk is reported as `installed: false` rather than
-   * downloaded again, because the updater screen calls this for every row it offers and a user
-   * clicking twice should not re-fetch half a gigabyte.
-   */
   private readonly rocmRepairs = new Map<string, Promise<void>>()
 
   /** Repair older installs before load; never let the CUDA fallback guard swallow a HIP error. */
@@ -608,7 +603,40 @@ export class BackendService {
     )
   }
 
+  /**
+   * Download and unpack a backend.
+   *
+   * Idempotent by default: a pack already on disk is reported as `installed: false` rather than
+   * downloaded again, because the updater screen calls this for every row it offers and a user
+   * clicking twice should not re-fetch half a gigabyte.
+   *
+   * One direct install per pack at a time. Staging is `target.incoming-<now>`, so two calls of the
+   * same pack that start in the same millisecond share it: the later one's `rm` deletes what the
+   * earlier one has already unpacked and the earlier one's move fails with ENOENT. A duplicate
+   * request is therefore refused before anything is deleted. An install an update, activation or
+   * removal carries is serialised by the operation slot in `installPack` instead.
+   */
   async install(
+    version: string,
+    backend: string,
+    options: InstallBackendOptions
+  ): Promise<InstallBackendResult> {
+    if (options.operation !== undefined) return this.installPack(version, backend, options)
+    const key = `${version}/${backend}`
+    if (this.installing.has(key))
+      throw new AtomicCoreError(
+        'ENGINE_INSTALL_IN_PROGRESS',
+        `The ${this.deps.provider} backend ${key} is already being installed; wait for that to finish.`
+      )
+    this.installing.add(key)
+    try {
+      return await this.installPack(version, backend, options)
+    } finally {
+      this.installing.delete(key)
+    }
+  }
+
+  private async installPack(
     version: string,
     backend: string,
     options: InstallBackendOptions
