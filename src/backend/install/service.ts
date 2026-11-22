@@ -687,8 +687,12 @@ export class BackendService {
         try {
           await verify(staging, version)
         } catch (error) {
+          // Keep the failure that the check saw: without it the reporter has only this message, and
+          // every refused install renders as the synthesized `backend install: unknown`. The message
+          // and the caller-visible refusal stay exactly as they were.
           throw new Error(
-            `The downloaded ${version}/${backend} backend failed its launch check (${String(error)}). Keeping the current backend.`
+            `The downloaded ${version}/${backend} backend failed its launch check (${String(error)}). Keeping the current backend.`,
+            { cause: error }
           )
         }
       } else if (
