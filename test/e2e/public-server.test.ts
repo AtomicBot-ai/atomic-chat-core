@@ -444,6 +444,77 @@ describe.skipIf(!existsSync(core.BIN))('the compiled core serves the Local API',
     expect(events.at(-1)).toBe('response.completed')
   })
 
+  it.skipIf(!POSIX)(
+    'keeps a resumable chat stream generating after its client drops, and resumes it by cursor',
+    async () => {
+      // About 1.5 s of tokens at the fake's 5 ms each: long enough to drop the client halfway.
+      const words = Array.from({ length: 300 }, (_, i) => `w${i}`)
+      const { port } = await servedModel({ FAKE_LLAMA_REPLY: words.join(' ') })
+      const base = `http://127.0.0.1:${port}/v1`
+      const body = JSON.stringify({
+        model: 'demo',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      })
+      const parse = (text: string) =>
+        text
+          .slice(0, text.lastIndexOf('\n\n') + 2)
+          .split('\n\n')
+          .filter((block) => block.trim() !== '')
+          .map((block) => {
+            const id = Number(/^id: (\d+)$/m.exec(block)?.[1])
+            const data = /^data: (.*)$/m.exec(block)?.[1] ?? ''
+            const content =
+              data === '[DONE]'
+                ? '[DONE]'
+                : ((JSON.parse(data) as { choices: Array<{ delta: { content?: string } }> }).choices[0]?.delta
+                    .content ?? '')
+            return { id, content }
+          })
+
+      const controller = new AbortController()
+      const res = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-atomic-resumable': '1' },
+        body,
+        signal: controller.signal,
+      })
+      expect(res.status).toBe(200)
+      const runId = res.headers.get('x-atomic-run-id')
+      expect(runId).toMatch(/^[A-Za-z0-9_-]{32}$/)
+      const reader = res.body!.getReader()
+      let head = ''
+      while (parse(head).length < 5) head += new TextDecoder().decode((await reader.read()).value)
+      const seen = parse(head)
+      controller.abort()
+
+      // Resumed after the fake has long finished: everything it wrote after the drop was kept.
+      await new Promise((resolve) => setTimeout(resolve, 2500))
+      const last = seen.at(-1)!.id
+      const resumed = await fetch(`${base}/atomic/runs/${runId}/events?after=${last}`, { method: 'POST' })
+      expect(resumed.status).toBe(200)
+      const rest = parse(await resumed.text())
+      const all = [...seen, ...rest]
+      expect(all.map((e) => e.id)).toEqual(all.map((_, i) => i + 1))
+      expect(all.at(-1)?.content).toBe('[DONE]')
+      expect(all.map((e) => e.content).join('')).toBe(`${words.join(' ')}[DONE]`)
+
+      // Last-Event-ID reads the same tail; a GET is no stream; cancel of a finished run is a 204.
+      const byHeader = await fetch(`${base}/atomic/runs/${runId}/events`, {
+        method: 'POST',
+        headers: { 'last-event-id': String(last) },
+      })
+      expect(parse(await byHeader.text())).toEqual(rest)
+      const get = await fetch(`${base}/atomic/runs/${runId}/events`)
+      expect(get.status).toBe(405)
+      await get.text()
+      expect((await fetch(`${base}/atomic/runs/${runId}/cancel`, { method: 'POST' })).status).toBe(204)
+      expect((await fetch(`${base}/atomic/runs/${'A'.repeat(32)}/cancel`, { method: 'POST' })).status).toBe(
+        404
+      )
+    }
+  )
+
   it.skipIf(!POSIX)('serves embeddings, model listings and metrics from the sessions', async () => {
     await core.writeModel(dataFolder, 'embedder')
     // llama-server serves /metrics only when started with `--metrics`.

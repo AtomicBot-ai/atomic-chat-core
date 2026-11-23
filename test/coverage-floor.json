@@ -1859,6 +1859,24 @@
     "functions": 100,
     "lines": 94
   },
+  "src/server/public/run-registry.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/runs-openapi.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/public/runs.ts": {
+    "statements": 98,
+    "branches": 97,
+    "functions": 100,
+    "lines": 98
+  },
   "src/server/public/sse.ts": {
     "statements": 100,
     "branches": 100,

@@ -11,6 +11,7 @@
 
 import { sendWhole } from './wire.js'
 import type { Exchange } from './exchange.js'
+import { withRunRoutes } from './runs-openapi.js'
 import { OPENAPI_JSON, SWAGGER_UI_BUNDLE_JS, SWAGGER_UI_CSS } from './static-assets.generated.js'
 import { isJsonObject, serdeToString } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
@@ -59,7 +60,11 @@ export function serveStatic(ex: Exchange): boolean {
   }
 }
 
-/** The OpenAPI document with every `servers[].url` pointing at this server; verbatim if unparsable. */
+/**
+ * The OpenAPI document with every `servers[].url` pointing at this server and the core's own run
+ * routes added (`runs-openapi.ts`); verbatim if unparsable. The title stays the app's: the tunnel
+ * probe recognises this server by it.
+ */
 function openapiFor(ex: Exchange): string {
   let spec: JsonValue
   try {
@@ -67,6 +72,7 @@ function openapiFor(ex: Exchange): string {
   } catch {
     return OPENAPI_JSON
   }
+  withRunRoutes(spec)
   const servers = isJsonObject(spec) ? spec['servers'] : undefined
   if (Array.isArray(servers)) {
     const url = `http://${ex.config.host}:${ex.config.port}${ex.config.prefix}`

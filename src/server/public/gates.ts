@@ -201,6 +201,29 @@ export interface HostAndKeyConfig {
   trustedHosts: readonly string[]
 }
 
+/** The keys a client must present one of; `undefined` when the listener takes none. */
+function configuredKeys(config: HostAndKeyConfig): readonly string[] | undefined {
+  return config.apiKeys ?? (config.apiKey !== '' ? [config.apiKey] : undefined)
+}
+
+/**
+ * The configured key this request presents — as `Authorization: Bearer`, else as `x-api-key` —
+ * or `undefined` when it presents none of them, or the listener takes no key at all.
+ */
+export function presentedKey(req: IncomingMessage, config: HostAndKeyConfig): string | undefined {
+  const keys = configuredKeys(config)
+  if (keys === undefined) return undefined
+  // `Bearer ` is matched exactly, case included, as the proxy does.
+  const auth = header(req, 'authorization')
+  const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined
+  const xApiKey = header(req, 'x-api-key')
+  const match = (presented: string) => keys.find((key) => key !== '' && timingSafeEqualString(presented, key))
+  // Both compared, whichever matches: the time taken does not say which header held the key.
+  const byBearer = bearer !== undefined ? match(bearer) : undefined
+  const byHeader = match(xApiKey)
+  return byBearer ?? byHeader
+}
+
 /**
  * The Host and Bearer-key checks alone, with no path whitelist, CORS or hidden-path behaviour: what
  * a listener that has no docs endpoints and must authenticate every request needs (the managed
@@ -212,19 +235,8 @@ export function hostAndKeyGate(req: IncomingMessage, config: HostAndKeyConfig): 
   if (!isValidHost(host, config.trustedHosts))
     return { status: 403, headers: [], body: hostMessage(host), kind: 'host' }
 
-  const keys = config.apiKeys ?? (config.apiKey !== '' ? [config.apiKey] : undefined)
-  if (keys !== undefined) {
-    // `Bearer ` is matched exactly, case included, as the proxy does.
-    const auth = header(req, 'authorization')
-    const bearer = auth.startsWith('Bearer ') ? auth.slice('Bearer '.length) : undefined
-    const xApiKey = header(req, 'x-api-key')
-    const matches = (presented: string) =>
-      keys.some((key) => key !== '' && timingSafeEqualString(presented, key))
-    const bearerOk = bearer !== undefined && matches(bearer)
-    const keyOk = matches(xApiKey)
-    if (!bearerOk && !keyOk) {
-      return { status: 401, headers: [], body: 'Invalid or missing authorization token', kind: 'auth' }
-    }
+  if (configuredKeys(config) !== undefined && presentedKey(req, config) === undefined) {
+    return { status: 401, headers: [], body: 'Invalid or missing authorization token', kind: 'auth' }
   }
   return undefined
 }
