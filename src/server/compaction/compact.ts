@@ -13,6 +13,7 @@ import {
   COMPACTION_TARGET_RATIO,
   CONTEXT_FIT_RATIO,
   applyCompaction,
+  carriedSummary,
   summaryBlock,
 } from '../../contracts/index.js'
 import type { CompactResult, ContextChatMessage } from '../../contracts/index.js'
@@ -81,7 +82,10 @@ export async function compactRequest(
   window: number,
   deps: CompactDeps = {}
 ): Promise<CompactOutcome> {
-  const messages = request.messages
+  // A summary an earlier compaction left in the system prompt is the summary so far: the new one is
+  // written from it and the turns it replaces, so nothing the earlier summary held is lost.
+  const carried = carriedSummary(request.messages)
+  const messages = carried.messages
   if (compactionBoundaries(messages).length === 0) {
     return {
       ok: false,
@@ -108,7 +112,9 @@ export async function compactRequest(
     if (message.role !== 'system') summarizable.push(message)
   }
   replacedBefore.push(summarizable.length)
-  const keys = prefixKeys(target.provider, target.modelId, summarizable)
+  // The summary so far is part of what a cut replaces, so it is part of the key.
+  const keySeed = carried.summary === undefined ? target.modelId : `${target.modelId}\0${carried.summary}`
+  const keys = prefixKeys(target.provider, keySeed, summarizable)
   const keyAt = (keepFrom: number) => keys[replacedBefore[keepFrom] ?? 0] as string
 
   const done = async (keepFrom: number, summary: string, cached: boolean): Promise<CompactOutcome> => {
@@ -154,12 +160,13 @@ export async function compactRequest(
 
   const from = reusable?.keepFrom ?? 0
   const fresh = messages.slice(from, plan.keepFrom).filter((m) => m.role !== 'system')
+  const previous = reusable?.summary ?? carried.summary
   const key = keyAt(plan.keepFrom)
   const summarize = () =>
     summarizeHistory(
       target,
       fresh,
-      { window, scale, ...(reusable ? { previous: reusable.summary } : {}) },
+      { window, scale, ...(previous !== undefined ? { previous } : {}) },
       {
         ...(deps.fetch ? { fetch: deps.fetch } : {}),
         ...(deps.signal ? { signal: deps.signal } : {}),

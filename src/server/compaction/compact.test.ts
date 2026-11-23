@@ -119,6 +119,31 @@ describe('compactRequest', () => {
     expect(outcome.result.summary).toBe(`summary ${engine.summaryPrompts.length}`)
   })
 
+  it('writes the new summary from the one an earlier compaction left in the system prompt', async () => {
+    // What a client that keeps its own compaction (the app) sends next: the summary in the system
+    // prompt, the turns after the old cut, and new turns that no longer fit.
+    const engine = fakeEngineFetch({ summary: 'Merged summary.' })
+    const carried: ContextChatMessage = {
+      role: 'system',
+      content: applyCompaction([system], { summary: 'Earlier: they chose Lisbon.', keepFrom: 1 })[0]
+        ?.content as string,
+    }
+    const outcome = await compactRequest(llama, { ...request, messages: [carried, ...history(10)] }, window, {
+      fetch: engine.fetch,
+      cache: new SummaryCache(),
+    })
+    expect(outcome).toMatchObject({ ok: true, result: { keepFrom: 11, summary: 'Merged summary.' } })
+    expect(engine.summaryPrompts[0]).toContain(
+      '<previous_summary>\nEarlier: they chose Lisbon.\n</previous_summary>'
+    )
+    // The old block is out of the transcript the model summarizes, and out of the compacted prompt.
+    expect(engine.summaryPrompts[0]).not.toContain('<conversation_summary>')
+    if (!outcome.ok) return
+    const compacted = applyCompaction([carried, ...history(10)], outcome.result)
+    expect(String(compacted[0]?.content).match(/<conversation_summary>/g)).toHaveLength(1)
+    expect(String(compacted[0]?.content)).toContain('Merged summary.')
+  })
+
   it('has nothing to do with a single turn, and asks nothing', async () => {
     const engine = fakeEngineFetch()
     expect(

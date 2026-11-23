@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { applyCompaction, contextResizeMode, decideOverflowAction, summaryBlock } from './context.js'
+import {
+  applyCompaction,
+  carriedSummary,
+  contextResizeMode,
+  decideOverflowAction,
+  summaryBlock,
+} from './context.js'
 import type { ContextChatMessage } from './context.js'
 
 describe('contextResizeMode', () => {
@@ -134,5 +140,72 @@ describe('decideOverflowAction', () => {
     ['fixed engines never grow', { resize: 'fixed', neededTokens: 5000, windowTokens: 4096 }, 'compact'],
   ] as const)('%s', (_name, input, action) => {
     expect(decideOverflowAction(input)).toBe(action)
+  })
+})
+
+describe('carriedSummary', () => {
+  it('takes the summary out of the system prompt and keeps every position', () => {
+    const messages: ContextChatMessage[] = [
+      { role: 'system', content: `Be brief.\n\n${summaryBlock('Old facts.')}` },
+      { role: 'user', content: 'u' },
+    ]
+    expect(carriedSummary(messages)).toEqual({
+      messages: [
+        { role: 'system', content: 'Be brief.' },
+        { role: 'user', content: 'u' },
+      ],
+      summary: 'Old facts.',
+    })
+  })
+
+  it('leaves a system message that held only the block empty, in place', () => {
+    const out = carriedSummary([
+      { role: 'system', content: summaryBlock('S') },
+      { role: 'user', content: 'u' },
+    ])
+    expect(out).toEqual({
+      messages: [
+        { role: 'system', content: '' },
+        { role: 'user', content: 'u' },
+      ],
+      summary: 'S',
+    })
+  })
+
+  it('reads a block from a text part and drops the part it emptied', () => {
+    const out = carriedSummary([
+      {
+        role: 'system',
+        content: [
+          { type: 'text', text: 'Parts.' },
+          { type: 'text', text: `\n\n${summaryBlock('P')}` },
+        ],
+      },
+    ])
+    expect(out).toEqual({
+      messages: [{ role: 'system', content: [{ type: 'text', text: 'Parts.' }] }],
+      summary: 'P',
+    })
+  })
+
+  it('returns the messages as they are when there is no block', () => {
+    const messages: ContextChatMessage[] = [
+      { role: 'system', content: 'Plain.' },
+      { role: 'user', content: '<conversation_summary> in a user turn stays' },
+    ]
+    expect(carriedSummary(messages)).toEqual({ messages })
+  })
+})
+
+describe('applyCompaction over an earlier compaction', () => {
+  it('replaces the summary block already in the system prompt instead of adding a second', () => {
+    const messages: ContextChatMessage[] = [
+      { role: 'system', content: `Be brief.\n\n${summaryBlock('Old.')}` },
+      { role: 'user', content: 'u1' },
+      { role: 'user', content: 'u2' },
+    ]
+    const out = applyCompaction(messages, { summary: 'New.', keepFrom: 2 })
+    expect(out[0]).toEqual({ role: 'system', content: `Be brief.\n\n${summaryBlock('New.')}` })
+    expect(String(out[0]?.content).match(/<conversation_summary>/g)).toHaveLength(1)
   })
 })

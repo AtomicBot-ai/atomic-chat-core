@@ -150,24 +150,78 @@ export interface HistoryCompactedEvent {
 
 const SUMMARY_OPEN = '<conversation_summary>'
 const SUMMARY_CLOSE = '</conversation_summary>'
+const SUMMARY_PREAMBLE = 'The earlier part of this conversation was summarized to fit the context window:'
+/** A summary block and the blank line in front of it, wherever it sits in a text. */
+const SUMMARY_BLOCK_PATTERN = /(?:\n\n)?<conversation_summary>\n?([\s\S]*?)\n?<\/conversation_summary>/
 
 /** The block a summary is placed in, inside the system prompt. */
 export function summaryBlock(summary: string): string {
-  return `${SUMMARY_OPEN}\nThe earlier part of this conversation was summarized to fit the context window:\n${summary.trim()}\n${SUMMARY_CLOSE}`
+  return `${SUMMARY_OPEN}\n${SUMMARY_PREAMBLE}\n${summary.trim()}\n${SUMMARY_CLOSE}`
+}
+
+/** A text without its summary block, and the summary that block held. */
+function splitSummary(text: string): { text: string; summary?: string } {
+  const match = SUMMARY_BLOCK_PATTERN.exec(text)
+  if (!match) return { text }
+  const inner = (match[1] ?? '').trim()
+  const summary = (inner.startsWith(SUMMARY_PREAMBLE) ? inner.slice(SUMMARY_PREAMBLE.length) : inner).trim()
+  return { text: text.replace(match[0], ''), ...(summary ? { summary } : {}) }
+}
+
+/** Message content without its summary block, and the summary it held. */
+function contentWithoutSummary(content: unknown): { content: unknown; summary?: string } {
+  if (typeof content === 'string') {
+    const split = splitSummary(content)
+    return { content: split.text, ...(split.summary !== undefined ? { summary: split.summary } : {}) }
+  }
+  if (!Array.isArray(content)) return { content }
+  let summary: string | undefined
+  const parts = content.flatMap((part: unknown) => {
+    if (typeof part !== 'object' || part === null) return [part]
+    const text = (part as { text?: unknown }).text
+    if (typeof text !== 'string') return [part]
+    const split = splitSummary(text)
+    if (split.summary === undefined && split.text === text) return [part]
+    summary ??= split.summary
+    return split.text.trim() ? [{ ...(part as object), text: split.text }] : []
+  })
+  return { content: parts, ...(summary !== undefined ? { summary } : {}) }
+}
+
+/**
+ * The summary a request already carries in its system prompt (the block {@link applyCompaction}
+ * put there on an earlier compaction), and the messages without that block — so the next
+ * compaction can summarize the summary so far together with the turns it replaces, and nothing an
+ * earlier summary held is lost. Messages keep their positions — a system message that held nothing
+ * but the block stays, empty — so an index into the result is an index into `messages`.
+ */
+export function carriedSummary<M extends ContextChatMessage>(
+  messages: readonly M[]
+): { messages: M[]; summary?: string } {
+  let summary: string | undefined
+  const out = messages.map((message) => {
+    if (message.role !== 'system' || summary !== undefined) return message
+    const split = contentWithoutSummary(message.content)
+    if (split.summary === undefined) return message
+    summary = split.summary
+    return { ...message, content: split.content }
+  })
+  return { messages: out, ...(summary !== undefined ? { summary } : {}) }
 }
 
 function withSummary(content: unknown, block: string): unknown {
-  if (typeof content === 'string') return content.trim() ? `${content}\n\n${block}` : block
-  if (Array.isArray(content)) return [...content, { type: 'text', text: `\n\n${block}` }]
+  const { content: base } = contentWithoutSummary(content)
+  if (typeof base === 'string') return base.trim() ? `${base}\n\n${block}` : block
+  if (Array.isArray(base)) return [...base, { type: 'text', text: `\n\n${block}` }]
   return block
 }
 
 /**
  * `messages` with the compaction applied: system messages ahead of `keepFrom` are kept, the summary
- * is appended to the first of them (or becomes a leading system message when there is none), the
- * other messages ahead of `keepFrom` are dropped, and the rest follow unchanged. Merging the summary
- * into the system prompt keeps strict chat templates — the ones that require user and assistant
- * turns to alternate — valid.
+ * is appended to the first of them (or becomes a leading system message when there is none),
+ * replacing a summary block an earlier compaction left there, the other messages ahead of
+ * `keepFrom` are dropped, and the rest follow unchanged. Merging the summary into the system prompt
+ * keeps strict chat templates — the ones that require user and assistant turns to alternate — valid.
  */
 export function applyCompaction<M extends ContextChatMessage>(
   messages: readonly M[],
