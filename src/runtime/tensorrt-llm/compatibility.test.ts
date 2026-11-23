@@ -23,6 +23,8 @@ import {
   normalizeWeightNames,
   selectLaunchGpu,
   TENSORRT_LLM_RUNTIME_OVERHEAD_BYTES,
+  tensorrtLlmAutoContextLength,
+  tensorrtLlmCheckEngine,
   tensorrtLlmLaunchPlan,
   tensorrtLlmMemoryNeed,
   weightBytes,
@@ -1713,12 +1715,21 @@ describe('CUDA graphs in the memory check and the launch plan (RTX 5090 Laptop, 
 
   it('leaves them off under auto for Nemotron: it fits the card, the graphs beside it do not (26.37 GiB peak with them)', () => {
     expect(tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('auto')).neededBytes).toBeLessThanOrEqual(free)
-    expect(tensorrtLlmLaunchPlan(sizing('auto'), nemotron, laptop5090, host)).toEqual({ cudaGraphs: false })
-    expect(tensorrtLlmLaunchPlan(sizing(), nemotron, laptop5090, host)).toEqual({ cudaGraphs: false })
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), nemotron, laptop5090, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 2048,
+    })
+    expect(tensorrtLlmLaunchPlan(sizing(), nemotron, laptop5090, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 2048,
+    })
   })
 
   it('keeps them under auto for Qwen3-8B on the same card, which has room to spare', () => {
-    expect(tensorrtLlmLaunchPlan(sizing('auto'), qwen3_8b, laptop5090, host)).toEqual({ cudaGraphs: true })
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), qwen3_8b, laptop5090, host)).toEqual({
+      cudaGraphs: true,
+      contextLength: 2048,
+    })
   })
 
   it('leaves them off under auto on a card below 12 GiB, whatever room it has', () => {
@@ -1728,12 +1739,21 @@ describe('CUDA graphs in the memory check and the launch plan (RTX 5090 Laptop, 
       free_vram_bytes: 8 * 1024 ** 3,
     })
     const tiny = { weightBytesTotal: 1, configJson: {}, hfQuantConfigJson: null }
-    expect(tensorrtLlmLaunchPlan(sizing('auto'), tiny, small, host)).toEqual({ cudaGraphs: false })
+    expect(tensorrtLlmLaunchPlan(sizing('auto'), tiny, small, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 2048,
+    })
   })
 
   it('follows an explicit on or off without looking at the card', () => {
-    expect(tensorrtLlmLaunchPlan(sizing('on'), nemotron, laptop5090, host)).toEqual({ cudaGraphs: true })
-    expect(tensorrtLlmLaunchPlan(sizing('off'), qwen3_8b, laptop5090, host)).toEqual({ cudaGraphs: false })
+    expect(tensorrtLlmLaunchPlan(sizing('on'), nemotron, laptop5090, host)).toEqual({
+      cudaGraphs: true,
+      contextLength: 2048,
+    })
+    expect(tensorrtLlmLaunchPlan(sizing('off'), qwen3_8b, laptop5090, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 2048,
+    })
   })
 
   it('counts the graphs when they are on, so the check refuses Nemotron with them instead of starting a model that cannot answer', () => {
@@ -1749,5 +1769,92 @@ describe('CUDA graphs in the memory check and the launch plan (RTX 5090 Laptop, 
     expect(tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('auto')).neededBytes).toBe(
       tensorrtLlmMemoryNeed(laptop5090, nemotron, sizing('off')).neededBytes
     )
+  })
+})
+
+describe('the automatic window (context_length 0)', () => {
+  const GiB = 1024 ** 3
+  // Qwen3-8B in FP8 on an RTX 4090: 36 layers × 8 KV heads × 128, a 40960-token maximum. A token of
+  // window costs 144 KiB of KV (divided by the 0.8 fraction) and 12288 × 8.5 bytes of activations.
+  const rtx4090 = gpu({ gpu_id: 'GPU-4090', total_vram_bytes: 24 * GiB, free_vram_bytes: 23 * GiB })
+  const host = memAvailable(24 * GiB)
+  const qwen3 = (maxPositions?: number) => ({
+    weightBytesTotal: 6_397_066_384,
+    configJson: {
+      architectures: ['Qwen3ForCausalLM'],
+      num_hidden_layers: 36,
+      num_attention_heads: 32,
+      num_key_value_heads: 8,
+      head_dim: 128,
+      hidden_size: 4096,
+      intermediate_size: 12288,
+      ...(maxPositions !== undefined ? { max_position_embeddings: maxPositions } : {}),
+    },
+    hfQuantConfigJson: null,
+  })
+  const auto = (cudaGraphs?: 'auto' | 'on' | 'off', maxOutputTokens = 4096) => ({
+    contextLength: 0,
+    kvCacheFreeGpuMemoryFraction: 0.8,
+    maxOutputTokens,
+    ...(cudaGraphs === undefined ? {} : { cudaGraphs }),
+  })
+
+  it('takes the checkpoint maximum when the card holds it, and steps down when it does not', () => {
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(40_960), rtx4090, host)).toBe(40_960)
+    // A 128K checkpoint: 131072 and 98304 do not fit 23 GiB, 65536 does not either; 32768 does.
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(131_072), rtx4090, host)).toBe(32_768)
+    // No maximum in config.json: from 64K down, as the other managed engines.
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(), rtx4090, host)).toBe(32_768)
+    // A pinned window is the user's.
+    expect(
+      tensorrtLlmAutoContextLength({ ...auto('off'), contextLength: 12_000 }, qwen3(), rtx4090, host)
+    ).toBe(12_000)
+  })
+
+  it('keeps the CUDA graphs auto would have kept by the card size, sizing the window beside them', () => {
+    // With the 5 GiB the graphs take counted, 40960 no longer fits; 32768 does.
+    expect(tensorrtLlmAutoContextLength(auto('auto'), qwen3(40_960), rtx4090, host)).toBe(32_768)
+    expect(tensorrtLlmLaunchPlan(auto('auto'), qwen3(40_960), rtx4090, host)).toEqual({
+      cudaGraphs: true,
+      contextLength: 32_768,
+    })
+    // A card below 12 GiB never keeps them under auto: the window takes the room.
+    const rtx3060 = gpu({ gpu_id: 'GPU-3060', total_vram_bytes: 11 * GiB, free_vram_bytes: 11 * GiB })
+    expect(tensorrtLlmLaunchPlan(auto('auto'), qwen3(40_960), rtx3060, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 8192,
+    })
+    // When no window fits beside the graphs, the window is sized without them, and auto turns them off.
+    const tight = gpu({ gpu_id: 'GPU-tight', total_vram_bytes: 16 * GiB, free_vram_bytes: 12 * GiB })
+    expect(tensorrtLlmLaunchPlan(auto('auto'), qwen3(40_960), tight, host)).toEqual({
+      cudaGraphs: false,
+      contextLength: 8192,
+    })
+    // `on` counts them too, `off` never.
+    expect(tensorrtLlmAutoContextLength(auto('on'), qwen3(40_960), rtx4090, host)).toBe(32_768)
+  })
+
+  it('stays above the output cap, and falls to 8192 when nothing fits, which the check then refuses', () => {
+    expect(tensorrtLlmAutoContextLength(auto('off', 32_768), qwen3(131_072), rtx4090, host)).toBe(65_536)
+    const small = gpu({ gpu_id: 'GPU-small', total_vram_bytes: 8 * GiB, free_vram_bytes: 7 * GiB })
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(40_960), small, host)).toBe(8192)
+    const need = tensorrtLlmMemoryNeed(small, qwen3(40_960), auto('off'), host)
+    expect(need.neededBytes).toBeGreaterThan(7 * GiB)
+    expect(need.neededBytes).toBe(
+      tensorrtLlmMemoryNeed(small, qwen3(40_960), { ...auto('off'), contextLength: 8192 }).neededBytes
+    )
+  })
+
+  it('sizes the memory check at the automatic window, on the host memory it is given', () => {
+    const check = tensorrtLlmCheckEngine(auto('off'))
+    expect(check.memoryNeed(rtx4090, qwen3(40_960), host).neededBytes).toBe(
+      tensorrtLlmMemoryNeed(rtx4090, qwen3(40_960), { ...auto('off'), contextLength: 40_960 }).neededBytes
+    )
+    // A unified-memory card's free memory is the host's MemAvailable.
+    const gb10 = gpu({ gpu_id: 'GPU-gb10', total_vram_bytes: null, free_vram_bytes: null })
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(40_960), gb10, memAvailable(100 * GiB))).toBe(
+      40_960
+    )
+    expect(tensorrtLlmAutoContextLength(auto('off'), qwen3(40_960), gb10)).toBe(8192)
   })
 })

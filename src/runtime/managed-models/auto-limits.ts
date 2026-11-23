@@ -1,20 +1,26 @@
 /**
- * The automatic context length and parallel requests of a managed engine (vLLM, SGLang): what a load
- * runs with when the settings leave `context_length` or the request count at 0.
+ * The automatic context length and parallel requests of a managed engine (vLLM, SGLang, TensorRT-LLM):
+ * what a load runs with when the settings leave `context_length` or the request count at 0.
  *
  * They were fixed at 8192 tokens and one request (integrations audit 2026-11-03, S2): a coding
  * agent's first request is 13-27K tokens, so every agent prompt was refused with
  * `context_length_exceeded`, and the side requests an agent sends beside its turn (title,
- * classifier) waited behind it. Both engines keep one paged KV pool sized by their memory share,
+ * classifier) waited behind it. vLLM and SGLang keep one paged KV pool sized by their memory share,
  * not by these settings — the window only bounds a request and the count only how many run at once —
  * so the largest pair the engine's own memory rule passes on the card is chosen, preferring the
- * window: 64K with 2 requests, 32K with 2, 32K alone, 16K, then the old 8K, at which the memory
- * check refuses exactly as before.
+ * window: the checkpoint's own maximum first, then down a ladder of windows below it (powers of two
+ * and halfway between above 64K, then 64K, 32K with 2 requests, 32K alone, 16K) to the old 8K, at
+ * which the memory check refuses exactly as before. A checkpoint whose maximum is unknown starts at
+ * 64K.
  */
 import type { JsonObject } from './quant-format.js'
 
-/** The windows tried, widest first. 32K is the default the settings describe. */
+/** The windows tried at most 64K, widest first; a checkpoint without a known maximum starts here. */
 export const MANAGED_AUTO_CONTEXTS = [65_536, 32_768, 16_384, 8_192] as const
+/** The steps above 64K on the way down from a checkpoint's own maximum. */
+export const MANAGED_AUTO_LONG_CONTEXTS = [
+  1_048_576, 786_432, 524_288, 393_216, 262_144, 196_608, 131_072, 98_304,
+] as const
 /** The window settings without a memory plan read as (route limits before a load, capabilities). */
 export const MANAGED_AUTO_CONTEXT_DEFAULT = 32_768
 /** Requests at once when the memory rule passes; one otherwise. */
@@ -35,15 +41,20 @@ export interface AutoLimitsInput {
   fits: (context: number, sequences: number) => boolean
 }
 
+/**
+ * The windows an automatic context tries, widest first: the checkpoint's own maximum, then every
+ * step of the ladder below it; 64K down when the maximum is unknown.
+ */
+export function autoContextCandidates(trainedContext: number | undefined): number[] {
+  if (trainedContext === undefined || !(trainedContext > 0)) return [...MANAGED_AUTO_CONTEXTS]
+  const below = [...MANAGED_AUTO_LONG_CONTEXTS, ...MANAGED_AUTO_CONTEXTS].filter((c) => c < trainedContext)
+  return [trainedContext, ...below]
+}
+
 /** The candidate pairs in order of preference; the last is used when none fits. */
 export function autoLimitCandidates(input: Omit<AutoLimitsInput, 'fits'>): Array<[number, number]> {
-  let contexts: number[] = input.contextAuto ? [...MANAGED_AUTO_CONTEXTS] : [input.context]
+  let contexts: number[] = input.contextAuto ? autoContextCandidates(input.trainedContext) : [input.context]
   if (input.contextAuto) {
-    const trained = input.trainedContext
-    if (trained !== undefined && trained > 0) {
-      const within = contexts.filter((c) => c <= trained)
-      contexts = within.length > 0 ? within : [trained]
-    }
     const roomy = contexts.filter((c) => c > input.maxOutputTokens)
     if (roomy.length > 0) contexts = roomy
   }

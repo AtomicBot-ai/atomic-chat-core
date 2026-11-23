@@ -9,7 +9,8 @@ describe('tensorrtLlmSettings', () => {
   it('turns the stored defaults into the adapter settings: no card chosen, the estimated timeout', () => {
     expect(tensorrtLlmSettings(stored())).toEqual({
       gpu_id: null,
-      context_length: 8192,
+      // Automatic: decided on the card right before the container (tensorrtLlmAutoContextLength).
+      context_length: 0,
       max_output_tokens: 4096,
       kv_cache_free_gpu_memory_fraction: 0.8,
       max_batch_size: 1,
@@ -59,6 +60,8 @@ describe('tensorrtLlmSettings', () => {
     ['a timeout override', { load_timeout_seconds: 900 }, { load_timeout_seconds: 900 }],
     ['a zero timeout', { load_timeout_seconds: 0 }, { load_timeout_seconds: null }],
     ['a larger context', { context_length: 32768 }, { context_length: 32768 }],
+    ['the automatic context', { context_length: 0 }, { context_length: 0 }],
+    ['the old fixed default, which a user may still pin', { context_length: 8192 }, { context_length: 8192 }],
     [
       'a zero KV token limit (the UI default, automatic)',
       { kv_cache_max_tokens: 0 },
@@ -96,6 +99,8 @@ describe('tensorrtLlmSettings', () => {
   it.each<[string, Record<string, unknown>]>([
     ['a context that is not a number', { context_length: 'lots' }],
     ['an output limit as large as the context', { context_length: 4096, max_output_tokens: 4096 }],
+    ['an output limit no automatic window is longer than', { context_length: 0, max_output_tokens: 65_536 }],
+    ['a context below the smallest window', { context_length: 256 }],
     ['a KV fraction of all memory', { kv_cache_free_gpu_memory_fraction: 1 }],
     ['a card that is not a UUID', { gpu_id: '0' }],
     ['a negative timeout', { load_timeout_seconds: -5 }],

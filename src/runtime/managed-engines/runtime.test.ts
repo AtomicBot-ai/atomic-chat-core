@@ -972,6 +972,31 @@ describe('ManagedTextRuntime (tensorrt-llm): what a session can do', () => {
     expect(await runtime.capabilities('llama')).toMatchObject({ tools: false, reasoning: false })
   })
 
+  it('reports the window a load runs with: a loaded session’s, else the pinned one, never a guess', async () => {
+    build()
+    expect((await runtime.capabilities('qwen3')).contextPlan).toMatchObject({
+      recommendedCtx: 8192,
+      maxCtx: 8192,
+      basis: 'engine',
+    })
+    // Automatic and not loaded: decided on the card right before the container, so no plan yet.
+    stored = { ...stored, context_length: 0 }
+    expect((await runtime.capabilities('qwen3')).contextPlan).toBeUndefined()
+    // Loaded: the window the engine's fit chose for the session.
+    await runtime.load('qwen3')
+    const window = runtime.routePolicy('qwen3')?.contextLength
+    expect(window).toBeGreaterThan(0)
+    expect((await runtime.capabilities('qwen3')).contextPlan).toMatchObject({
+      recommendedCtx: window,
+      maxCtx: window,
+      basis: 'engine',
+    })
+    // Settings it cannot read give no plan.
+    await runtime.unload('qwen3')
+    stored = { ...stored, context_length: 'lots' }
+    expect((await runtime.capabilities('qwen3')).contextPlan).toBeUndefined()
+  })
+
   it('answers every capability false when the engine is not installed, rather than failing', async () => {
     build()
     installation = () => Promise.reject(new AtomicCoreError('MANAGED_ADAPTER_UNAVAILABLE', 'not ready'))

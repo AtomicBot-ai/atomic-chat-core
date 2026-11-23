@@ -7,6 +7,7 @@ import { TENSORRT_LLM_DESCRIPTOR_SOURCE, TENSORRT_LLM_ENGINE_ID } from '../envir
 import type { ManagedEngineSpec } from '../managed-engines/spec.js'
 import { tensorrtLlmAdapter, type TensorrtLlmSettings } from './adapter.js'
 import { tensorrtLlmCheckEngine, tensorrtLlmLaunchPlan, type MemorySizingInputs } from './compatibility.js'
+import type { TensorrtLlmLaunchPlan } from './cuda-graphs.js'
 import { tensorrtLlmRoutePolicy } from './route-policy.js'
 import { tensorrtLlmSettings } from './settings.js'
 
@@ -15,6 +16,7 @@ function memorySizing(settings: TensorrtLlmSettings): MemorySizingInputs {
     contextLength: settings.context_length,
     kvCacheFreeGpuMemoryFraction: settings.kv_cache_free_gpu_memory_fraction,
     cudaGraphs: settings.cuda_graphs,
+    maxOutputTokens: settings.max_output_tokens,
   }
 }
 
@@ -26,8 +28,10 @@ export const TENSORRT_LLM_ENGINE: ManagedEngineSpec<TensorrtLlmSettings> = {
   adapter: tensorrtLlmAdapter,
   settings: tensorrtLlmSettings,
   check: (settings) => tensorrtLlmCheckEngine(memorySizing(settings)),
-  // Whether `auto` captures CUDA graphs, decided on the card as it stands right before the container.
+  // Whether `auto` captures CUDA graphs, and an automatic window, decided on the card as it stands
+  // right before the container.
   launchPlan: (settings, checkpoint, gpu, host) =>
     tensorrtLlmLaunchPlan(memorySizing(settings), checkpoint, gpu, host),
+  planContextLength: (plan) => (plan as Partial<TensorrtLlmLaunchPlan> | undefined)?.contextLength,
   routePolicy: tensorrtLlmRoutePolicy,
 }

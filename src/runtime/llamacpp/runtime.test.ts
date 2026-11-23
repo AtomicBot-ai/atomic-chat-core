@@ -1297,6 +1297,39 @@ describe('autoIncreaseCtx', () => {
     expect(runtime.findSession('small')?.pid, 'nothing was reloaded').toBe(pidBefore)
     expect(payloads('session:ctx-increased')).toEqual([])
   })
+
+  it('grows straight to the largest window the context plan says this device holds, once', async () => {
+    // 128 KiB of KV a token and a 256K trained window on the fake's RTX 4090 (23875 MiB free): less
+    // fit's 1024 MiB margin and the 1024 MiB reserve, 21827 MiB of KV — 174616 tokens → 174592.
+    await data.writeModel('planned')
+    const runtime = await makeRuntime({
+      readGgufMetadata: async () => ({
+        'general.architecture': 'llama',
+        'llama.block_count': '32',
+        'llama.context_length': '262144',
+        'llama.attention.head_count': '32',
+        'llama.attention.head_count_kv': '8',
+        'llama.attention.key_length': '128',
+        'llama.attention.value_length': '128',
+      }),
+      readSettings: async () => {
+        const s = settings()
+        return { ...s, config: { ...s.config, ctx_size: 8192 } }
+      },
+    })
+    await runtime.load('planned')
+    expect(runtime.getContextPlan('planned')).toMatchObject({ basis: 'gpu', maxCtx: 174_592 })
+
+    expect(await runtime.autoIncreaseCtx('planned')).toMatchObject({ ok: true, new_ctx_len: 174_592 })
+    expect(runtime.getCtxSize('planned')).toBe(174_592)
+    expect(await runtime.autoIncreaseCtx('planned')).toEqual({
+      ok: false,
+      reason: 'at_max',
+      current_ctx_len: 174_592,
+      max_ctx_len: 174_592,
+    })
+    expect(runtime.getContextPlan('nothing')).toBeUndefined()
+  })
 })
 
 describe('builds in use and the exclusive turn', () => {

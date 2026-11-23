@@ -1,8 +1,13 @@
-import { expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import catalog from '../../../test/fixtures/strata/catalog.json' with { type: 'json' }
 import { parseStrataDescriptor } from '../../client/index.js'
 import { parseStrataSettings } from '../../settings/index.js'
-import { estimateStrata, planStrataMemory, strataResourceRefusal } from './strata-check.js'
+import {
+  estimateStrata,
+  planStrataMemory,
+  strataPlannedContext,
+  strataResourceRefusal,
+} from './strata-check.js'
 const descriptor = parseStrataDescriptor(Object.values(catalog.models)[0]!.definition)
 it('accounts for unified memory once and keeps old installation space separate from new files', () => {
   const result = estimateStrata(descriptor, {
@@ -101,4 +106,54 @@ it('admits the CUDA Qwen3.6 Q4 profile on 32 GiB-class hosts that report less us
   expect(strataResourceRefusal(estimate, { disk: undefined, ram: 30 * 2 ** 30, gpu })).toBe(
     'insufficient-memory'
   )
+})
+
+describe('the GGUF context plan of an automatic Strata window', () => {
+  const MiB = 2 ** 20
+  const GiB = 2 ** 30
+  const qwen36 = parseStrataDescriptor(catalog.models['strata-qwen36-ud-q4-k-xl'].definition)
+  // Qwen3.6 35B-A3B as its first shard describes it: a 256K window, 10 attention layers of 40 with
+  // 2 KV heads of 256 — 20 KiB of KV a token.
+  const GGUF = { contextLimit: 262_144, kvBytesPerToken: 20_480 }
+  const auto = parseStrataSettings({})
+
+  it('grows from the tested window by what the card holds above the floor, up to the GGUF limit', () => {
+    // 12284 MiB less the 10 GiB floor and the 1 GiB reserve: 1020 MiB, 52224 tokens beyond 8192.
+    expect(planStrataMemory(qwen36, 'cuda', 12_284 * MiB, auto, GGUF)).toMatchObject({
+      settings: { context_length: 60_416, vision: 'auto' },
+      minimumVramBytes: 10 * GiB,
+    })
+    expect(planStrataMemory(qwen36, 'cuda', 24_463 * MiB, auto, GGUF).settings.context_length).toBe(262_144)
+    // Below 10 GiB the measured text profile stands; a window the user set stands everywhere.
+    expect(planStrataMemory(qwen36, 'cuda', 8188 * MiB, auto, GGUF).settings.context_length).toBe(4096)
+    expect(
+      planStrataMemory(qwen36, 'cuda', 24_463 * MiB, parseStrataSettings({ context_length: 16_384 }), GGUF)
+        .settings.context_length
+    ).toBe(16_384)
+  })
+
+  it('grows the other profiles above their own VRAM floor on a discrete card, never on Metal', () => {
+    const qwen38 = descriptor
+    // Qwen3.8's 6 GiB floor on a 24 GiB card: 17 GiB of room at 20 KiB a token, past the limit.
+    expect(planStrataMemory(qwen38, 'cuda', 24 * GiB, auto, GGUF).settings.context_length).toBe(262_144)
+    expect(planStrataMemory(qwen38, 'cuda', 24 * GiB, auto, { contextLimit: 8192 }).settings).toEqual(auto)
+    expect(planStrataMemory(qwen38, 'metal', 64 * GiB, auto, GGUF).settings).toEqual(auto)
+    expect(planStrataMemory(qwen38, 'cuda', 24 * GiB, auto).settings).toEqual(auto)
+    expect(
+      planStrataMemory(qwen38, 'hip', 24 * GiB, parseStrataSettings({ context_length: 4096 }), GGUF).settings
+        .context_length
+    ).toBe(4096)
+    // A card with no room above the floor keeps the tested window.
+    expect(planStrataMemory(qwen38, 'cuda', 6 * GiB, auto, GGUF).settings).toEqual(auto)
+  })
+
+  it('strataPlannedContext keeps the tested window without a KV estimate or a longer limit', () => {
+    const plan = (gguf: Parameters<typeof strataPlannedContext>[0]['gguf']) =>
+      strataPlannedContext({ baseCtx: 8192, floorBytes: GiB, gpuBytes: 24 * GiB, gguf })
+    expect(plan(undefined)).toBe(8192)
+    expect(plan({ contextLimit: 262_144 })).toBe(8192)
+    expect(plan({ contextLimit: 262_144, kvBytesPerToken: 0 })).toBe(8192)
+    expect(plan({ contextLimit: 4096, kvBytesPerToken: 1024 })).toBe(8192)
+    expect(plan({ contextLimit: 262_144, kvBytesPerToken: 1024 * 1024 })).toBe(8192 + 22 * 1024)
+  })
 })

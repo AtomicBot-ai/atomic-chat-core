@@ -161,12 +161,21 @@ describe('the automatic window and request count', () => {
     })
   })
 
-  it('never asks for a window above what the model takes, nor one the output cap would fill', () => {
+  it('takes the window the model takes when the card holds it, never above it, nor one the output cap would fill', () => {
     const big = roomFor(GiB, 1_000_000)
     expect(vllmLimits(vllmSettings({}), model(GiB, { max_position_embeddings: 40_960 }), big, HOST)).toEqual({
-      context_length: 32_768,
+      context_length: 40_960,
       max_num_seqs: 2,
     })
+    // Past 64K too: a 256K checkpoint on a card with room for 600K tokens of KV.
+    expect(
+      vllmLimits(
+        vllmSettings({}),
+        model(GiB, { max_position_embeddings: 262_144 }),
+        roomFor(GiB, 600_000),
+        HOST
+      )
+    ).toEqual({ context_length: 262_144, max_num_seqs: 2 })
     expect(vllmLimits(vllmSettings({}), model(GiB, { max_position_embeddings: 4096 }), big, HOST)).toEqual({
       context_length: 4096,
       max_num_seqs: 2,

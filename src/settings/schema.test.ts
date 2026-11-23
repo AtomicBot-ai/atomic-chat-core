@@ -165,7 +165,8 @@ describe('defaultSettingValues', () => {
     // own weight-based estimate. Both mean "not set", which is what the adapter's `null` means.
     expect(defaultSettingValues('tensorrt-llm')).toEqual({
       gpu_id: '',
-      context_length: 8192,
+      // 0: the automatic window, the largest the card holds (tensorrtLlmAutoContextLength).
+      context_length: 0,
       max_output_tokens: 4096,
       kv_cache_free_gpu_memory_fraction: 0.8,
       // One request at a time by default (owner's decision, change add-vllm-runtime): the KV cache is

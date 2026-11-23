@@ -325,11 +325,14 @@ export async function wireStrata(options: Options) {
       const descriptor = entry.strata.descriptor
       const selected = await select(entry, opts)
       const { build, release, variant, device, facts, backend } = selected
+      // The first shard's window facts grow an automatic window on a discrete card (context plan).
+      const gguf = device.unified ? undefined : await registry.contextFacts(modelId).catch(() => undefined)
       const { settings, minimumVramBytes } = planStrataMemory(
         descriptor,
         backend,
         device.memoryBytes,
-        selected.settings
+        selected.settings,
+        gguf
       )
       if (minimumVramBytes !== undefined && device.memoryBytes < minimumVramBytes)
         throw new AtomicCoreError('MODEL_INCOMPATIBLE', insufficientStrataVram(minimumVramBytes))
@@ -530,7 +533,9 @@ export async function wireStrata(options: Options) {
       )
     result.compatible_devices = selected.map(({ id }) => ({ gpu_id: id, backend, variant_id: variant.id }))
     const device = selected[0]!
-    const memory = planStrataMemory(descriptor, backend, device.memoryBytes, settings)
+    const gguf =
+      entry && !device.unified ? await registry.contextFacts(entry.id).catch(() => undefined) : undefined
+    const memory = planStrataMemory(descriptor, backend, device.memoryBytes, settings, gguf)
     result.capabilities = capabilities(descriptor, { release, variant }, memory.settings)
     let ready: string | null = null
     let previousBytes = 0

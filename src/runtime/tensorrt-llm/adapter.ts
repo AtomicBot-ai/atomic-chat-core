@@ -133,6 +133,7 @@ import {
   reasoningIntoContent,
   thinkingRequested,
 } from '../managed-text/index.js'
+import { MANAGED_AUTO_CONTEXTS } from '../managed-models/auto-limits.js'
 import { tensorrtLlmCudaGraphsOn, type TensorrtLlmLaunchPlan } from './cuda-graphs.js'
 import {
   TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION,
@@ -163,7 +164,14 @@ const GPU_UUID_PATTERN = /^(GPU|MIG)-[0-9A-Fa-f-]+$/
 
 export const TENSORRT_LLM_MIN_CONTEXT_LENGTH = 512
 export const TENSORRT_LLM_MAX_CONTEXT_LENGTH = 1_048_576
-export const TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH = 8192
+/**
+ * `context_length: 0`, the default: the widest window the card holds for the checkpoint, up to its
+ * own maximum (`tensorrtLlmAutoContextLength`, decided in the launch plan right before the container).
+ */
+export const TENSORRT_LLM_AUTO_CONTEXT_LENGTH = 0
+export const TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH = TENSORRT_LLM_AUTO_CONTEXT_LENGTH
+/** An automatic window launched without a plan to name it (no `beforeCreate`): the old fixed default. */
+export const TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH = 8192
 
 export const TENSORRT_LLM_MIN_MAX_OUTPUT_TOKENS = 1
 export const TENSORRT_LLM_MAX_MAX_OUTPUT_TOKENS = 1_048_576
@@ -277,13 +285,16 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
     invalid('tensorrt-llm settings must be an object.', raw)
   }
   const r = (raw ?? {}) as Record<string, unknown>
-  const context_length = validateBoundedInt(
-    r['context_length'],
-    'context_length',
-    TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
-    TENSORRT_LLM_MIN_CONTEXT_LENGTH,
-    TENSORRT_LLM_MAX_CONTEXT_LENGTH
-  )
+  const context_length =
+    r['context_length'] === TENSORRT_LLM_AUTO_CONTEXT_LENGTH
+      ? TENSORRT_LLM_AUTO_CONTEXT_LENGTH
+      : validateBoundedInt(
+          r['context_length'],
+          'context_length',
+          TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
+          TENSORRT_LLM_MIN_CONTEXT_LENGTH,
+          TENSORRT_LLM_MAX_CONTEXT_LENGTH
+        )
   const max_output_tokens = validateBoundedInt(
     r['max_output_tokens'],
     'max_output_tokens',
@@ -294,9 +305,12 @@ export function validateTensorrtLlmSettings(raw: unknown): TensorrtLlmSettings {
   // A setting that could never leave room for a prompt is rejected here, not discovered later as
   // every request failing the gateway's own clamp (findings-2.13-r1.md item 1's cross-field rule;
   // see docs/decisions/2026-09-28-tensorrt-llm-output-cap-enforced-by-the-session-gateway.md).
-  if (max_output_tokens >= context_length) {
+  // An automatic window is only ever one of the candidates above the output cap (`auto-limits.ts`).
+  const widest =
+    context_length === TENSORRT_LLM_AUTO_CONTEXT_LENGTH ? MANAGED_AUTO_CONTEXTS[0] : context_length
+  if (max_output_tokens >= widest) {
     invalid(
-      `tensorrt-llm max_output_tokens (${max_output_tokens}) must be less than context_length (${context_length}).`,
+      `tensorrt-llm max_output_tokens (${max_output_tokens}) must be less than context_length (${widest}).`,
       max_output_tokens
     )
   }
@@ -440,6 +454,22 @@ function launchPlanOf(plan: unknown): TensorrtLlmLaunchPlan | undefined {
     : undefined
 }
 
+/**
+ * The window a launch runs with: the plan's (an automatic window decided on the card), else the
+ * pinned setting, else {@link TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH}.
+ */
+export function tensorrtLlmLaunchContextLength(settings: TensorrtLlmSettings, plan: unknown): number {
+  const planned = launchPlanOf(plan)?.contextLength
+  if (typeof planned === 'number' && Number.isInteger(planned) && planned > 0) return planned
+  return settings.context_length > 0 ? settings.context_length : TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH
+}
+
+/**
+ * The window each launch was built with, by the settings object the lifecycle hands both the launch
+ * and the readiness check: an automatic window lives in the plan, which `classifyReady` is not given.
+ */
+const launchedContextLengths = new WeakMap<object, number>()
+
 /** Builds `trtllm-serve serve <model-dir> ...` (task 2.13; flags sourced from `serve.py`, see the
  *  file header). `serve` is named explicitly rather than relying on the CLI's default-command
  *  resolution (`DefaultGroup.resolve_command`, `commands/serve.py`) — that quirk keeps `trtllm-serve
@@ -461,6 +491,8 @@ export function buildTensorrtLlmLaunch(
   context: ManagedLaunchContext<TensorrtLlmSettings>
 ): ManagedEngineLaunch {
   const { settings, modelPath, engineCachePath, generationFilesPath, family } = context
+  const contextLength = tensorrtLlmLaunchContextLength(settings, context.plan)
+  launchedContextLengths.set(settings, contextLength)
   const argv: string[] = [
     'trtllm-serve',
     'serve',
@@ -470,9 +502,9 @@ export function buildTensorrtLlmLaunch(
     '--port',
     String(TENSORRT_LLM_CONTAINER_PORT),
     '--max_seq_len',
-    String(settings.context_length),
+    String(contextLength),
     '--max_num_tokens',
-    String(settings.context_length),
+    String(contextLength),
     '--max_batch_size',
     String(settings.max_batch_size),
     '--kv_cache_free_gpu_memory_fraction',
@@ -503,8 +535,8 @@ export function buildTensorrtLlmLaunch(
     settings.kv_cache_max_tokens !== null
       ? tensorrtLlmWholeBlockTokens(settings.kv_cache_max_tokens)
       : context.unifiedMemory
-        ? tensorrtLlmUnifiedKvMaxTokens(settings.context_length)
-        : tensorrtLlmKvTokens(settings.context_length, settings.max_batch_size),
+        ? tensorrtLlmUnifiedKvMaxTokens(contextLength)
+        : tensorrtLlmKvTokens(contextLength, settings.max_batch_size),
     kvFp8,
     cudaGraphsOff,
     settings
@@ -728,7 +760,8 @@ export function classifyTensorrtLlmReady(
   const last = lines.at(-1)
   if (last === undefined) return null
   const capacity = Number.parseInt(last[1] as string, 10)
-  const context = settings.context_length
+  // The window this launch was built with: an automatic one is the plan's.
+  const context = launchedContextLengths.get(settings) ?? settings.context_length
   if (!Number.isFinite(capacity) || capacity >= context) return null
   return {
     kind: 'out-of-memory',

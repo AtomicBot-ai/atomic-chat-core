@@ -19,7 +19,9 @@ import { checkDflashSupport, checkGemmaMtpSupport, listDflashDrafts } from '../s
 import { classifyProjector, ggufContextLength, isDecisionGguf, isEmbeddingGguf } from './gguf/index.js'
 import { readGgufMetadataFromFile } from './gguf/read-file.js'
 import { isDecisionCheckpointDir } from './decision-checkpoint.js'
+import type { ModelYmlDocument } from './model-yml.js'
 import type { ModelRegistry } from './registry.js'
+import { ggufShardSetPaths, parseGgufShard } from './shards.js'
 
 export interface GgufValidation {
   isValid: boolean
@@ -52,10 +54,39 @@ export interface ModelCapabilities {
 export interface CapabilitiesDeps {
   layout: DataLayout
   registry: (provider: LocalProviderId) => ModelRegistry
+  /**
+   * The window a load of this GGUF gets on this device by default, and the largest it holds there
+   * (the provider's context plan, e.g. llama.cpp's `planUnloadedGgufContext`); `undefined` for a
+   * provider that plans none. Absent: GGUF models get no `contextPlan`.
+   */
+  planContext?: (
+    provider: LocalProviderId,
+    model: { metadata: Record<string, string>; weightsBytes: number }
+  ) => Promise<ContextPlan | undefined>
   /** Test seam; production reads the file. */
   readMetadata?: (path: string) => Promise<Record<string, string>>
   exists?: (path: string) => Promise<boolean>
+  /** Test seam; production stats the file. `undefined` when it cannot be read. */
+  fileSize?: (path: string) => Promise<number | undefined>
   isCheckpointDir?: (path: string) => Promise<boolean>
+}
+
+/**
+ * The window a model's own `model.yml` block fixes (Foundry Local, LiteRT-LM, GenieX, FastFlowLM):
+ * the engine runs the model at the window it declares, so the plan is that window (`basis: 'model'`).
+ */
+export function modelYmlContextPlan(
+  yml: Pick<ModelYmlDocument, 'foundry_local' | 'litert_lm' | 'geniex' | 'fastflowlm'>
+): ContextPlan | undefined {
+  const declared = [
+    yml.foundry_local?.context_length,
+    yml.litert_lm?.context_length,
+    yml.geniex?.context_length,
+    yml.fastflowlm?.context_length,
+  ]
+  const window = declared.find((value): value is number => typeof value === 'number' && value > 0)
+  if (window === undefined) return undefined
+  return { recommendedCtx: window, maxCtx: window, trainedCtx: window, basis: 'model' }
 }
 
 const DECISION_IMPORT_ERROR =
@@ -66,6 +97,12 @@ const defaultExists = (path: string) =>
   stat(path).then(
     () => true,
     () => false
+  )
+
+const defaultFileSize = (path: string) =>
+  stat(path).then(
+    (info) => info.size,
+    () => undefined
   )
 
 export class ModelCapabilityService {
@@ -127,6 +164,8 @@ export class ModelCapabilityService {
     const yml = await registry.read(modelId).catch(() => undefined)
     if (!yml) return base
 
+    const declaredPlan = modelYmlContextPlan(yml)
+    if (declaredPlan) base.contextPlan = declaredPlan
     const paths = registry.resolvePaths(yml)
     const projectorPath = await this.projectorPath(provider, modelId, paths.mmprojPath)
     base.mmprojExists = projectorPath !== undefined
@@ -149,12 +188,34 @@ export class ModelCapabilityService {
     if (!metadata) return base
 
     const maxCtxTrain = ggufContextLength(metadata)
+    const isEmbedding = isEmbeddingGguf(metadata)
+    const isDecision = isDecisionGguf(metadata)
+    const contextPlan =
+      base.contextPlan ??
+      (isEmbedding || isDecision
+        ? undefined
+        : await this.ggufContextPlan(provider, paths.modelPath, metadata))
     return {
       ...base,
       ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}),
-      isEmbedding: isEmbeddingGguf(metadata),
-      isDecision: isDecisionGguf(metadata),
+      ...(contextPlan !== undefined ? { contextPlan } : {}),
+      isEmbedding,
+      isDecision,
     }
+  }
+
+  /** The provider's plan for a GGUF chat model: its weights are every shard of it. */
+  private async ggufContextPlan(
+    provider: LocalProviderId,
+    modelPath: string,
+    metadata: Record<string, string>
+  ): Promise<ContextPlan | undefined> {
+    if (!this.deps.planContext) return undefined
+    const fileSize = this.deps.fileSize ?? defaultFileSize
+    const files = parseGgufShard(modelPath) ? ggufShardSetPaths(modelPath) : [modelPath]
+    let weightsBytes = 0
+    for (const file of files) weightsBytes += (await fileSize(file).catch(() => undefined)) ?? 0
+    return this.deps.planContext(provider, { metadata, weightsBytes }).catch(() => undefined)
   }
 
   /**

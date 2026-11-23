@@ -130,7 +130,7 @@ describe('MlxRuntime', () => {
     expect(envs.map((env) => env?.['MLX_VLM_SINGLE_MODEL'])).toEqual(['1', '1', '1'])
   })
 
-  it('narrows the 32K default by the KV cache on a Mac below 16 GiB, never below the previous 16K', async () => {
+  it('defaults to the largest window half of RAM holds: below 16 GiB at most 32K, never below 16K', async () => {
     const GiB = 2 ** 30
     // 28 layers × 8 KV heads × 128 at 16 bits: 112 KiB a token.
     const shape = {
@@ -148,11 +148,27 @@ describe('MlxRuntime', () => {
     }
     // 8 GiB: half of it less the 1 GiB reserve is 3072 MiB, 28086 tokens — 27904 in steps of 256.
     expect(await ctxOn('m8', 8 * GiB)).toBe(27_904)
-    expect(await ctxOn('m16', 16 * GiB)).toBe(32_768)
-    // A quantized KV cache (4 bits) fits the whole default.
+    // 16 GiB and up: no 32K cap — 7168 MiB less the small weights, 65280 tokens; 36 GiB holds the
+    // trained 131072.
+    expect(await ctxOn('m16', 16 * GiB)).toBe(65_280)
+    expect(await ctxOn('m36', 36 * GiB)).toBe(131_072)
+    // A quantized KV cache (4 bits) fits the whole 32K ceiling on a small Mac.
     expect(await ctxOn('q8', 8 * GiB, { kv_quant_scheme: 'uniform', kv_bits: 4 })).toBe(32_768)
     // 4 GiB: 1024 MiB left, 9362 tokens — the previous 16K default holds as the floor.
     expect(await ctxOn('m4', 4 * GiB)).toBe(16_384)
+  })
+
+  it('keeps the previous default when config.json gives no KV shape', async () => {
+    const GiB = 2 ** 30
+    const shapeless = { max_position_embeddings: 131_072 }
+    const ctxOn = async (id: string, totalMemoryBytes: number) => {
+      await writeMlxModel(id, shapeless)
+      const r = runtime({}, {}, { unifiedMemory: async () => ({ totalMemoryBytes }) })
+      await r.load(id)
+      return r.getCtxSize(id)
+    }
+    expect(await ctxOn('shapeless8', 8 * GiB)).toBe(16_384)
+    expect(await ctxOn('shapeless36', 36 * GiB)).toBe(32_768)
   })
 
   it('writes the start line to log before spawning', async () => {

@@ -48,12 +48,13 @@ export interface MlxDraftSelection {
 }
 
 /**
- * The context a model loads at when nothing pins one: the training maximum,
- * capped — a 256K coder model must not allocate a 256K KV cache on a 16 GB
- * Mac just because it could. The auto-increase ladder still climbs from
- * here, capped at the training maximum. See ADR 2026-06-15. 32K since the
- * integrations audit (S4): an agent's first request is 13-27K tokens; a Mac
- * below 16 GiB is narrowed back toward 16K by memory (`resolveMlxCtxSize`).
+ * The context a model loads at when nothing pins one and its memory is not
+ * known: the training maximum, capped — a 256K coder model must not allocate a
+ * 256K KV cache on a 16 GB Mac just because it could. See ADR 2026-06-15. 32K
+ * since the integrations audit (S4): an agent's first request is 13-27K tokens.
+ * When the Mac's RAM and the model's KV shape are known, the context plan
+ * (`planContextWindow`) takes over: the largest window half of RAM holds,
+ * never below this default, below 16 GiB never above it.
  */
 export const MLX_DEFAULT_CTX_CAP = DEFAULT_CTX_LEN
 
@@ -109,14 +110,15 @@ export function selectMlxDraftSettings(config: MlxExtensionConfigInput): MlxDraf
  * An explicit, valid `ctx_size` (a user-pinned value, or the auto-increase
  * override) wins, clamped to the training maximum when that is known — MLX
  * never clamped, unlike llama.cpp, so it could ask for a window the model
- * was not trained to hold. Unset falls back to `min(trainMax, cap)`, passed
- * through `narrowDefault` (the small-Mac memory rule, `smallMemoryDefaultCtx`),
- * or {@link MLX_DEFAULT_CTX_FALLBACK} when the training maximum is unknown.
+ * was not trained to hold. Unset takes `plannedDefault` (the context plan for
+ * this Mac, given the training maximum), never above the training maximum;
+ * without one `min(trainMax, cap)`, or {@link MLX_DEFAULT_CTX_FALLBACK} when the
+ * training maximum is unknown.
  */
 export function resolveMlxCtxSize(
   ctxSize: Numeric | undefined,
   maxCtxTrain: number | undefined,
-  narrowDefault?: (defaultCtx: number) => number | undefined
+  plannedDefault?: (trainMax: number) => number | undefined
 ): number {
   const trainMax = typeof maxCtxTrain === 'number' && maxCtxTrain > 0 ? maxCtxTrain : undefined
   const explicit = asNumber(ctxSize)
@@ -124,14 +126,15 @@ export function resolveMlxCtxSize(
     return trainMax ? Math.min(explicit, trainMax) : explicit
   }
   if (!trainMax) return MLX_DEFAULT_CTX_FALLBACK
-  const ctx = Math.min(trainMax, MLX_DEFAULT_CTX_CAP)
-  return Math.min(ctx, narrowDefault?.(ctx) ?? ctx)
+  const planned = plannedDefault?.(trainMax)
+  if (planned !== undefined && planned > 0) return Math.min(Math.floor(planned), trainMax)
+  return Math.min(trainMax, MLX_DEFAULT_CTX_CAP)
 }
 
 export function buildMlxConfig(
   config: MlxExtensionConfigInput,
   draft: MlxDraftSelection,
-  options: { maxCtxTrain?: number; narrowDefaultCtx?: (defaultCtx: number) => number | undefined } = {}
+  options: { maxCtxTrain?: number; plannedDefaultCtx?: (trainMax: number) => number | undefined } = {}
 ): MlxServerConfig {
   const draftPath = draft.draftPath.trim()
   const kvScheme =
@@ -142,7 +145,7 @@ export function buildMlxConfig(
   const kvBits = kvScheme && kvBitsRaw !== undefined && kvBitsRaw > 0 ? kvBitsRaw : 0
 
   return {
-    ctx_size: resolveMlxCtxSize(config.ctx_size, options.maxCtxTrain, options.narrowDefaultCtx),
+    ctx_size: resolveMlxCtxSize(config.ctx_size, options.maxCtxTrain, options.plannedDefaultCtx),
     draft_model_path: draftPath,
     block_size: draftPath ? draft.blockSize : 0,
     draft_kind: draftPath ? draft.draftKind : 'dflash',

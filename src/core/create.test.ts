@@ -2679,6 +2679,8 @@ it('discovers an installer commit immediately and checks it by ID or directory t
   expect(await caps.json()).toEqual({
     modelId: metadata.variant_id,
     maxCtxTrain: 32768,
+    // FastFlowLM runs a model at the window its model.yml declares.
+    contextPlan: { recommendedCtx: 32768, maxCtx: 32768, trainedCtx: 32768, basis: 'model' },
     mmprojExists: false,
     isEmbedding: false,
     isDecision: false,
