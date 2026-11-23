@@ -14,7 +14,7 @@
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DataLayout } from '../config/index.js'
-import type { LocalProviderId } from '../contracts/index.js'
+import type { ContextPlan, LocalProviderId } from '../contracts/index.js'
 import { checkDflashSupport, checkGemmaMtpSupport, listDflashDrafts } from '../speculative/index.js'
 import { classifyProjector, ggufContextLength, isDecisionGguf, isEmbeddingGguf } from './gguf/index.js'
 import { readGgufMetadataFromFile } from './gguf/read-file.js'
@@ -31,6 +31,8 @@ export interface ModelCapabilities {
   modelId: string
   /** `{general.architecture}.context_length` — the ceiling for the context ladder. */
   maxCtxTrain?: number
+  /** The window a load gets on this device when nobody chose one, and the largest it can hold. */
+  contextPlan?: ContextPlan
   /** A projector file exists, so this model can be given images. */
   mmprojExists: boolean
   isEmbedding: boolean
