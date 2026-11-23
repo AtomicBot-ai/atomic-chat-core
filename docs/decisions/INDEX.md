@@ -293,3 +293,4 @@ add a new one that says which record it supersedes.
 - [Retry Strata session health checks before unloading](2026-11-19-retry-strata-session-health-checks.md)
 - [2026-11-23 — Compact overflowing chat history on every engine](2026-11-23-compact-overflowing-chat-history-on-every-engine.md)
 - [2026-11-23 — Map every engine's context overflow to one error](2026-11-23-map-every-engines-context-overflow-to-one-error.md)
+- [2026-11-23 — Default every engine to the largest window that fits](2026-11-23-default-every-engine-to-the-largest-window-that-fits.md)
