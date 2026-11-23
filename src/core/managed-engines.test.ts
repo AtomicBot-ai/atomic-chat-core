@@ -410,10 +410,12 @@ describe('managedEngineRegistry (change add-vllm-runtime, task 3.4; add-sglang-r
   })
 
   it('an SGLang session the core did not start still serves only SGLang’s declared routes', () => {
+    // `/tokenize` is declared for the core's own prompt counting; the public server never forwards it.
     expect(managedExternalRoutePolicy('sglang')?.routes.map((route) => route.path)).toEqual([
       '/v1/chat/completions',
       '/v1/completions',
       '/v1/models',
+      '/tokenize',
     ])
   })
 })
