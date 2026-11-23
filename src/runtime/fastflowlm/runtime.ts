@@ -26,7 +26,7 @@ import {
   type EmitFn,
 } from '../shared/index.js'
 import { startManagedGateway, generateGatewayKey, type ManagedGateway } from '../managed-text/index.js'
-import { FLM_ROUTES, flmChatRequest, flmResponse, loadedCheckpoint } from './policy.js'
+import { FLM_ROUTES, flmChatRequest, flmMapError, flmResponse, loadedCheckpoint } from './policy.js'
 import { GenerationQueue } from './generation-queue.js'
 
 interface Options {
@@ -97,7 +97,7 @@ export class FastFlowLmRuntime implements LocalRuntime {
       routes: FLM_ROUTES,
       tools: extra.metadata.capabilities.tools,
       structuredOutput: extra.metadata.capabilities.structured_output,
-      mapError: () => null,
+      mapError: flmMapError,
       contextLength: extra.context,
     }
   }

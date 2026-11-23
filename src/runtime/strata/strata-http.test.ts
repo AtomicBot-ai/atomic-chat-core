@@ -65,3 +65,19 @@ it('distinguishes an HTTP request timeout from an immediate connection failure',
     timeoutSpy.mockRestore()
   }
 })
+
+it('maps a context overflow to context_length_exceeded and leaves any other engine error to the server', () => {
+  const { mapError } = probe(vi.fn()).policy
+  // No Strata overflow answer is recorded yet: the shared wordings decide (unverified).
+  expect(mapError(400, '{"error":{"message":"context length exceeded: 9000 > 8192"}}')).toMatchObject({
+    error: { type: 'invalid_request_error', param: 'messages', code: 'context_length_exceeded' },
+  })
+  expect(
+    mapError(
+      400,
+      '{"error":{"message":"request (9000 tokens) exceeds the available context size (8192 tokens)"}}'
+    )
+  ).toMatchObject({ error: { message: expect.stringMatching(/maximum context length is 8192 tokens/) } })
+  expect(mapError(400, '{"error":{"message":"Strata accepts text and image_url content parts."}}')).toBeNull()
+  expect(mapError(500, '{"error":{"message":"CUDA out of memory"}}')).toBeNull()
+})

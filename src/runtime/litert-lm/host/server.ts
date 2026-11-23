@@ -7,6 +7,10 @@
  * A client that hangs up cancels its generation in the library; a stop string cancels it too. A
  * cancelled conversation answers every later message with `CANCELLED` (spike S2), so it leaves the
  * pool, as does one whose generation failed.
+ *
+ * A stream's headers wait for the library's first chunk: a prompt that alone fills the window ends
+ * the generation before any, and the client then gets the same 400 `context_length_exceeded` with a
+ * stream as without, while a window that runs out during the answer stays `finish_reason: length`.
  */
 
 import { createServer } from 'node:http'
@@ -22,7 +26,7 @@ import {
   SSE_DONE,
   sseFramer,
 } from '../../shared/index.js'
-import { OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
+import { isPromptOverflowError, OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
 import type { Delta, FinishReason, ModelCaps, ParsedChat } from './openai.js'
 import type { LiteRtChunk, LiteRtConversation, LiteRtEngine } from './library.js'
 import { ConversationPool, FifoLock } from './pool.js'
@@ -34,6 +38,8 @@ export interface LiteRtServerOptions {
   /** What `/v1/models` lists and replies carry as `model`: core's session id. */
   modelId: string
   caps: ModelCaps
+  /** The engine's `max_num_tokens`, for the words of an overflow; unknown when absent. */
+  contextLength?: number
   now?: () => number
   /** One line per failed generation, for the host's stderr (core keeps its tail). */
   log?: (line: string) => void
@@ -111,7 +117,9 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
     const frame = framer.frame
     const deltaFrame = (delta: Record<string, unknown>, finish: FinishReason | null = null) =>
       framer.delta(delta, finish)
-    if (chat.stream) {
+    /** The stream's headers and its first delta, once the library has taken the prompt. */
+    const open = () => {
+      if (!chat.stream || res.headersSent || gone()) return
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
@@ -120,7 +128,9 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
       res.write(deltaFrame({ role: 'assistant', content: '' }))
     }
     const write = (deltas: Delta[]) => {
-      if (chat.stream && !gone()) for (const delta of deltas) res.write(deltaFrame(delta))
+      if (!chat.stream || gone() || deltas.length === 0) return
+      open()
+      for (const delta of deltas) res.write(deltaFrame(delta))
     }
 
     return new Promise<void>((resolve) => {
@@ -141,7 +151,17 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         let finish: FinishReason | null = null
         let failure: OpenAiRequestError | null = null
         try {
-          finish = gone() ? null : reply.finish(chunk.error)
+          if (chunk.error && reply.empty && isPromptOverflowError(chunk.error)) {
+            const window = options.contextLength ? ` of ${options.contextLength} tokens` : ''
+            failure = new OpenAiRequestError(
+              400,
+              `LiteRT-LM: the prompt does not fit the context window${window} (${chunk.error})`,
+              'messages',
+              undefined,
+              'context_length_exceeded'
+            )
+            options.log?.(`generation failed: ${failure.message}`)
+          } else finish = gone() ? null : reply.finish(chunk.error)
         } catch (error) {
           failure = error instanceof OpenAiRequestError ? error : new OpenAiRequestError(500, String(error))
           options.log?.(`generation failed: ${failure.message}`)
@@ -163,6 +183,8 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         usage: Record<string, number>
       ) => {
         if (chat.stream) {
+          if (failure && !res.headersSent) return sendError(res, failure)
+          open()
           if (failure) res.write(`data: ${JSON.stringify(failure.body)}\n\n`)
           else {
             res.write(deltaFrame({}, finish))
@@ -186,6 +208,7 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
           },
           (chunk) => {
             if (chunk.text !== null && !chunk.error) {
+              open()
               write(reply.add(chunk.text))
               if (reply.stopped) cancel()
             }
@@ -199,10 +222,8 @@ export function createLiteRtServer(options: LiteRtServerOptions): LiteRtServer {
         pool.drop(entry)
         const failure = new OpenAiRequestError(500, error instanceof Error ? error.message : String(error))
         options.log?.(`generation failed to start: ${failure.message}`)
-        if (chat.stream) {
-          res.write(`data: ${JSON.stringify(failure.body)}\n\n`)
-          res.end(SSE_DONE)
-        } else sendError(res, failure)
+        // Nothing was streamed yet: the failure is the answer, as without a stream.
+        sendError(res, failure)
         resolve()
       }
     })

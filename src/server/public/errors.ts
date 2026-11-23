@@ -10,6 +10,7 @@
  * it to decide whether to offer a larger context or a smaller model.
  */
 
+import { CONTEXT_LENGTH_EXCEEDED } from '../../contracts/index.js'
 import { DEFAULT_N_PREDICT } from '../../runtime/llamacpp/generation-limits.js'
 import { isJsonObject, serdeToString } from '../shims/index.js'
 import type { JsonValue } from '../shims/index.js'
@@ -28,20 +29,130 @@ export function isLlamaContextOverflow(body: string): boolean {
   return LLAMA_CONTEXT_OVERFLOW.test(body) || errorTypeOf(body) === LLAMA_CONTEXT_OVERFLOW_TYPE
 }
 
-/** A request that no longer fits the loaded context window, as llama.cpp and MLX word it. */
-export function isContextLimitError(status: number, body: string): boolean {
-  if (![400, 413, 500, 503].includes(status)) return false
+type Sizes = { prompt: number; window: number }
+const int = (match: RegExpExecArray, group: number) => Math.round(Number(match[group] ?? 0))
+const NUM = '(\\d+(?:\\.\\d+)?)'
+
+/**
+ * Overflow wordings that state both sizes, read as the request's tokens and the window's. Each is an
+ * engine's own message or the OpenAI body a managed engine's adapter maps it to, so a body is read the
+ * same whether or not the session gateway mapped it first.
+ */
+const OVERFLOW_SIZES: readonly { pattern: RegExp; sizes: (match: RegExpExecArray) => Sizes }[] = [
+  // llama.cpp (upstream, TurboQuant, Prism): the engine contract's two wordings.
+  {
+    pattern: /request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)/i,
+    sizes: (m) => ({ prompt: int(m, 1), window: int(m, 2) }),
+  },
+  {
+    pattern: /input \((\d+) tokens\) is larger than the max context size \((\d+) tokens\)/i,
+    sizes: (m) => ({ prompt: int(m, 1), window: int(m, 2) }),
+  },
+  // vLLM, current and older (`runtime/vllm/adapter.ts`).
+  {
+    pattern: /maximum context length is (\d+) tokens\. However, your request has (\d+) input tokens/i,
+    sizes: (m) => ({ prompt: int(m, 2), window: int(m, 1) }),
+  },
+  {
+    pattern: /maximum context length is (\d+) tokens\. However, you requested (\d+) tokens/i,
+    sizes: (m) => ({ prompt: int(m, 2), window: int(m, 1) }),
+  },
+  // A `max_tokens` the room left cannot hold: the request is the input and that output.
+  {
+    pattern:
+      /(?:is too large: (\d+)\. This model's )?maximum context length is (\d+) tokens and your request has (\d+) input tokens/i,
+    sizes: (m) => ({ prompt: int(m, 3) + int(m, 1), window: int(m, 2) }),
+  },
+  // OpenAI's own wording, which the TensorRT-LLM adapter maps to.
+  {
+    pattern: /maximum context length is (\d+) tokens\. However, your messages resulted in (\d+) tokens/i,
+    sizes: (m) => ({ prompt: int(m, 2), window: int(m, 1) }),
+  },
+  // What the vLLM and SGLang adapters map to.
+  {
+    pattern: /maximum context length is (\d+) tokens, but the request has (\d+) tokens/i,
+    sizes: (m) => ({ prompt: int(m, 2), window: int(m, 1) }),
+  },
+  // SGLang `managers/tokenizer_manager.py` (`runtime/sglang/adapter.ts`).
+  {
+    pattern: /The input \((\d+) tokens\) is longer than the model's context length \((\d+) tokens\)/i,
+    sizes: (m) => ({ prompt: int(m, 1), window: int(m, 2) }),
+  },
+  {
+    pattern: /maximum context length of (\d+) tokens\. You requested a total of (\d+) tokens/i,
+    sizes: (m) => ({ prompt: int(m, 2), window: int(m, 1) }),
+  },
+  // TensorRT-LLM 1.2.1 and 1.3.0rc29 `_check_arguments` (`runtime/tensorrt-llm/adapter.ts`).
+  {
+    pattern: new RegExp(
+      `sum of prompt length \\(${NUM}\\), query length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`,
+      'i'
+    ),
+    sizes: (m) => ({ prompt: int(m, 1) + int(m, 2), window: int(m, 3) }),
+  },
+  {
+    pattern: new RegExp(`The prompt length \\(${NUM}\\) should not exceed max_num_tokens \\(${NUM}\\)`, 'i'),
+    sizes: (m) => ({ prompt: int(m, 1), window: int(m, 2) }),
+  },
+  // FastFlowLM at the pinned f37cdd29 (`AutoModel::_shared_validate_capacity`): a 400 `model_error`.
+  {
+    pattern:
+      /Request exceeds the (\d+)-token limit of backend '[^']*': rendered prompt has (\d+) tokens(?: and requested output has (\d+) tokens)?/i,
+    sizes: (m) => ({ prompt: int(m, 2) + int(m, 3), window: int(m, 1) }),
+  },
+]
+
+/**
+ * Overflow wordings that state no sizes. FastFlowLM at the pinned f37cdd29 answers a prompt its window
+ * cannot hold with a 400 `{"error":{"message":"Max length reached!","type":"model_error","code":400}}`
+ * (`rest_handler.cpp`, after `insert` refuses it in `AutoModel::_shared_insert`).
+ */
+const OVERFLOW_WORDS: readonly RegExp[] = [/^max length reached!?$/i]
+
+/** Statuses an engine answers a context overflow with. */
+const OVERFLOW_STATUSES: readonly number[] = [400, 413, 500, 503]
+
+/**
+ * How sure a body is a context overflow: `known` — an engine's own wording, llama.cpp's error type or
+ * a `context_length_exceeded` code; `strong` — shared words that say something ran over (MLX's KV
+ * cache, "context … exceeded"); `weak` — "context" with a size, a length or a limit, which a failure
+ * to set the context up says too (`failed to initialize context size`).
+ */
+function overflowEvidence(status: number, body: string): 'known' | 'strong' | 'weak' | undefined {
+  if (!OVERFLOW_STATUSES.includes(status)) return undefined
+  if (isLlamaContextOverflow(body) || errorCodeOf(body) === CONTEXT_LENGTH_EXCEEDED) return 'known'
+  const message = errorMessageOf(body)
+  if (OVERFLOW_WORDS.some((words) => words.test(message.trim()))) return 'known'
+  if (OVERFLOW_SIZES.some(({ pattern }) => pattern.test(message) || pattern.test(body))) return 'known'
   const b = body.toLowerCase()
-  if (isLlamaContextOverflow(body)) return true
   // Older builds' wording.
-  if (b.includes('the request exceeds the available context size')) return true
-  if (b.includes('max_kv_size') || b.includes('max-kv-size') || b.includes('max kv size')) return true
+  if (b.includes('the request exceeds the available context size')) return 'strong'
+  if (b.includes('max_kv_size') || b.includes('max-kv-size') || b.includes('max kv size')) return 'strong'
   if (b.includes('kv cache') && (b.includes('exceed') || b.includes('overflow') || b.includes('too')))
-    return true
-  return (
-    b.includes('context') &&
-    ['size', 'length', 'limit', 'exceed', 'overflow', 'too long', 'too large'].some((w) => b.includes(w))
-  )
+    return 'strong'
+  if (!b.includes('context')) return undefined
+  if (['exceed', 'overflow', 'too long', 'too large'].some((w) => b.includes(w))) return 'strong'
+  return ['size', 'length', 'limit'].some((w) => b.includes(w)) ? 'weak' : undefined
+}
+
+/**
+ * A request that no longer fits the loaded context window: llama.cpp's and MLX's words, every routed
+ * engine's own overflow wording, and a body some layer already mapped to `context_length_exceeded`.
+ */
+export function isContextLimitError(status: number, body: string): boolean {
+  return overflowEvidence(status, body) !== undefined
+}
+
+/**
+ * A context overflow worth telling the client as one: any known wording; the shared words in a body
+ * that does not also say the engine ran out of memory, the weak ones only on a client error (a `5xx`
+ * that names the context's size is as likely a failure to set it up).
+ */
+function isReportableOverflow(status: number, body: string): boolean {
+  const evidence = overflowEvidence(status, body)
+  if (evidence === 'known') return true
+  if (evidence === undefined || bodyIndicatesOom(body)) return false
+  return evidence === 'strong' || status < 500
 }
 
 export function bodyIndicatesOom(body: string): boolean {
@@ -147,8 +258,33 @@ function errorTypeOf(body: string): string | undefined {
   return typeof type === 'string' ? type : undefined
 }
 
-/** The prompt size and window of a llama.cpp context overflow, from its fields or its message. */
-function llamaOverflowSizes(body: string): { prompt: number; window: number } | undefined {
+/** `error.code`, or a top-level `code`, when it is a string. */
+function errorCodeOf(body: string): string | undefined {
+  const parsed = parseJson(body)
+  if (!isJsonObject(parsed)) return undefined
+  const error = parsed['error']
+  const code = isJsonObject(error) ? error['code'] : parsed['code']
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * The message of an error body: `error.message` (OpenAI), a top-level `message` (vLLM's and
+ * trtllm-serve's `ErrorResponse`, FastFlowLM's error string), or the body itself.
+ */
+function errorMessageOf(body: string): string {
+  const parsed = parseJson(body)
+  if (!isJsonObject(parsed)) return body
+  const error = parsed['error']
+  if (isJsonObject(error) && typeof error['message'] === 'string') return error['message']
+  if (typeof parsed['message'] === 'string') return parsed['message']
+  return body
+}
+
+/**
+ * The request's tokens and the window of a context overflow, from llama.cpp's size fields or from
+ * any wording that states both; `undefined` when the body says neither.
+ */
+export function contextOverflowSizes(body: string): Sizes | undefined {
   const parsed = parseJson(body)
   const error = isJsonObject(parsed) ? parsed['error'] : undefined
   if (isJsonObject(error)) {
@@ -156,31 +292,62 @@ function llamaOverflowSizes(body: string): { prompt: number; window: number } | 
     const window = asU64(error['n_ctx'])
     if (prompt !== undefined && window !== undefined && window > 0) return { prompt, window }
   }
-  const message = isJsonObject(error) && typeof error['message'] === 'string' ? error['message'] : body
-  const sizes =
-    /request \((\d+) tokens\) exceeds the available context size \((\d+) tokens\)/i.exec(message) ??
-    /input \((\d+) tokens\) is larger than the max context size \((\d+) tokens\)/i.exec(message)
-  return sizes ? { prompt: Number(sizes[1]), window: Number(sizes[2]) } : undefined
+  const message = errorMessageOf(body)
+  for (const { pattern, sizes } of OVERFLOW_SIZES) {
+    const match = pattern.exec(message) ?? pattern.exec(body)
+    if (match === null) continue
+    const found = sizes(match)
+    if (found.window > 0) return found
+  }
+  return undefined
 }
 
 /**
- * A llama.cpp context overflow as the Anthropic API words one: a 400 `invalid_request_error` whose
- * message is exactly `prompt is too long: N tokens > M maximum`. Claude Code matches that wording to
- * compact the conversation and retry; any other text it shows as a failed turn. `undefined` for any
- * other error, or an overflow that does not say both sizes.
+ * Any engine's context overflow as the Anthropic API words one: a 400 `invalid_request_error` whose
+ * message is `prompt is too long: N tokens > M maximum`, or `prompt is too long` and the reason when
+ * the body states no sizes. Claude Code matches that wording to compact the conversation and retry;
+ * any other text it shows as a failed turn. Reads llama.cpp's shape, a body already mapped to
+ * `context_length_exceeded` (a managed engine's adapter, a host's own 400), every engine wording of
+ * `OVERFLOW_SIZES`/`OVERFLOW_WORDS`, and the shared words of `isContextLimitError` as
+ * `isReportableOverflow` weighs them; `undefined` for any other error.
  */
 export function anthropicPromptTooLong(status: number, body: string): string | undefined {
-  if (status !== 400) return undefined
-  if (!isLlamaContextOverflow(body)) return undefined
-  const sizes = llamaOverflowSizes(body)
-  if (sizes === undefined) return undefined
+  if (!isReportableOverflow(status, body)) return undefined
+  const sizes = contextOverflowSizes(body)
   return serdeToString({
     type: 'error',
     error: {
       type: 'invalid_request_error',
-      message: `prompt is too long: ${sizes.prompt} tokens > ${sizes.window} maximum`,
+      message: sizes
+        ? `prompt is too long: ${sizes.prompt} tokens > ${sizes.window} maximum`
+        : "prompt is too long: the request does not fit the model's context window",
     },
   })
+}
+
+/**
+ * A route policy's `mapError` for an engine that words its own overflow: the OpenAI
+ * `context_length_exceeded` envelope (in OpenAI's own wording when the body states both sizes, with
+ * the engine's message otherwise) for a body `anthropicPromptTooLong` would also report, `null` for
+ * any other error, which the public server wraps as before.
+ */
+export function contextLengthExceededError(
+  status: number,
+  body: string
+): { error: { message: string; type: string; param: string; code: string } } | null {
+  if (!isReportableOverflow(status, body)) return null
+  const sizes = contextOverflowSizes(body)
+  return {
+    error: {
+      message: sizes
+        ? `This model's maximum context length is ${sizes.window} tokens. However, your messages resulted ` +
+          `in ${sizes.prompt} tokens. Please reduce the length of the messages.`
+        : errorMessageOf(body),
+      type: 'invalid_request_error',
+      param: 'messages',
+      code: CONTEXT_LENGTH_EXCEEDED,
+    },
+  }
 }
 
 function isStructuredErrorBody(body: string): boolean {

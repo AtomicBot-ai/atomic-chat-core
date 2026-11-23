@@ -8,6 +8,7 @@
  * of and the host adds: `stop` strings, OpenAI's string `arguments`, call ids, `finish_reason`.
  */
 
+import { contextLengthExceededError } from '../../../server/public/errors.js'
 import type { LiteRtMessage, LiteRtSampler } from './library.js'
 
 import {
@@ -154,6 +155,16 @@ interface ToolCall {
 const TOKEN_LIMIT_RE = /max number of tokens/i
 const CANCELLED_RE = /^CANCELLED/i
 
+/**
+ * Whether the error a generation ended with, before it gave any text, thought or call, says the prompt
+ * alone does not fit the window: the token limit (the library's `Max number of tokens reached`, spike
+ * S2, met before the first token of the answer), or (unverified pending a live capture of an overlong
+ * prompt) the shared overflow words of `server/public/errors.ts` that say something ran over.
+ */
+export function isPromptOverflowError(error: string): boolean {
+  return TOKEN_LIMIT_RE.test(error) || contextLengthExceededError(500, error) !== null
+}
+
 /** Builds one reply from the library's chunks: deltas as they come, the whole message at the end. */
 export class ReplyBuilder {
   private content = ''
@@ -165,6 +176,11 @@ export class ReplyBuilder {
   stopped = false
   /** Chunks that carried generated text or thought: the completion's token count, near enough. */
   completionChunks = 0
+
+  /** Nothing of an answer yet: no text, no thought, no tool call. */
+  get empty(): boolean {
+    return this.completionChunks === 0 && this.calls.length === 0
+  }
 
   constructor(
     private readonly stops: readonly string[],

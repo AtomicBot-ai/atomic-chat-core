@@ -20,7 +20,13 @@ afterEach(async () => {
 })
 
 async function start(
-  over: { vision?: boolean; reasoning?: boolean; grammar?: boolean; library?: FakeGeniexLibrary } = {}
+  over: {
+    vision?: boolean
+    reasoning?: boolean
+    grammar?: boolean
+    library?: FakeGeniexLibrary
+    contextLength?: number
+  } = {}
 ) {
   const library = over.library ?? new FakeGeniexLibrary()
   const engine = new WorkerEngine(new FakeGeniexWorker(library))
@@ -39,6 +45,7 @@ async function start(
     caps: { vision: over.vision ?? false, reasoning: over.reasoning ?? false },
     defaultMaxTokens: 256,
     ...(over.grammar === undefined ? {} : { grammar: over.grammar }),
+    ...(over.contextLength === undefined ? {} : { contextLength: over.contextLength }),
     tmpDir: join(tmp, 'images'),
     now: () => 1_700_000_000_000,
   })
@@ -286,6 +293,65 @@ describe('geniex-host server (tasks 5.4–5.5)', () => {
         param: 'messages',
       },
     })
+  })
+
+  it('answers a streamed prompt past the context with the same 400 as without a stream, before any SSE', async () => {
+    const { url, library } = await start()
+    library.script = () => ({ error: 'Input prompt too long', code: -200103 })
+    const response = await post(url, ask('x'.repeat(100), { stream: true }))
+    expect(response.status).toBe(400)
+    expect(response.headers.get('content-type')).toMatch(/application\/json/)
+    expect(await response.json()).toMatchObject({
+      error: {
+        message: 'GenieX: generate: llm_generate: Input prompt too long',
+        type: 'invalid_request_error',
+        param: 'messages',
+        code: 'context_length_exceeded',
+      },
+    })
+  })
+
+  it.each([false, true])(
+    'answers a prompt that takes the whole window (context_length, no token) with a 400, stream: %s',
+    async (stream) => {
+      const { url, library } = await start({ contextLength: 4096 })
+      library.script = () => []
+      library.stopReason = 'context_length'
+      const response = await post(url, ask('x', { stream }))
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({
+        error: {
+          message: expect.stringMatching(
+            /^GenieX: the prompt \(\d+ tokens\) leaves no room for an answer in the context window \(4096 tokens\)$/
+          ),
+          code: 'context_length_exceeded',
+        },
+      })
+    }
+  )
+
+  it('keeps a window that ran out during the answer a finish_reason length, and opens the stream at the first token', async () => {
+    const { url, library } = await start()
+    library.script = () => ['partial']
+    library.stopReason = 'context_length'
+    const response = await post(url, ask('x', { stream: true }))
+    expect(response.status).toBe(200)
+    const got = await frames(response)
+    expect(deltasOf(got).slice(0, 2)).toEqual([{ role: 'assistant', content: '' }, { content: 'partial' }])
+    expect(got.at(-2)).toMatchObject({ choices: [{ finish_reason: 'length' }] })
+  })
+
+  it('reads an overflow in the shared words only before the first token (unverified llama_cpp wording)', async () => {
+    const { url, library } = await start()
+    library.script = () => ({ error: 'context size exceeded: 5000 > 4096' })
+    const before = await post(url, ask('x', { stream: true }))
+    expect(before.status).toBe(400)
+    expect(await before.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    // Any other failure before the first token is a 500 as JSON too: no stream had started.
+    library.script = () => ({ error: 'Failed to decode', code: -200104 })
+    const other = await post(url, ask('x', { stream: true }))
+    expect(other.status).toBe(500)
+    expect(await other.json()).toMatchObject({ error: { type: 'server_error' } })
   })
 
   it('refuses response_format with a 400 when the plugin has no grammar sampler (qairt)', async () => {

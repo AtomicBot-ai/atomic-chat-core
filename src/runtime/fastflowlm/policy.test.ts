@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { flmChatRequest, flmResponse, loadedCheckpoint } from './policy.js'
+import { flmChatRequest, flmMapError, flmResponse, loadedCheckpoint } from './policy.js'
 const caps = { chat: true as const, tools: false, reasoning: false, structured_output: false }
 const chat = { model: 'public', messages: [{ role: 'user', content: 'Hi' }] }
 it('requires the selected checkpoint in the loaded model response', () => {
@@ -71,4 +71,33 @@ it('preserves qualified tool and structured-output requests while mapping only t
       structured_output: true,
     })
   ).toEqual({ ...request, model: 'qwen3:0.6b', think: true })
+})
+it.each([
+  // What the pinned f37cdd29 answers (rest_handler.cpp; AutoModel::_shared_validate_capacity).
+  ['{"error":{"message":"Max length reached!","type":"model_error","code":400}}', 'Max length reached!'],
+  [
+    `{"error":{"message":"Request exceeds the 4096-token limit of backend 'npu': rendered prompt has 5000 tokens","type":"model_error","code":400,"session_cleared":false}}`,
+    "This model's maximum context length is 4096 tokens. However, your messages resulted in 5000 tokens. Please reduce the length of the messages.",
+  ],
+])('maps the engine overflow %s to context_length_exceeded', (body, message) => {
+  expect(flmMapError(400, body)).toEqual({
+    error: { message, type: 'invalid_request_error', param: 'messages', code: 'context_length_exceeded' },
+  })
+})
+it('leaves any other engine error and the full generation queue to the public server', () => {
+  expect(
+    flmMapError(400, `{"error":{"message":"'messages' is required and must be an array","code":400}}`)
+  ).toBeNull()
+  expect(
+    flmMapError(
+      503,
+      '{"error":{"message":"The model generation queue is full.","type":"server_error","code":"queue_full"}}'
+    )
+  ).toBeNull()
+  expect(
+    flmMapError(
+      500,
+      '{"error":{"message":"Inference failed; the current conversation was cleared","code":500}}'
+    )
+  ).toBeNull()
 })

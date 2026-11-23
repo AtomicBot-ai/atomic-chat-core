@@ -11,7 +11,9 @@ afterEach(async () => {
   close = null
 })
 
-async function start(over: { vision?: boolean; reasoning?: boolean; library?: FakeLiteRtLibrary } = {}) {
+async function start(
+  over: { vision?: boolean; reasoning?: boolean; library?: FakeLiteRtLibrary; contextLength?: number } = {}
+) {
   const library = over.library ?? new FakeLiteRtLibrary()
   const engine = library.createEngine({
     model: '/m.litertlm',
@@ -25,6 +27,7 @@ async function start(over: { vision?: boolean; reasoning?: boolean; library?: Fa
     engine,
     modelId: 'gemma-e2b',
     caps: { vision: over.vision ?? false, reasoning: over.reasoning ?? false },
+    ...(over.contextLength === undefined ? {} : { contextLength: over.contextLength }),
     now: () => 1_700_000_000_000,
   })
   const url = await server.listen(0)
@@ -280,6 +283,55 @@ describe('litert-host server', () => {
       error: { message: expect.stringMatching(/GPU device lost/) },
     })
     expect(library.engines[0]?.conversations[0]?.closed).toBe(true)
+  })
+
+  it.each([false, true])(
+    'answers a prompt that alone fills the window with a 400 context_length_exceeded, stream: %s',
+    async (stream) => {
+      const { url, library } = await start({ contextLength: 4096 })
+      library.script = () => [{ error: 'Max number of tokens reached.' }]
+      const response = await post(url, ask('x', { stream }))
+      expect(response.status).toBe(400)
+      expect(response.headers.get('content-type')).toMatch(/application\/json/)
+      expect(await response.json()).toEqual({
+        error: {
+          message:
+            'LiteRT-LM: the prompt does not fit the context window of 4096 tokens (Max number of tokens reached.)',
+          type: 'invalid_request_error',
+          param: 'messages',
+          code: 'context_length_exceeded',
+        },
+      })
+      expect(library.engines[0]?.conversations[0]?.closed).toBe(true)
+    }
+  )
+
+  it.each([false, true])(
+    'keeps a window that runs out during the answer a finish_reason length, stream: %s',
+    async (stream) => {
+      const { url, library } = await start()
+      library.script = () => [text('par'), { error: 'Max number of tokens reached.' }]
+      const response = await post(url, ask('x', { stream }))
+      expect(response.status).toBe(200)
+      if (!stream) {
+        expect(await response.json()).toMatchObject({
+          choices: [{ message: { content: 'par' }, finish_reason: 'length' }],
+        })
+        return
+      }
+      const got = await frames(response)
+      expect(got.at(-2)).toMatchObject({ choices: [{ finish_reason: 'length' }] })
+    }
+  )
+
+  it('answers a stream whose generation fails before its first chunk as JSON, with no SSE', async () => {
+    const { url, library } = await start()
+    library.script = () => [{ error: 'INTERNAL: GPU device lost' }]
+    const response = await post(url, ask('x', { stream: true }))
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({
+      error: { type: 'server_error', message: expect.stringMatching(/GPU device lost/) },
+    })
   })
 
   it('turns thinking on by the model default and off when the request says so', async () => {

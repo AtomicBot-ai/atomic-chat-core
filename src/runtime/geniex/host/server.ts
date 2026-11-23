@@ -6,7 +6,10 @@
  * for a whole generation. `/v1/models` never waits on the queue.
  *
  * Every request is a full prompt: the chat template is applied in the Worker, the tokens stream back
- * through it, and the reply parser turns them into deltas. A client that hangs up sets the shared
+ * through it, and the reply parser turns them into deltas. A stream's headers wait for the first
+ * token: a prompt past the window is refused by the library before it makes one, and the client then
+ * gets the same 400 `context_length_exceeded` with a stream as without (the library offers no way to
+ * count a prompt's tokens without generating). A client that hangs up sets the shared
  * cancel flag the Worker's token callback reads; a stop string does the same. Images come as data
  * URLs and go to the library as files under the host's `tmp`, deleted after the answer.
  */
@@ -16,6 +19,7 @@ import { createServer } from 'node:http'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { join } from 'node:path'
+import { contextLengthExceededError } from '../../../server/public/errors.js'
 import { requestAborted } from '../../../server/public/exchange.js'
 import {
   completionBody,
@@ -50,6 +54,8 @@ export interface GeniexServerOptions {
   grammar?: boolean
   /** Where request images are written for the library. */
   tmpDir: string
+  /** The window the model was created with, for the words of an overflow; unknown when absent. */
+  contextLength?: number
   now?: () => number
   /** One line per failed generation, for the host's stderr (core keeps its tail). */
   log?: (line: string) => void
@@ -65,6 +71,18 @@ export interface GeniexServer {
 /** How long a stop waits for a cancelled generation to end in the library. */
 const CLOSE_WAIT_MS = 10_000
 const GONE_POLL_MS = 50
+/** The library's own words for a prompt past the context window (spike S4, qairt). */
+const PROMPT_TOO_LONG = /prompt too long/i
+
+/**
+ * A library failure before the first token that says the prompt does not fit: the library's own
+ * words, or (unverified pending a live capture of the llama_cpp plugin's wording) the shared overflow
+ * words of `server/public/errors.ts` that say something ran over.
+ */
+function isPromptOverflow(text: string, beforeFirstToken: boolean): boolean {
+  return PROMPT_TOO_LONG.test(text) || (beforeFirstToken && contextLengthExceededError(500, text) !== null)
+}
+
 const MIME_EXT: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -72,6 +90,10 @@ const MIME_EXT: Record<string, string> = {
   'image/gif': 'gif',
   'image/bmp': 'bmp',
 }
+
+/** The 400 a prompt past the context window gets, with a stream or without. */
+const overflow = (message: string) =>
+  new OpenAiRequestError(400, message, 'messages', undefined, 'context_length_exceeded')
 
 export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
   const now = options.now ?? Date.now
@@ -161,8 +183,20 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
     let settle: () => void = () => {}
     running = { cancel, ended: new Promise<void>((done) => (settle = done)) }
     const stream = chat.stream
+    /** The stream's headers and its first delta, once the library has taken the prompt. */
+    const open = () => {
+      if (!stream || res.headersSent || gone()) return
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+      })
+      res.write(framer.delta({ role: 'assistant', content: '' }))
+    }
     const write = (deltas: Delta[]) => {
-      if (stream && !gone()) for (const delta of deltas) res.write(framer.delta(delta))
+      if (!stream || gone() || deltas.length === 0) return
+      open()
+      for (const delta of deltas) res.write(framer.delta(delta))
     }
     let promptTokens = 0
     let generatedTokens = 0
@@ -177,14 +211,6 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
         tools: chat.toolsJson,
         enableThinking: chat.thinking,
       })
-      if (stream && !gone()) {
-        res.writeHead(200, {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-cache',
-          'connection': 'keep-alive',
-        })
-        res.write(framer.delta({ role: 'assistant', content: '' }))
-      }
       const config: GeniexGenerationConfig = {
         maxTokens: chat.maxTokens ?? options.defaultMaxTokens,
         // The library sees the stop strings too; the parser still cuts the text at them.
@@ -204,6 +230,7 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
         prompt,
         config,
         (token) => {
+          open()
           write(parser.add(token))
           if (parser.stopped) Atomics.store(cancel, 0, 1)
         },
@@ -212,14 +239,21 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
       promptTokens = result.promptTokens
       generatedTokens = result.generatedTokens
       stopReason = parser.stopped ? 'user' : result.stopReason
+      if (stopReason === 'context_length' && generatedTokens === 0 && parser.tokens === 0) {
+        // The prompt took the whole window: not one token of an answer fits.
+        const window = options.contextLength ? ` (${options.contextLength} tokens)` : ''
+        failure = overflow(
+          `GenieX: the prompt (${promptTokens} tokens) leaves no room for an answer in the context window${window}`
+        )
+        options.log?.(`generation failed: ${failure.message}`)
+      }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error)
       failure =
         error instanceof OpenAiRequestError
           ? error
-          : /prompt too long/i.test(text)
-            ? // The library's own words for a prompt past the context window (spike S4, qairt).
-              new OpenAiRequestError(400, `GenieX: ${text}`, 'messages', undefined, 'context_length_exceeded')
+          : isPromptOverflow(text, parser.tokens === 0)
+            ? overflow(`GenieX: ${text}`)
             : new OpenAiRequestError(
                 500,
                 `GenieX: ${error instanceof GeniexLibraryError ? error.message : text}`
@@ -242,14 +276,8 @@ export function createGeniexServer(options: GeniexServerOptions): GeniexServer {
       total_tokens: promptTokens + completion,
     }
     if (stream) {
-      if (!res.headersSent) {
-        if (failure) return sendOpenAiError(res, failure)
-        res.writeHead(200, {
-          'content-type': 'text/event-stream',
-          'cache-control': 'no-cache',
-          'connection': 'keep-alive',
-        })
-      }
+      if (failure && !res.headersSent) return sendOpenAiError(res, failure)
+      open()
       if (failure) res.write(`data: ${JSON.stringify(failure.body)}\n\n`)
       else {
         res.write(framer.delta({}, finish))

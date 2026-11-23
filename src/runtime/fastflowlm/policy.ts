@@ -1,4 +1,5 @@
 import type { FastFlowLmModelDescriptor } from '../../contracts/index.js'
+import { contextLengthExceededError } from '../../server/public/errors.js'
 import { asksForStructuredOutput, asksForTools, ManagedRequestRefusal } from '../managed-text/index.js'
 
 export const FLM_ROUTES = [
@@ -68,6 +69,18 @@ export function flmChatRequest(
     model: checkpoint,
     think,
   }
+}
+/**
+ * FastFlowLM's context overflow as OpenAI's `context_length_exceeded`; `null` for any other error. The
+ * pinned f37cdd29 answers a prompt past its window with one of two 400 `model_error` bodies, both
+ * before a stream starts: `Max length reached!` (`rest_handler.cpp`, when `insert` refuses the
+ * prompt) and `Request exceeds the M-token limit of backend '…': rendered prompt has N tokens[ and
+ * requested output has K tokens]` (`AutoModel::_shared_validate_capacity`). Both are read by
+ * `server/public/errors.ts`, which the `/v1/messages` path reads too; the gateway's own `queue_full`
+ * 503 is not an overflow.
+ */
+export function flmMapError(status: number, body: string): object | null {
+  return contextLengthExceededError(status, body)
 }
 /** Preserve the engine payload, including SSE deltas and token usage. */
 export function flmResponse(body: Record<string, unknown>, id: string) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
+import { isPromptOverflowError, OpenAiRequestError, parseChatRequest, ReplyBuilder } from './openai.js'
 
 const CAPS = { vision: true, reasoning: false }
 const TOOLS = [
@@ -308,5 +308,33 @@ describe('ReplyBuilder', () => {
     expect(held.finish(null)).toBe('stop')
     expect(new ReplyBuilder([]).finish('Max number of tokens reached.')).toBe('length')
     expect(() => new ReplyBuilder([]).finish('INTERNAL: GPU lost')).toThrow(/GPU lost/)
+  })
+})
+
+describe('isPromptOverflowError', () => {
+  it.each([
+    // The library's token-limit words (spike S2), which before any answer mean the prompt filled the window.
+    ['Max number of tokens reached.', true],
+    // The shared overflow words (unverified for LiteRT-LM until an overlong prompt is captured live).
+    ['INVALID_ARGUMENT: input exceeds the context window', true],
+    ['CANCELLED: Task cancelled', false],
+    ['INTERNAL: GPU device lost', false],
+    ['INTERNAL: failed to set up the context size', false],
+  ])('%s → %s', (error, expected) => {
+    expect(isPromptOverflowError(error)).toBe(expected)
+  })
+})
+
+describe('ReplyBuilder.empty', () => {
+  it('is true until a chunk brings text, thought or a tool call', () => {
+    const reply = new ReplyBuilder([])
+    expect(reply.empty).toBe(true)
+    reply.add(JSON.stringify({ role: 'assistant', content: [] }))
+    expect(reply.empty).toBe(true)
+    reply.add(JSON.stringify({ role: 'assistant', channels: { thought: 'hmm' } }))
+    expect(reply.empty).toBe(false)
+    const called = new ReplyBuilder([])
+    called.add(JSON.stringify({ tool_calls: [{ function: { name: 'f', arguments: {} } }] }))
+    expect(called.empty).toBe(false)
   })
 })
