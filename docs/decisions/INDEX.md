@@ -291,3 +291,5 @@ add a new one that says which record it supersedes.
 - [Select Strata releases compatible with the running core](2026-11-19-skip-incompatible-strata-releases.md)
 - [Start Windows DeepSeek from existing Strata packs](2026-11-19-start-windows-deepseek-from-existing-strata-packs.md)
 - [Retry Strata session health checks before unloading](2026-11-19-retry-strata-session-health-checks.md)
+- [2026-11-23 — Compact overflowing chat history on every engine](2026-11-23-compact-overflowing-chat-history-on-every-engine.md)
+- [2026-11-23 — Map every engine's context overflow to one error](2026-11-23-map-every-engines-context-overflow-to-one-error.md)
