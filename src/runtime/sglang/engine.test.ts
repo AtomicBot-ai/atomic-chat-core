@@ -76,6 +76,7 @@ describe('sglangRoutePolicy', () => {
       '/v1/chat/completions',
       '/v1/completions',
       '/v1/models',
+      '/tokenize',
     ])
     expect(policy.tools).toBe(false)
     expect(policy.contextLength).toBe(8192)

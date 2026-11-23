@@ -1260,6 +1260,12 @@ export async function createAtomicCore(
           (core as AtomicCore).increaseCtx(provider as LocalProviderId, modelId, reason),
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
+        context: {
+          measure: (provider, modelId, request) =>
+            (core as AtomicCore).measureContext(provider as LocalProviderId, modelId, request),
+          compact: (provider, modelId, request) =>
+            (core as AtomicCore).compactHistory(provider as LocalProviderId, modelId, request),
+        },
         hardware,
         fastFlowLmAccelerators: async () => (await flmPreparation()).facts,
         fastFlowLmMaintenance,
@@ -1592,6 +1598,8 @@ export async function createAtomicCore(
       embedding,
       errors: reporter,
       telemetry: reporter,
+      contextPlan: (provider, modelId) =>
+        capabilities.capabilities(provider, modelId).then((found) => found.contextPlan),
       remoteAccess: await wireRemoteAccess({
         overrides: options.remoteAccess,
         cloudflaredPath: options.cloudflaredPath,

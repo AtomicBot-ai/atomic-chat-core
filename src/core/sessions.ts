@@ -39,6 +39,11 @@ export interface LocalSessionsDeps {
    * did not start, so this is the provider's own static one (`tensorrt-llm`), or none.
    */
   externalPolicy?: (provider: LocalProvider) => SessionRoutePolicy | undefined
+  /**
+   * The window a session this core runs was started with, when its runtime chose it and its engine
+   * cannot report it (MLX's `--max-kv-size`); `undefined` for every other session.
+   */
+  knownWindow?: (provider: LocalProvider, modelId: string) => number | undefined
 }
 
 /** Model claims and per-model transitions for the sessions this core loads. */
@@ -155,7 +160,13 @@ export class LocalSessions {
   localTarget(provider: LocalProvider, modelId: string): LocalTarget | undefined {
     const runtime = this.deps.runtimes.get(provider)
     const owned = runtime?.list().find((s) => modelIdsMatch(s.model_id, modelId))
-    if (owned) return toLocalTarget(provider, owned, runtime?.routePolicy?.(owned.model_id))
+    if (owned)
+      return toLocalTarget(
+        provider,
+        owned,
+        runtime?.routePolicy?.(owned.model_id),
+        this.deps.knownWindow?.(provider, owned.model_id)
+      )
     const external = this.deps.externalSessions.find(provider, (id) => modelIdsMatch(id, modelId))
     return external ? toLocalTarget(provider, external, this.deps.externalPolicy?.(provider)) : undefined
   }
@@ -165,7 +176,14 @@ export class LocalSessions {
     return LOCAL_SEARCH_ORDER.flatMap((provider) => {
       const runtime = this.deps.runtimes.get(provider)
       return [
-        ...(runtime?.list() ?? []).map((s) => toLocalTarget(provider, s, runtime?.routePolicy?.(s.model_id))),
+        ...(runtime?.list() ?? []).map((s) =>
+          toLocalTarget(
+            provider,
+            s,
+            runtime?.routePolicy?.(s.model_id),
+            this.deps.knownWindow?.(provider, s.model_id)
+          )
+        ),
         ...this.deps.externalSessions
           .list()
           .filter((s) => s.provider === provider)
@@ -224,7 +242,8 @@ export class LocalSessions {
 function toLocalTarget(
   provider: LocalProvider,
   session: Pick<SessionInfo, 'model_id' | 'port' | 'api_key' | 'is_embedding' | 'generation'>,
-  policy?: SessionRoutePolicy
+  policy?: SessionRoutePolicy,
+  contextLength?: number
 ): LocalTarget {
   return {
     provider,
@@ -234,6 +253,7 @@ function toLocalTarget(
     isEmbedding: session.is_embedding,
     ...(policy === undefined ? {} : { policy }),
     ...(session.generation === undefined ? {} : { generation: session.generation }),
+    ...(contextLength !== undefined && contextLength > 0 ? { contextLength } : {}),
   }
 }
 

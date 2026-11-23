@@ -13,6 +13,11 @@
 import { AtomicCoreError, CONTROL_PROTOCOL_VERSION } from '../contracts/index.js'
 import type { ReadyLine } from '../contracts/index.js'
 import type {
+  CompactRequest,
+  CompactResult,
+  ContextMeasureRequest,
+  ContextMeasureResult,
+  ContextPlan,
   LlamacppProviderId,
   LocalApiServerState,
   LocalProviderId,
@@ -36,6 +41,7 @@ import type { FastFlowLmRegistry, ModelRegistry } from '../models/index.js'
 import { RemoteAccessManager } from '../remote-access/index.js'
 import type { RemoteAccessManagerDeps } from '../remote-access/index.js'
 import { LlamacppRuntime } from '../runtime/llamacpp/index.js'
+import { MlxRuntime } from '../runtime/mlx/index.js'
 import { managedExternalRoutePolicy } from './managed-engines.js'
 import type { ManagedModelRegistry } from '../runtime/managed-models/index.js'
 import type { CtxIncreaseResult, ExternalSessions, LocalRuntime, RecreateResult } from '../runtime/index.js'
@@ -44,8 +50,16 @@ import { captureReport, failureObserver, loadFailureReport } from '../telemetry/
 import type { ErrorSink, TelemetryControl } from '../telemetry/index.js'
 import type { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
 import type { ChatGptBackend, CloudRegistry } from '../cloud/index.js'
-import { DynamicTrustedHosts, SessionWindows } from '../server/index.js'
+import { DynamicTrustedHosts, SessionWindows, sessionWindow } from '../server/index.js'
 import type { ClientRegistry, ControlServer, SessionSummary } from '../server/index.js'
+import {
+  HistoryCompactor,
+  SessionPlans,
+  compactFailureError,
+  contextMeasureResult,
+} from '../server/compaction/index.js'
+import type { CompactionTarget } from '../server/compaction/index.js'
+import type { LocalProvider } from '../router/index.js'
 import { CORE_VERSION } from '../version.js'
 import { createAtomicCore } from './create.js'
 import { PublicServerLifecycle } from './public-server.js'
@@ -103,6 +117,11 @@ export interface AtomicCoreParts {
   errors?: ErrorSink | undefined
   /** The same reporter, for a host that changes consent, user or tags at run time. */
   telemetry?: TelemetryControl | undefined
+  /**
+   * The window plan of a model (`ModelCapabilities.contextPlan`), for the engines that grow by reload:
+   * what a measure reports as the device maximum, and what decides grow-or-compact on `:1337`.
+   */
+  contextPlan?: (provider: LocalProviderId, modelId: string) => Promise<ContextPlan | undefined>
 }
 
 export class AtomicCore {
@@ -160,6 +179,13 @@ export class AtomicCore {
   private readonly trustedHosts = new DynamicTrustedHosts()
   /** The window each loaded session serves, for `/v1/models` and the request log. */
   private readonly sessionWindows = new SessionWindows()
+  /**
+   * History compaction's summary cache and prompt calibration, shared by the control API's
+   * `compact` and the public server, so one chat is summarized once whichever way it comes.
+   */
+  private readonly compactor = new HistoryCompactor()
+  /** Each loaded session's device maximum (`ContextPlan.maxCtx`), for the engines that grow by reload. */
+  private readonly plans: SessionPlans
   /** The Cloudflare quick tunnel in front of the public listener. */
   private readonly remoteAccess: RemoteAccessManager
   /** Image generation on stable-diffusion.cpp: the resident `sd-server`, its jobs and the gallery. */
@@ -203,6 +229,7 @@ export class AtomicCore {
     this.embedding = parts.embedding
     this.errors = parts.errors
     this.telemetry = parts.telemetry
+    this.plans = new SessionPlans(parts.contextPlan)
     this.localSessions = new LocalSessions({
       layout: parts.layout,
       instanceId: parts.lock.instanceId,
@@ -214,6 +241,11 @@ export class AtomicCore {
       recreateSession: (provider, modelId) => this.recreateSession(provider, modelId),
       // A `tensorrt-llm` session another process registered still only serves the declared routes.
       externalPolicy: managedExternalRoutePolicy,
+      // MLX cannot report its window: the runtime knows the `--max-kv-size` it started with.
+      knownWindow: (provider, modelId) => {
+        const runtime = this.runtimes.get(provider)
+        return runtime instanceof MlxRuntime ? runtime.getCtxSize(modelId) : undefined
+      },
     })
     this.remoteAccess = new RemoteAccessManager({
       onFailure: failureObserver(parts.errors),
@@ -250,6 +282,7 @@ export class AtomicCore {
         decision: this.decision.publicBackend(),
         embedding: this.embedding.publicBackend(),
         errors: parts.errors,
+        compaction: { compactor: this.compactor, maxWindow: (target) => this.plans.maxWindow(target) },
       }),
     })
   }
@@ -349,6 +382,89 @@ export class AtomicCore {
     this.assertRunning()
     await assertNotLoadedByLegacy(this.layout, modelId)
     return this.reportingLoad(provider, modelId, {}, () => this.runtime(provider).recreateSession(modelId))
+  }
+
+  /**
+   * What a chat request takes in a loaded session, against the window the session serves
+   * (`POST /models/:provider/*modelId/context/measure`): counted by the engine where it can, else
+   * estimated and calibrated by what the session reported before.
+   */
+  async measureContext(
+    provider: LocalProviderId,
+    modelId: string,
+    request: ContextMeasureRequest
+  ): Promise<ContextMeasureResult> {
+    this.assertRunning()
+    const { target, window } = await this.contextSession(provider, modelId)
+    const count = await this.compactor.count(target, request)
+    return contextMeasureResult(provider, count, window, await this.plans.maxWindow(target))
+  }
+
+  /**
+   * Summarize the oldest turns of a chat that no longer fits its session's window, by the model
+   * loaded there (`POST /models/:provider/*modelId/compact`); apply the answer with `applyCompaction`.
+   * Emits `session:history-compacted` with `source: 'control'`.
+   */
+  async compactHistory(
+    provider: LocalProviderId,
+    modelId: string,
+    request: CompactRequest
+  ): Promise<CompactResult> {
+    this.assertRunning()
+    const { target, window } = await this.contextSession(provider, modelId)
+    if (window === undefined) {
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `${provider} does not report the context window of ${modelId}, so its history cannot be compacted.`,
+        `${provider}/${modelId}`
+      )
+    }
+    const outcome = await this.compactor.compact(target, request, window)
+    if (!outcome.ok) throw compactFailureError(outcome, provider, modelId)
+    const { result } = outcome
+    this.events.emit('session:history-compacted', {
+      provider,
+      modelId: target.modelId,
+      summarizedMessages: result.summarizedCount,
+      tokensBefore: result.tokensBefore,
+      tokensAfter: result.tokensAfter,
+      cached: result.cached,
+      source: 'control',
+    })
+    return result
+  }
+
+  /**
+   * The loaded chat session a context request is about, and the window it serves. Apple Foundation
+   * Models is not routed by the public server; its runtime's own session answers, with no window (its
+   * server declares none). `MODEL_NOT_LOADED` when nothing serves the model.
+   */
+  private async contextSession(
+    provider: LocalProviderId,
+    modelId: string
+  ): Promise<{ target: CompactionTarget; window: number | undefined }> {
+    if (provider === 'foundation-models') {
+      const session = this.runtime(provider).findSession(modelId)
+      if (!session) throw notLoaded(provider, modelId)
+      return {
+        target: { provider, modelId: session.model_id, port: session.port, apiKey: session.api_key },
+        window: undefined,
+      }
+    }
+    const target = this.localSessions.localTarget(provider as LocalProvider, modelId)
+    if (!target) {
+      if (!this.runtimes.has(provider)) throw unknownProvider(provider, this.runtimes.keys())
+      throw notLoaded(provider, modelId)
+    }
+    if (target.isEmbedding) {
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        `${modelId} is an embedding session, not a chat.`,
+        provider
+      )
+    }
+    const window = await sessionWindow({ contextWindow: (t) => this.sessionWindows.of(t) }, target)
+    return { target, window }
   }
 
   /**
@@ -483,4 +599,12 @@ export class AtomicCore {
       throw new AtomicCoreError('CORE_NOT_RUNNING', 'The Atomic Chat core is stopping or has stopped.')
     }
   }
+}
+
+function notLoaded(provider: string, modelId: string): AtomicCoreError {
+  return new AtomicCoreError(
+    'MODEL_NOT_LOADED',
+    `${modelId} is not loaded on ${provider}.`,
+    `${provider}/${modelId}`
+  )
 }

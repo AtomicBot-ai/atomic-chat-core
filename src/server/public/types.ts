@@ -30,6 +30,7 @@ import type {
 import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
 import type { ErrorSink } from '../../telemetry/index.js'
+import type { HistoryCompactor } from '../compaction/index.js'
 
 /**
  * What a session whose engine declares its routes requires of this server (the runtime's
@@ -59,6 +60,24 @@ export interface LocalTarget {
   policy?: LocalTargetPolicy
   /** Changes each time the model is loaded again (`SessionInfo.generation`), when the session has one. */
   generation?: string
+  /**
+   * The window the runtime started the session with, for an engine that has no way to say it itself
+   * (MLX's `--max-kv-size`). Absent where the engine says it (llama.cpp's `/props`), or nobody knows.
+   */
+  contextLength?: number
+}
+
+/**
+ * History compaction on the public `/chat/completions` (`server/compaction`): a request to a local
+ * session that does not fit its window has its oldest turns summarized by the same model.
+ */
+export interface PublicCompaction {
+  /** Shared with the control API's `compact`, so both read one summary cache and one calibration. */
+  compactor: HistoryCompactor
+  /** Read for every request: `false` turns compaction off without restarting the listener. */
+  enabled?: () => boolean
+  /** The largest window this device holds for the session's model (`ContextPlan.maxCtx`), when known. */
+  maxWindow?: (target: LocalTarget) => Promise<number | undefined>
 }
 
 /** What asking the owning runtime for a larger context produced. */
@@ -253,6 +272,11 @@ export interface PublicServerDeps {
   embedding?: EmbeddingBackend
   /** Where a request that failed on our side, or a failing local engine, is reported. */
   errors?: ErrorSink | undefined
+  /**
+   * History compaction for `/chat/completions` to a local session. Absent: on, with a compactor of
+   * this server's own; `false`: off for every request. A request opts out with `x-atomic-compaction: off`.
+   */
+  compaction?: PublicCompaction | false
 }
 
 export interface PublicServerConfig {

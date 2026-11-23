@@ -41,6 +41,10 @@ import type {
   ServedModelSelection,
 } from '../../contracts/index.js'
 import type {
+  CompactRequest,
+  CompactResult,
+  ContextMeasureRequest,
+  ContextMeasureResult,
   BeginOperation,
   DecisionDecideRequest,
   DecisionOutcome,
@@ -270,6 +274,21 @@ export interface ModelControl {
    * in a build that has no such provider at all.
    */
   logs?: (provider: string, modelId: string) => Promise<object>
+}
+
+/**
+ * A loaded chat session's context: what a request takes in it, and compacting a history that no
+ * longer fits (`server/compaction`). Both throw `MODEL_NOT_LOADED` when nothing serves the model.
+ */
+export interface ContextControl {
+  /** `POST /models/:provider/*modelId/context/measure`. */
+  measure: (
+    provider: string,
+    modelId: string,
+    request: ContextMeasureRequest
+  ) => Promise<ContextMeasureResult>
+  /** `POST /models/:provider/*modelId/compact`; emits `session:history-compacted` (`source: 'control'`). */
+  compact: (provider: string, modelId: string, request: CompactRequest) => Promise<CompactResult>
 }
 
 /**
@@ -520,6 +539,8 @@ export interface ControlServerDeps {
    * proxy saw the failure.
    */
   recreateSession: (provider: string, modelId: string) => Promise<{ ok: boolean; reason?: string }>
+  /** Measuring and compacting a loaded chat's context; absent, its routes answer `PROVIDER_NOT_FOUND`. */
+  context?: ContextControl
   publicServer: PublicServerControl
   /** The settings store, for the routes that read and migrate provider settings (PLAN.md §3.4). */
   settings: SettingsControl

@@ -46,6 +46,7 @@ export type {
   EmbeddingTarget,
   ImagesBackend,
   LocalTarget,
+  PublicCompaction,
   PublicServerConfig,
   PublicServerDeps,
   VideosBackend,
@@ -53,7 +54,8 @@ export type {
 export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
 export type { HostAndKeyConfig } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
-export { SessionWindows } from './context-window.js'
+export { SessionWindows, sessionWindow } from './context-window.js'
+export { isLlamaCppServer } from './thinking.js'
 export {
   forwardableHeaders,
   pipeBody,

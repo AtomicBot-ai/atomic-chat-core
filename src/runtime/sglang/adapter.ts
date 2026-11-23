@@ -19,7 +19,7 @@
  *   own and its JIT kernels', Triton's, inductor's, FlashInfer's, CUDA's, TileLang's — under the engine
  *   cache, so a second start of the same model reuses the first one's work.
  * - **readiness** `GET /health`, then the shared generation probe; **routes** chat completions,
- *   completions and the model list; requests capped at the output setting, given the sampling defaults
+ *   completions, the model list and the chat `/tokenize` the core counts prompts with; requests capped at the output setting, given the sampling defaults
  *   they do not set, refused for tools without a parser, structured output the family does not declare,
  *   and images; SGLang's context overflow answered as OpenAI's `context_length_exceeded` with both
  *   numbers.
@@ -301,11 +301,18 @@ export function sglangCapabilities(context: {
   }
 }
 
-/** Everything else SGLang serves — `/server_info`, `/flush_cache`, `/metrics`, embeddings… — is the gateway's 404. */
+/**
+ * Everything else SGLang serves — `/server_info`, `/flush_cache`, `/metrics`, embeddings… — is the
+ * gateway's 404. `POST /tokenize` (v0.5.21 `http_server.py`, the unlisted alias of `/v1/tokenize`;
+ * `TokenizeRequest` in `entrypoints/openai/protocol.py`) takes the chat `messages` and `tools` and
+ * answers `{tokens, count, max_model_len}`: declared for the core's own prompt counting (history
+ * compaction, `server/compaction`); the public server never forwards it (`policy.ts`).
+ */
 export const SGLANG_ROUTES: readonly ManagedRoute[] = [
   { method: 'POST', path: '/v1/chat/completions' },
   { method: 'POST', path: '/v1/completions' },
   { method: 'GET', path: '/v1/models' },
+  { method: 'POST', path: '/tokenize' },
 ]
 
 export const SGLANG_REWRITABLE_ROUTES: readonly ManagedRoute[] = [

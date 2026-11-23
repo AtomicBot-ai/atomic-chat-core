@@ -19,7 +19,8 @@
  * - **env**: usage stats off (`VLLM_NO_USAGE_STATS`, `DO_NOT_TRACK`), Hugging Face offline (every file
  *   is already in the store), and every compile cache — vLLM's own, Triton's, inductor's, FlashInfer's
  *   — under the engine cache, so a second start of the same model reuses the first one's work.
- * - **readiness** `GET /health`; **routes** chat completions, completions and the model list;
+ * - **readiness** `GET /health`; **routes** chat completions, completions, the model list and the
+ *   chat `/tokenize` the core counts prompts with;
  *   requests capped at the output setting, refused for tools without a parser, structured output the
  *   family does not declare, and images (a cap the client did not ask for comes from the launch's
  *   default, so a long prompt is not refused for the room a written cap would take); vLLM's context overflow answered as OpenAI's
@@ -295,10 +296,17 @@ export function vllmCapabilities(context: {
   }
 }
 
+/**
+ * `POST /tokenize` is vLLM's own (`vllm/entrypoints/serve/tokenize`): a chat body (`messages`,
+ * `tools`, `add_generation_prompt`, default `true`) is rendered by the model's template and counted,
+ * `{count, max_model_len, tokens}`. Declared for the core's own prompt counting (history compaction,
+ * `server/compaction`); the public server never forwards it, its routes are its own (`policy.ts`).
+ */
 export const VLLM_ROUTES: readonly ManagedRoute[] = [
   { method: 'POST', path: '/v1/chat/completions' },
   { method: 'POST', path: '/v1/completions' },
   { method: 'GET', path: '/v1/models' },
+  { method: 'POST', path: '/tokenize' },
 ]
 
 export const VLLM_REWRITABLE_ROUTES: readonly ManagedRoute[] = [

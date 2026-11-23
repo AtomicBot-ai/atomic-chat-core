@@ -3,11 +3,13 @@
  * `meta.n_ctx`) so an agent can compact before it overflows, and what the request log keeps with each
  * request.
  *
- * A session that declares its limits (`LocalTarget.policy`) says so itself. llama.cpp says it in
- * `/props` (`default_generation_settings.n_ctx`, the window of one slot): under fit the core never
- * chose it, so nothing else knows it. `/props` is answered from the server's metadata without a slot,
- * so it is cheap even while a prompt is being processed, and it is read once per loaded session.
- * Any other engine has no window the server can learn: none is advertised rather than a guess.
+ * A session that declares its limits (`LocalTarget.policy`) says so itself. A runtime that chose the
+ * window and whose engine cannot report it hands it over with the session (`LocalTarget.contextLength`:
+ * MLX's `--max-kv-size`). llama.cpp says it in `/props` (`default_generation_settings.n_ctx`, the
+ * window of one slot): under fit the core never chose it, so nothing else knows it. `/props` is
+ * answered from the server's metadata without a slot, so it is cheap even while a prompt is being
+ * processed, and it is read once per loaded session. Any other engine (Apple Foundation Models among
+ * them) has no window the server can learn: none is advertised rather than a guess.
  */
 
 import type { LocalTarget, PublicServerDeps } from './types.js'
@@ -71,8 +73,16 @@ export class SessionWindows {
   }
 }
 
-/** The window a request to `target` runs with: the one it declares, else what the host can learn. */
-export function sessionWindow(deps: PublicServerDeps, target: LocalTarget): Promise<number | undefined> {
+/**
+ * The window a request to `target` runs with: the one it declares, else the one its runtime started
+ * it with, else what the host can learn.
+ */
+export function sessionWindow(
+  deps: PublicServerDeps | Pick<PublicServerDeps, 'contextWindow'>,
+  target: LocalTarget
+): Promise<number | undefined> {
   if (target.policy?.contextLength !== undefined) return Promise.resolve(target.policy.contextLength)
+  if (target.contextLength !== undefined && target.contextLength > 0)
+    return Promise.resolve(target.contextLength)
   return deps.contextWindow?.(target) ?? Promise.resolve(undefined)
 }

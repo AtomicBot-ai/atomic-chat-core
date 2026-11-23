@@ -1649,6 +1649,66 @@
     "functions": 100,
     "lines": 100
   },
+  "src/server/compaction/cache.ts": {
+    "statements": 100,
+    "branches": 93,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/calibration.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/compact.ts": {
+    "statements": 100,
+    "branches": 87,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/count.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/engine.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/estimate.ts": {
+    "statements": 100,
+    "branches": 94,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/measure.ts": {
+    "statements": 100,
+    "branches": 100,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/plan.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/request.ts": {
+    "statements": 100,
+    "branches": 91,
+    "functions": 100,
+    "lines": 100
+  },
+  "src/server/compaction/summarize.ts": {
+    "statements": 100,
+    "branches": 90,
+    "functions": 100,
+    "lines": 100
+  },
   "src/server/control/router.ts": {
     "statements": 100,
     "branches": 100,

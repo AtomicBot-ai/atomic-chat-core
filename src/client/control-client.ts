@@ -119,6 +119,10 @@ import type {
   MediaCatalogView,
   MediaKind,
   MediaProviderModels,
+  CompactRequest,
+  CompactResult,
+  ContextMeasureRequest,
+  ContextMeasureResult,
 } from '../contracts/index.js'
 
 export interface CoreClientOptions {
@@ -849,6 +853,33 @@ export class CoreClient {
 
   unloadModel(provider: string, modelId: string): Promise<UnloadResult> {
     return this.call(`/models/${provider}/${modelId}/unload`, { method: 'POST' })
+  }
+
+  /**
+   * What a chat request takes in a loaded session, against the window the session serves and the
+   * device maximum; decide what to do with `decideOverflowAction`. `MODEL_NOT_LOADED` without a session.
+   */
+  measureContext(
+    provider: string,
+    modelId: string,
+    request: ContextMeasureRequest
+  ): Promise<ContextMeasureResult> {
+    return this.call(`/models/${provider}/${modelId}/context/measure`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  }
+
+  /**
+   * Summarize the oldest turns of a chat by the model loaded for it; apply the answer to the same
+   * `messages` with `applyCompaction`. `INVALID_ARGUMENT` when there is no earlier turn to summarize
+   * or the session reports no window, `UPSTREAM_ERROR` when the model could not write the summary.
+   */
+  compactHistory(provider: string, modelId: string, request: CompactRequest): Promise<CompactResult> {
+    return this.call(`/models/${provider}/${modelId}/compact`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
   }
 
   cloudProviders(): Promise<{ providers: CloudProviderView[] }> {
