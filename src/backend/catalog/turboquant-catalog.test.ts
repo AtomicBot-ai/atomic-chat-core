@@ -15,7 +15,7 @@ import {
 
 const LATEST = 'b10269-1.4.0'
 const PREVIOUS = 'b10018-1.3.0'
-const TAG_PAGE = `https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/tag/${LATEST}`
+const TAG_PAGE = `https://github.com/AtomicBot-ai/atomic-engine/releases/tag/${LATEST}`
 const variants = (ids: string[]) =>
   ids.map((id) => ({ id, asset: `llama-turboquant-${id}.${id.startsWith('windows-') ? 'zip' : 'tar.gz'}` }))
 const RELEASE_INDEX = {
@@ -149,7 +149,7 @@ describe('TurboquantCatalogService', () => {
       [TURBOQUANT_RELEASE_INDEX_URL]: () => json({}, 404),
       [TURBOQUANT_LATEST_RELEASE_URL]: (init) => {
         expect(init?.redirect).toBe('manual')
-        return redirect(`/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/tag/${LATEST}`)
+        return redirect(`/AtomicBot-ai/atomic-engine/releases/tag/${LATEST}`)
       },
     })
     const catalog = await svc.catalog({ supportedIds: ['linux-x64-vulkan', 'linux-x64-rocm'] })
@@ -162,6 +162,34 @@ describe('TurboquantCatalogService', () => {
     expect(await readTurboquantIndexedAsset(data.layout, LATEST, 'linux-x64-rocm')).toBe(
       'llama-turboquant-linux-x64-rocm.tar.gz'
     )
+  })
+
+  it('follows a renamed repository: 301 to the new /releases/latest, then 302 to the tag', async () => {
+    const renamedLatest = 'https://github.com/AtomicBot-ai/renamed-engine/releases/latest'
+    const { svc } = service({
+      [TURBOQUANT_RELEASE_INDEX_URL]: () => json({}, 404),
+      [TURBOQUANT_LATEST_RELEASE_URL]: () =>
+        new Response(null, { status: 301, headers: { location: renamedLatest } }),
+      [renamedLatest]: (init) => {
+        expect(init?.redirect).toBe('manual')
+        return redirect(`/AtomicBot-ai/renamed-engine/releases/tag/${LATEST}`)
+      },
+    })
+    const catalog = await svc.catalog({ supportedIds: LINUX_IDS })
+    expect(catalog.source).toBe('redirect')
+    expect(catalog.latest).toBe(LATEST)
+    expect(calls).toEqual([TURBOQUANT_RELEASE_INDEX_URL, TURBOQUANT_LATEST_RELEASE_URL, renamedLatest])
+  })
+
+  it('stops following a redirect loop and moves to the legacy manifest', async () => {
+    const { svc, log } = service({
+      [TURBOQUANT_RELEASE_INDEX_URL]: () => json({}, 404),
+      [TURBOQUANT_LATEST_RELEASE_URL]: () => redirect(TURBOQUANT_LATEST_RELEASE_URL),
+      [TURBOQUANT_LEGACY_MANIFEST_URL]: () => json(LEGACY_MANIFEST),
+    })
+    expect((await svc.catalog({ supportedIds: LINUX_IDS })).source).toBe('legacy-manifest')
+    expect(calls.filter((url) => url === TURBOQUANT_LATEST_RELEASE_URL)).toHaveLength(5)
+    expect(log.mock.calls.map(([, m]) => m).join('\n')).toMatch(/could not read a release tag/)
   })
 
   it('accepts a fetch that followed the redirect itself and exposes response.url', async () => {
@@ -189,8 +217,7 @@ describe('TurboquantCatalogService', () => {
   it('refuses a redirect that lands on a prerelease and moves to the legacy manifest', async () => {
     const { svc, log } = service({
       [TURBOQUANT_RELEASE_INDEX_URL]: () => json({}, 404),
-      [TURBOQUANT_LATEST_RELEASE_URL]: () =>
-        redirect('/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/tag/dev-latest'),
+      [TURBOQUANT_LATEST_RELEASE_URL]: () => redirect('/AtomicBot-ai/atomic-engine/releases/tag/dev-latest'),
       [TURBOQUANT_LEGACY_MANIFEST_URL]: () => json(LEGACY_MANIFEST),
     })
     expect((await svc.catalog({ supportedIds: LINUX_IDS })).source).toBe('legacy-manifest')

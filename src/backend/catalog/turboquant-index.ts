@@ -4,9 +4,9 @@
  * `normalizeVariants`, `parseReleaseIndex`, `sortReleasesNewestFirst`, `fetchFromReleaseIndex`,
  * `fetchFromLatestRedirect`, `fetchFromLegacyManifest`, `fetchRemoteBackends`, `readDiskCache`).
  *
- * The fork points at AtomicBot-ai/atomic-llama-cpp-turboquant. Which releases exist and which
- * variants each carries is resolved at runtime from `index.json`, published as an asset of every
- * release; `/releases/latest` is GitHub's own pointer at the newest non-prerelease, so no tag is ever
+ * The fork lives at AtomicBot-ai/atomic-engine (formerly atomic-llama-cpp-turboquant). Which
+ * releases exist and which variants each carries is resolved at runtime from `index.json`, published
+ * as an asset of every release; `/releases/latest` is GitHub's own pointer at the newest non-prerelease, so no tag is ever
  * hardcoded and a new fork release reaches users without a new app build. Only stable releases of
  * the unified `b<upstream-build>-<fork-semver>` scheme are installable: `dev-latest` and the legacy
  * per-variant `turboquant-<id>-<sha>` releases are prereleases.
@@ -19,9 +19,12 @@ import type { BackendVersion } from '../types.js'
 import { isStableReleaseTag, turboquantDefaultAssetName } from '../turboquant.js'
 import { stripBom } from '../version.js'
 
-/** Redirects to `/releases/tag/<newest stable tag>`; used when index.json is absent. */
-export const TURBOQUANT_LATEST_RELEASE_URL =
-  'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/latest'
+/**
+ * Redirects to `/releases/tag/<newest stable tag>`; used when index.json is absent. A literal, not
+ * built from `TURBOQUANT_REPO_URL`: `turboquant.ts` and this module import each other, and a
+ * top-level read across that cycle can run before the other side is initialised.
+ */
+export const TURBOQUANT_LATEST_RELEASE_URL = 'https://github.com/AtomicBot-ai/atomic-engine/releases/latest'
 /**
  * Legacy index channel (app ADR 2026-06-17). Read from `main` — not a pinned commit — so the
  * atomic-chat-conf repo can retarget the fork's tag without an app release.

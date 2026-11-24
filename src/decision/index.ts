@@ -3,7 +3,7 @@
  * calibrated probabilities in one forward pass, for the model router and TypeSafe-style questions.
  * A module of its own, outside the sessions registry, like image generation
  * (ADR 2026-09-30-the-decision-model-is-its-own-core-module). Wire types in `src/contracts/decision.ts`;
- * the engine contract is `DECISION.md` in atomic-llama-cpp-turboquant.
+ * the engine contract is `DECISION.md` in atomic-engine.
  */
 export * from './args.js'
 export * from './backoff.js'

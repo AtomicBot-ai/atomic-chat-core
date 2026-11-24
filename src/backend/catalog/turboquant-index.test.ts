@@ -68,7 +68,7 @@ const LEGACY_MANIFEST = {
 describe('constants', () => {
   it('keeps the URLs, schema and TTL the extension used', () => {
     expect(TURBOQUANT_LATEST_RELEASE_URL).toBe(
-      'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/latest'
+      'https://github.com/AtomicBot-ai/atomic-engine/releases/latest'
     )
     expect(TURBOQUANT_LEGACY_MANIFEST_URL).toBe(
       'https://raw.githubusercontent.com/AtomicBot-ai/atomic-chat-conf/main/backends/turboquant-manifest.json'
@@ -235,7 +235,7 @@ describe('parseTurboquantReleaseIndex', () => {
 })
 
 describe('catalogFromLatestRedirect', () => {
-  const base = 'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/tag/'
+  const base = 'https://github.com/AtomicBot-ai/atomic-engine/releases/tag/'
   it('synthesises one release for the supported ids from the asset naming', () => {
     expect(
       catalogFromLatestRedirect(`${base}${LATEST}`, ['linux-x64-vulkan', 'linux-x64-rocm'], 'linux')
