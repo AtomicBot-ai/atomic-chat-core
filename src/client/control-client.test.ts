@@ -4,7 +4,7 @@
  * file imports the server (and through it `node:http`), which never ships to a browser.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { AtomicCoreError } from '../contracts/index.js'
+import { AtomicCoreError, applyCompaction, summaryBlock } from '../contracts/index.js'
 import type {
   BackendCatalogRequest,
   BackendRecommendationRequest,
@@ -113,6 +113,27 @@ beforeEach(async () => {
     recreateSession: async (_provider: string, modelId: string) =>
       modelId === 'gone' ? { ok: false, reason: 'not-loaded' } : { ok: true },
     increaseCtx: async () => ({ ok: false, reason: 'not-loaded' as const }),
+    context: {
+      measure: async (provider, modelId, request) => ({
+        promptTokens: request.messages.length * 10,
+        exact: provider === 'llamacpp-upstream',
+        windowTokens: modelId === 'Owner/Repo-GGUF' ? 8192 : 4096,
+        resize: 'reload',
+        supportsPromptProgress: true,
+      }),
+      compact: async (_provider, modelId, request) => {
+        if (modelId === 'gone')
+          throw new AtomicCoreError('MODEL_NOT_LOADED', 'gone is not loaded on llamacpp-upstream.')
+        return {
+          summary: 'earlier turns',
+          keepFrom: request.messages.length - 1,
+          summarizedCount: request.messages.length - 1,
+          tokensBefore: 100,
+          tokensAfter: 30,
+          cached: false,
+        }
+      },
+    },
     externalSessions: {
       publish: (_owner: string, generation: number) => ({ generation, sessions: 0 }),
       heartbeat: () => ({ alive: true }),
@@ -645,6 +666,36 @@ describe('load cancellation', () => {
   it('reports whether a load was pending, for a model id with slashes', async () => {
     expect(await client.cancelModelLoad('llamacpp-upstream', 'Owner/Loading-GGUF')).toBe(true)
     expect(await client.cancelModelLoad('llamacpp-upstream', 'Owner/Idle-GGUF')).toBe(false)
+  })
+})
+
+describe('context measure and compaction', () => {
+  const messages = [
+    { role: 'user', content: 'a' },
+    { role: 'assistant', content: 'b' },
+    { role: 'user', content: 'c' },
+  ]
+
+  it('measures a chat against its session and compacts it, for a model id with slashes', async () => {
+    expect(await client.measureContext('llamacpp-upstream', 'Owner/Repo-GGUF', { messages })).toEqual({
+      promptTokens: 30,
+      exact: true,
+      windowTokens: 8192,
+      resize: 'reload',
+      supportsPromptProgress: true,
+    })
+    const compacted = await client.compactHistory('llamacpp-upstream', 'Owner/Repo-GGUF', { messages })
+    expect(compacted).toMatchObject({ summary: 'earlier turns', keepFrom: 2, summarizedCount: 2 })
+    expect(applyCompaction(messages, compacted)).toEqual([
+      { role: 'system', content: summaryBlock('earlier turns') },
+      { role: 'user', content: 'c' },
+    ])
+  })
+
+  it('reports a model nothing serves with the core’s code', async () => {
+    await expect(client.compactHistory('llamacpp-upstream', 'gone', { messages })).rejects.toMatchObject({
+      code: 'MODEL_NOT_LOADED',
+    })
   })
 })
 

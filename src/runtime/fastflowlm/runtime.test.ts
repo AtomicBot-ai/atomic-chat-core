@@ -332,4 +332,9 @@ it('passes FastFlowLM launch settings and per-load overrides, reporting the effe
     ])
   )
   expect(runtime.routePolicy(id)?.contextLength).toBe(8192)
+  expect(
+    runtime
+      .routePolicy(id)
+      ?.mapError(400, '{"error":{"message":"Max length reached!","type":"model_error","code":400}}')
+  ).toMatchObject({ error: { code: 'context_length_exceeded' } })
 })

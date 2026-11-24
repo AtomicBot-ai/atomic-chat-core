@@ -14,4 +14,10 @@ export { StrataPreparationService } from './strata-preparation.js'
 export { StrataMaintenanceService } from './strata-maintenance.js'
 export { StrataPreparer } from './strata-preparer.js'
 export { runStrataPreparationStep } from './strata-prepare-process.js'
-export { estimateStrata, planStrataMemory, strataResourceRefusal } from './strata-check.js'
+export {
+  estimateStrata,
+  planStrataMemory,
+  strataPlannedContext,
+  strataResourceRefusal,
+} from './strata-check.js'
+export type { StrataGgufFacts } from './strata-check.js'

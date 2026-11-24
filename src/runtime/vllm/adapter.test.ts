@@ -233,11 +233,12 @@ describe('the gateway routes and request rewrites', () => {
   const rewrite = (route: string, body: unknown, capabilities = caps()) =>
     vllmAdapter.rewriteRequestBody?.(route, body, settings, capabilities)
 
-  it('declares only chat, completions and the model list; the two POST routes are rewritable', () => {
+  it('declares only chat, completions, the model list and the chat tokenizer; the two POST routes are rewritable', () => {
     expect(vllmAdapter.routes).toEqual([
       { method: 'POST', path: '/v1/chat/completions' },
       { method: 'POST', path: '/v1/completions' },
       { method: 'GET', path: '/v1/models' },
+      { method: 'POST', path: '/tokenize' },
     ])
     expect(vllmAdapter.rewritableRoutes).toEqual([
       { method: 'POST', path: '/v1/chat/completions' },

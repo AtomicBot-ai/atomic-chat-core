@@ -569,15 +569,17 @@ describe('a context overflow on /v1/messages (audit X1)', () => {
 })
 
 describe('error reports', () => {
+  // `answered`: the status the client gets. A context overflow, whatever status the engine gave it,
+  // is answered as Anthropic's 400 "prompt is too long" so Claude Code compacts.
   it.each([
-    [200, 'ok', []],
-    [400, 'invalid request', []],
-    [500, 'Compute error: out of memory', [['warning', 'oom']]],
-    [503, 'request (12 tokens) exceeds the available context size', []],
-    [503, 'failed to initialize context size', [['error', '503']]],
+    [200, 'ok', [], 200],
+    [400, 'invalid request', [], 400],
+    [500, 'Compute error: out of memory', [['warning', 'oom']], 500],
+    [503, 'request (12 tokens) exceeds the available context size', [], 400],
+    [503, 'failed to initialize context size', [['error', '503']], 503],
   ] as const)(
     'reports only the final local /messages fallback failure (%i)',
-    async (status, message, expected) => {
+    async (status, message, expected, answered) => {
       const captured: ErrorReport[] = []
       const { port } = await startUpstream((req, _body, res) => {
         if (req.url === '/v1/messages') {
@@ -603,7 +605,7 @@ describe('error reports', () => {
         max_tokens: 32,
         messages: [{ role: 'user', content: 'PRIVATE_PROMPT' }],
       })
-      expect(response.status).toBe(status)
+      expect(response.status).toBe(answered)
       expect(captured.map((report) => [report.level, report.tags?.['failure_kind']])).toEqual(expected)
       expect(JSON.stringify(captured)).not.toMatch(/PRIVATE_ENGINE_TEXT|PRIVATE_PROMPT/)
     }
@@ -778,7 +780,15 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
     })
     expect(messages.status).toBe(400)
     expect(messages.headers.get('content-type')).toContain('application/json')
-    expect(await messages.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    // An overflow with no numbers in it is still Anthropic's "prompt is too long", so Claude Code
+    // compacts on every engine, not only on llama.cpp.
+    expect(await messages.json()).toEqual({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        message: "prompt is too long: the request does not fit the model's context window",
+      },
+    })
   })
 
   it('sends /v1/messages straight to chat completions, never to the undeclared route, and maps an overflow there too', async () => {
@@ -814,7 +824,10 @@ describe('a session that declares its routes (tensorrt-llm)', () => {
       messages: [{ role: 'user', content: 'OVERFLOW' }],
     })
     expect(overflowed.status).toBe(400)
-    expect(await overflowed.json()).toMatchObject({ error: { code: 'context_length_exceeded' } })
+    expect(await overflowed.json()).toEqual({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'prompt is too long: 9000 tokens > 8192 maximum' },
+    })
     expect(seen).toEqual(['/v1/chat/completions', '/v1/chat/completions'])
   })
 

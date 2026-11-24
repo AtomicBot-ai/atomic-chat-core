@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ModelYmlDocument } from '../../models/index.js'
 import { generateApiKey } from '../shared/index.js'
-import { withLlamacppDefaults } from './args.js'
+import { planLlamaArgs, withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
 import {
   autoUnloadTargets,
@@ -327,9 +327,12 @@ describe('planLlamaLoad — a --device the build does not have', () => {
     )
     expect(unreadable.config.device).toBe('CUDA0')
     expect((await planLlamaLoad(input({ device: 'CUDA0' }), deps())).config.device).toBe('CUDA0')
+    // No device to check: the list is read once, for the context plan alone.
     const listDevices = vi.fn(async () => VULKAN)
-    await planLlamaLoad(input({ device: '' }), deps({ listDevices }))
-    expect(listDevices).not.toHaveBeenCalled()
+    const unpinned = await planLlamaLoad(input({ device: '' }), deps({ listDevices }))
+    expect(listDevices).toHaveBeenCalledTimes(1)
+    expect(unpinned.config.device).toBe('')
+    expect(unpinned.warnings.some((w) => w.startsWith('Ignoring device'))).toBe(false)
   })
 
   it('lists the devices of a plan once, for the device check and the unified-memory fit alike', async () => {
@@ -416,7 +419,9 @@ describe('planLlamaLoad — the limits core starts llama.cpp with', () => {
     expect((await on(8 * GiB)).config.ctx_size).toBe(16_384)
     // 12 GiB: 6144 − 1926 − 1024 MiB = 3194 MiB, 29202 tokens → 29184.
     expect((await on(12 * GiB)).config.ctx_size).toBe(29_184)
-    expect((await on(16 * GiB)).config.ctx_size).toBe(32_768)
+    // 16 GiB and up: no 32K ceiling, the plan takes what half of RAM holds — 8192 − 1926 − 1024 MiB
+    // leave 5242 MiB, 47928 tokens → 47872.
+    expect((await on(16 * GiB)).config.ctx_size).toBe(47_872)
   })
 
   it('narrows the host prompt cache on a machine with at most 16 GiB of RAM', async () => {
@@ -495,7 +500,7 @@ describe('planLlamaLoad — fit margin on unified memory', () => {
     expect(plan.config.fit_target).toBe(expected)
   })
 
-  it('never lists devices off Apple silicon or for an embedding model', async () => {
+  it('widens no margin off Apple silicon, and lists no devices for an embedding model', async () => {
     const listDevices = vi.fn(async () => METAL_18)
     const { unifiedMemory: _unused, ...offMac } = fitDeps({ listDevices })
     const plan = await planLlamaLoad(input({ fit: true, fit_target: '' }), offMac)
@@ -505,11 +510,16 @@ describe('planLlamaLoad — fit margin on unified memory', () => {
       fitDeps({ listDevices, unifiedMemory: async () => undefined })
     )
     expect(noFacts.config.fit_target).toBe('')
+    // Off Apple silicon the devices are read once per plan, for the context plan (a GPU's floor).
+    expect(listDevices).toHaveBeenCalledTimes(2)
+    expect(plan.contextPlan?.basis).toBe('gpu')
+    listDevices.mockClear()
     const embedding = await planLlamaLoad(
       { ...input({ fit: true, fit_target: '' }), isEmbedding: true },
       fitDeps({ listDevices })
     )
     expect(embedding.config.fit_target).toBe('')
+    expect(embedding.contextPlan).toBeUndefined()
     expect(listDevices).not.toHaveBeenCalled()
   })
 
@@ -910,5 +920,147 @@ describe('planLlamaLoad — window ceiling on unified memory below 16 GiB', () =
       smallMac()
     )
     expect(plan.fitCtxCeiling).toBeUndefined()
+  })
+})
+
+describe('planLlamaLoad — the context plan as the default window', () => {
+  const GiB = 2 ** 30
+  const MODEL = '/data/llamacpp/models/m/model.gguf'
+  // bartowski/Meta-Llama-3.1-8B-Instruct-GGUF Q4_K_M: 128 KiB of KV a token, 4693 MiB of weights.
+  const LLAMA31_8B_META = {
+    'general.architecture': 'llama',
+    'llama.block_count': '32',
+    'llama.context_length': '131072',
+    'llama.attention.head_count': '32',
+    'llama.attention.head_count_kv': '8',
+    'llama.attention.key_length': '128',
+    'llama.attention.value_length': '128',
+  }
+  const CUDA_12 = [{ id: 'CUDA0', name: 'NVIDIA GeForce RTX 3060', mem: 12_288, free: 11_900 }]
+  const onGpu = (devices = CUDA_12, over: Partial<LoadPlanDeps> = {}) =>
+    deps({
+      files: { [MODEL]: 4_920_734_016 },
+      meta: LLAMA31_8B_META,
+      listDevices: async () => devices,
+      systemMemory: async () => ({ totalMemoryBytes: 32 * GiB, freeMemoryBytes: 24 * GiB }),
+      ...over,
+    })
+
+  it('makes the plan fit’s floor on a discrete GPU, so fit moves layers instead of shrinking to 4K', async () => {
+    const plan = await planLlamaLoad(input({ fit: true, fit_ctx: '4096', ctx_size: 0 }), onGpu())
+    // 11900 − 1024 MiB, 4693 of weights, 1024 of reserve, a quarter of the weights may leave.
+    expect(plan.config.fit_ctx).toBe('50432')
+    expect(plan.contextPlan).toEqual({
+      recommendedCtx: 50_432,
+      maxCtx: 50_432,
+      trainedCtx: 131_072,
+      kvBytesPerToken: 131_072,
+      basis: 'gpu',
+    })
+    expect(plan.warnings).toContain(
+      'GPU: fit keeps at least 50432 tokens for "m", moving layers to system RAM if it must.'
+    )
+    // It reaches llama-server as `--fit-ctx`, with no `--ctx-size` to end fit's search.
+    const { argv } = planLlamaArgs(plan.config, {
+      provider: 'llamacpp-upstream',
+      isEmbedding: false,
+      modelId: 'm',
+      modelPath: plan.modelPath,
+      port: plan.port,
+    })
+    expect(argv.slice(argv.indexOf('--fit'), argv.indexOf('--fit') + 4)).toEqual([
+      '--fit',
+      'on',
+      '--fit-ctx',
+      '50432',
+    ])
+    expect(argv).not.toContain('--ctx-size')
+    // The app's per-model 4096 is the schema default too, and an empty floor is no one's choice.
+    const model = await planLlamaLoad(
+      { ...input({ fit: true, fit_ctx: '' }), overrides: { fit_ctx: 4096 as unknown as string } },
+      onGpu()
+    )
+    expect(model.config.fit_ctx).toBe('50432')
+    // A 24 GB card holds the whole trained window beside the weights.
+    const big = await planLlamaLoad(
+      input({ fit: true, fit_ctx: '' }),
+      onGpu([{ id: 'CUDA0', name: 'RTX 4090', mem: 24_564, free: 24_100 }])
+    )
+    expect(big.config.fit_ctx).toBe('131072')
+  })
+
+  it('keeps a fit floor somebody chose, and a plan that is no wider than llama.cpp’s own', async () => {
+    const chosen = await planLlamaLoad(input({ fit: true, fit_ctx: '8192' }), onGpu())
+    expect(chosen.config.fit_ctx).toBe('8192')
+    expect(chosen.contextPlan?.maxCtx).toBe(50_432)
+    // 8 GB card with a model larger than it: the floor fit would take anyway stays 4096 when the plan
+    // gives no more.
+    const tiny = await planLlamaLoad(
+      input({ fit: true, fit_ctx: '4096' }),
+      onGpu([{ id: 'CUDA0', name: 'GT 1030', mem: 2048, free: 1900 }], {
+        systemMemory: async () => ({ totalMemoryBytes: 8 * GiB, freeMemoryBytes: 2 * GiB }),
+      })
+    )
+    expect(tiny.contextPlan?.maxCtx).toBe(4096)
+    expect(tiny.config.fit_ctx).toBe('4096')
+    expect(tiny.warnings.some((w) => w.startsWith('GPU: fit keeps'))).toBe(false)
+  })
+
+  it('leaves the window to fit on unified memory, and plans it by fit’s budget', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: true, fit_ctx: '', fit_target: '' }),
+      onGpu([{ id: 'MTL0', name: 'Apple M3 Pro', mem: 27_648, free: 27_648 }], {
+        unifiedMemory: async () => ({ totalMemoryBytes: 36 * GiB }),
+      })
+    )
+    expect(plan.config.fit_ctx).toBe('')
+    expect(plan.config.fit_target).toBe(String(27_648 - 18 * 1024))
+    // Half of 36 GiB: 18432 − 4693 − 1024 MiB of KV → 101632.
+    expect(plan.contextPlan).toMatchObject({ maxCtx: 101_632, basis: 'unified' })
+  })
+
+  it('gives a fit-off load without a window the plan: every layer on the card, never below 32K', async () => {
+    const plan = (devices: typeof CUDA_12) =>
+      planLlamaLoad(input({ fit: false, ctx_size: 0 }), onGpu(devices))
+    // 11900 − 1024 − 4693 − 1024 MiB of KV: 41216 tokens, all on the card.
+    expect((await plan(CUDA_12)).config.ctx_size).toBe(41_216)
+    expect((await plan([{ id: 'CUDA0', name: 'RTX 4090', mem: 24_564, free: 24_100 }])).config.ctx_size).toBe(
+      131_072
+    )
+    expect((await plan([{ id: 'CUDA0', name: 'RTX 4060', mem: 8188, free: 7800 }])).config.ctx_size).toBe(
+      32_768
+    )
+    // A CPU build lists no device: half of RAM, 16384 − 4693 − 1024 MiB → 85248.
+    const cpu = await plan([])
+    expect(cpu.config.ctx_size).toBe(85_248)
+    expect(cpu.contextPlan?.basis).toBe('cpu')
+    // A window somebody chose stands, and the plan still says how far it could grow.
+    const chosen = await planLlamaLoad(input({ fit: false, ctx_size: 8192 }), onGpu())
+    expect(chosen.config.ctx_size).toBe(8192)
+    expect(chosen.contextPlan?.maxCtx).toBe(41_216)
+  })
+
+  it('keeps the previous small-Mac default when the GGUF gives no KV shape to plan with', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: false, ctx_size: 0 }),
+      deps({
+        meta: { 'general.architecture': 'llama', 'llama.context_length': '131072' },
+        unifiedMemory: async () => ({ totalMemoryBytes: 8 * GiB }),
+      })
+    )
+    expect(plan.contextPlan).toBeUndefined()
+    expect(plan.config.ctx_size).toBe(16_384)
+  })
+
+  it('keeps the previous default when the device cannot be read', async () => {
+    const plan = await planLlamaLoad(
+      input({ fit: false, ctx_size: 0 }),
+      onGpu(CUDA_12, {
+        listDevices: async () => Promise.reject(new Error('timed out')),
+        systemMemory: async () => undefined,
+      })
+    )
+    expect(plan.config.ctx_size).toBe(32_768)
+    expect(plan.contextPlan).toBeUndefined()
   })
 })

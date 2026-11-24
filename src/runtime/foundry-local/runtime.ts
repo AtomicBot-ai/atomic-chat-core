@@ -21,6 +21,7 @@ import type { DataLayout } from '../../config/index.js'
 import type { EngineHost } from '../../engine-builds/service.js'
 import type { ProcessJournal } from '../../lock/index.js'
 import type { ModelRegistry } from '../../models/index.js'
+import { contextLengthExceededError } from '../../server/public/errors.js'
 import { generateGatewayKey, startManagedGateway } from '../managed-text/index.js'
 import type { ManagedGateway, ManagedRoute } from '../managed-text/index.js'
 import type {
@@ -237,7 +238,10 @@ export class FoundryLocalRuntime implements LocalRuntime {
       routes: FOUNDRY_LOCAL_ROUTES,
       tools: block.tools,
       structuredOutput: false,
-      mapError: () => null,
+      // Unverified pending a live capture: no answer of Foundry Local's built-in server to a prompt past
+      // the variant's window has been recorded, so a body is read only by the shared overflow wordings
+      // and words of `server/public/errors.ts`.
+      mapError: contextLengthExceededError,
       ...(block.context_length !== undefined ? { contextLength: block.context_length } : {}),
     }
   }

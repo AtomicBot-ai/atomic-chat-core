@@ -581,6 +581,44 @@ describe('taking ownership', () => {
     expect(embedding.status).not.toBe(200)
   })
 
+  it('wires the context plan into capabilities and measure / compact into the control API', async () => {
+    await data.writeModel(
+      'planned',
+      {},
+      {
+        ggufBytes: bonsaiLikeGguf({
+          weightType: 1,
+          bitsPerWeight: BPW.f16,
+          metadata: {
+            'qwen3.context_length': 32768,
+            'qwen3.block_count': 4,
+            'qwen3.embedding_length': 256,
+            'qwen3.attention.head_count': 4,
+            'qwen3.attention.head_count_kv': 2,
+          },
+        }),
+      }
+    )
+    const core = await createCore()
+    const client = new CoreClient({ baseUrl: core.control.url, token: core.controlToken })
+    const capabilities = (await (
+      await fetch(`${core.control.url}/atomic/v1/models/llamacpp-upstream/planned/capabilities`, {
+        headers: { authorization: `Bearer ${core.controlToken}` },
+      })
+    ).json()) as { modelId: string; maxCtxTrain?: number; contextPlan?: { maxCtx: number } }
+    expect(capabilities).toMatchObject({ modelId: 'planned', maxCtxTrain: 32768 })
+    // Whatever this machine holds, a plan never exceeds the trained window.
+    if (capabilities.contextPlan) expect(capabilities.contextPlan.maxCtx).toBeLessThanOrEqual(32768)
+
+    const request = { messages: [{ role: 'user', content: 'hello' }] }
+    await expect(client.measureContext('llamacpp-upstream', 'planned', request)).rejects.toMatchObject({
+      code: 'MODEL_NOT_LOADED',
+    })
+    await expect(client.compactHistory('llamacpp-upstream', 'planned', request)).rejects.toMatchObject({
+      code: 'MODEL_NOT_LOADED',
+    })
+  })
+
   it('installs a listed tag from the signed mirror against the release list hash', async () => {
     const seen: string[] = []
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
@@ -2679,6 +2717,8 @@ it('discovers an installer commit immediately and checks it by ID or directory t
   expect(await caps.json()).toEqual({
     modelId: metadata.variant_id,
     maxCtxTrain: 32768,
+    // FastFlowLM runs a model at the window its model.yml declares.
+    contextPlan: { recommendedCtx: 32768, maxCtx: 32768, trainedCtx: 32768, basis: 'model' },
     mmprojExists: false,
     isEmbedding: false,
     isDecision: false,

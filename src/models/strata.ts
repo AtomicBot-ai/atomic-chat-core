@@ -35,7 +35,22 @@ import { modelDirFromId, type DataLayout } from '../config/index.js'
 import { ModelRegistry } from './registry.js'
 import { parseModelYml, type ModelYmlDocument } from './model-yml.js'
 import type { FileHandle } from 'node:fs/promises'
-import { ggufContextLength, readGgufMetadataChunked, type GgufMetadata } from './gguf/index.js'
+import {
+  estimateKvCache,
+  ggufContextLength,
+  readGgufMetadataChunked,
+  type GgufMetadata,
+} from './gguf/index.js'
+
+/** The KV cost of a token of window by the GGUF estimate, as a spreadable field; `{}` when it cannot tell. */
+export function strataKvBytesPerToken(metadata: Record<string, string>): { kvBytesPerToken?: number } {
+  try {
+    const perToken = estimateKvCache(metadata, undefined).per_token_size
+    return perToken > 0 ? { kvBytesPerToken: perToken } : {}
+  } catch {
+    return {}
+  }
+}
 
 export interface StrataModelEntry {
   id: string
@@ -128,12 +143,23 @@ export class StrataRegistry {
 
   /** A bounded header read for the selector. Load independently verifies the same shard. */
   async contextLimit(id: string): Promise<number> {
+    return (await this.contextFacts(id)).contextLimit
+  }
+
+  /**
+   * The same bounded header read for the memory plan: the window limit and what a token of window
+   * costs in KV cache by the GGUF estimate (`kvBytesPerToken` absent when the header cannot tell).
+   */
+  async contextFacts(id: string): Promise<{ contextLimit: number; kvBytesPerToken?: number }> {
     const entry = await this.get(id)
     const descriptor = entry.strata.descriptor
     const file = await this.checkedFile(join(entry.dir, descriptor.inputs.weights[0]!))
     try {
       const { metadata } = await readHeader(file)
-      return ggufContextLength(metadata) ?? descriptor.context_length
+      return {
+        contextLimit: ggufContextLength(metadata) ?? descriptor.context_length,
+        ...strataKvBytesPerToken(metadata),
+      }
     } finally {
       await file.close()
     }

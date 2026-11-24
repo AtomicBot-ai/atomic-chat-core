@@ -332,6 +332,12 @@ describe.skipIf(!POSIX)('FoundryLocalRuntime (task 6.3)', () => {
         tools: false,
         structuredOutput: false,
       })
+      // No recorded Foundry overflow wording yet: the shared ones decide (unverified).
+      const { mapError } = rt.routePolicy('cpu-variant')!
+      expect(mapError(400, '{"error":{"message":"context length exceeded"}}')).toMatchObject({
+        error: { code: 'context_length_exceeded', type: 'invalid_request_error' },
+      })
+      expect(mapError(400, '{"error":{"message":"tool_choice is not supported"}}')).toBeNull()
     } finally {
       await rt.unload('cpu-variant')
     }

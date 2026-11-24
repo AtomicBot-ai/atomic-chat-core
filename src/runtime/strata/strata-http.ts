@@ -1,4 +1,5 @@
 import type { StrataCapabilities } from '../../contracts/index.js'
+import { contextLengthExceededError } from '../../server/public/errors.js'
 import { generateGatewayKey, startManagedGateway } from '../managed-text/index.js'
 import type { ManagedRoute } from '../managed-text/index.js'
 import type { SessionRoutePolicy } from '../shared/index.js'
@@ -22,7 +23,9 @@ export function strataHttp(
     tools: caps.tools,
     structuredOutput: caps.structured_output,
     contextLength,
-    mapError: () => null,
+    // Unverified pending a live capture: no Strata Control overflow answer has been recorded, so a
+    // body is read only by the shared overflow wordings and words of `server/public/errors.ts`.
+    mapError: contextLengthExceededError,
   }
   return {
     policy,

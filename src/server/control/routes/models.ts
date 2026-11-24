@@ -1,13 +1,24 @@
 /**
- * Sessions and models: load, unload, recreate, context increase, capabilities, container logs,
- * embeddings, the tensorrt-llm check and deletion, GGUF validation, Foundation Models availability,
- * and the devices a backend reports.
+ * Sessions and models: load, unload, recreate, context increase, context measure and compaction,
+ * capabilities, container logs, embeddings, the tensorrt-llm check and deletion, GGUF validation,
+ * Foundation Models availability, and the devices a backend reports.
  */
 
 import { AtomicCoreError } from '../../../contracts/index.js'
+import { compactRequestOf, contextRequestOf } from '../../compaction/index.js'
 import { queryOf, readJsonBody, sendError, sendJson } from '../../http.js'
 import type { Router } from '../../http.js'
-import type { ControlRouteContext, ControlServerDeps } from '../types.js'
+import type { ContextControl, ControlRouteContext, ControlServerDeps } from '../types.js'
+
+/** A chat's whole history travels in a measure or compact body, images included. */
+const CONTEXT_BODY_LIMIT = 64 * 1024 * 1024
+
+function contextControl(deps: ControlServerDeps): ContextControl {
+  if (!deps.context) {
+    throw new AtomicCoreError('PROVIDER_NOT_FOUND', 'This core does not measure or compact chat context.')
+  }
+  return deps.context
+}
 
 export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx: ControlRouteContext): void {
   const { p } = ctx
@@ -60,6 +71,40 @@ export function registerModelRoutes(router: Router, deps: ControlServerDeps, ctx
       body.reason
     )
     sendJson(res, 200, result)
+  })
+
+  // The chat body's messages (with `tools`, and `chat_template_kwargs` for a measure) in; the count
+  // against the session's window, or the compaction to apply with `applyCompaction`, out.
+  router.post(p('/models/:provider/*modelId/context/measure'), async (req, res, { params }) => {
+    const control = contextControl(deps)
+    const request = contextRequestOf(await readJsonBody(req, CONTEXT_BODY_LIMIT))
+    if (!request) {
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        'A measure needs `messages`: chat messages with a `role` each.'
+      )
+    }
+    sendJson(
+      res,
+      200,
+      await control.measure(params['provider'] as string, params['modelId'] as string, request)
+    )
+  })
+
+  router.post(p('/models/:provider/*modelId/compact'), async (req, res, { params }) => {
+    const control = contextControl(deps)
+    const request = compactRequestOf(await readJsonBody(req, CONTEXT_BODY_LIMIT))
+    if (!request) {
+      throw new AtomicCoreError(
+        'INVALID_ARGUMENT',
+        'A compaction needs `messages` (chat messages with a `role` each), an integer `reserveTokens` ≥ 0 and a `targetRatio` between 0 and 1 when given.'
+      )
+    }
+    sendJson(
+      res,
+      200,
+      await control.compact(params['provider'] as string, params['modelId'] as string, request)
+    )
   })
 
   router.get(p('/models/:provider/*modelId/capabilities'), async (_req, res, { params }) => {

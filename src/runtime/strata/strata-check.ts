@@ -6,6 +6,7 @@ import type {
   StrataResourceEstimate,
 } from '../../contracts/index.js'
 import type { StrataSettings } from '../../settings/index.js'
+import { planContextWindow } from '../llamacpp/index.js'
 
 interface Inputs {
   backend: StrataBackend
@@ -22,18 +23,80 @@ const QWEN36_CUDA_TEXT_CONTEXT = 4096
 const QWEN36_CUDA_TEXT_VRAM = 8188 * 2 ** 20
 const QWEN36_CUDA_EXTENDED_VRAM = 10 * GiB
 
-/** Use the tested text profile on smaller cards and reserve more for longer contexts and vision. */
+/** What a Strata model's first GGUF shard says about its window (`StrataRegistry.contextFacts`). */
+export interface StrataGgufFacts {
+  /** `{arch}.context_length`: the longest window a load may ask for. */
+  contextLimit: number
+  /** KV-cache bytes a token of window costs, by the GGUF estimate; absent, the window is not grown. */
+  kvBytesPerToken?: number
+}
+
+/**
+ * The automatic window on a discrete card, by the GGUF's context plan: the profile's tested window
+ * (`baseCtx`, which the profile's VRAM floor `floorBytes` holds), grown by as many tokens as the
+ * GGUF's KV estimate fits in the card above that floor and the plan's 1 GiB reserve, never past the
+ * GGUF's own limit. Strata's own buffers are not modelled beyond the floor, so the growth only spends
+ * memory the floor leaves; without a KV estimate the tested window stands.
+ */
+export function strataPlannedContext(input: {
+  baseCtx: number
+  floorBytes: number
+  gpuBytes: number
+  gguf: StrataGgufFacts | undefined
+}): number {
+  const perToken = input.gguf?.kvBytesPerToken
+  const limit = input.gguf?.contextLimit
+  if (perToken === undefined || !(perToken > 0) || limit === undefined || !(limit > input.baseCtx))
+    return input.baseCtx
+  const plan = planContextWindow({
+    device: { kind: 'gpu', freeVramBytes: input.gpuBytes },
+    weightsBytes: input.floorBytes,
+    trainedCtx: limit,
+    kvBytesAt: (ctx) => Math.max(0, ctx - input.baseCtx) * perToken,
+    floorCtx: input.baseCtx,
+    offloadShare: 0,
+    marginBytes: 0,
+  })
+  return plan?.recommendedCtx ?? input.baseCtx
+}
+
+/**
+ * Use the tested text profile on smaller cards and reserve more for longer contexts and vision. With
+ * the first shard's GGUF facts, an automatic window on a discrete card grows from the catalog's
+ * tested one by what the card holds above the profile's VRAM floor (`strataPlannedContext`); a window
+ * the user set stands.
+ */
 export function planStrataMemory(
   descriptor: StrataModelDescriptor,
   backend: StrataBackend,
   gpuBytes: number,
-  settings: StrataSettings
+  settings: StrataSettings,
+  gguf?: StrataGgufFacts
 ): { settings: StrataSettings; minimumVramBytes?: number } {
-  if (backend !== 'cuda' || strataProfileId(descriptor) !== 'ud-q4-k-xl-mtp') return { settings }
+  if (backend !== 'cuda' || strataProfileId(descriptor) !== 'ud-q4-k-xl-mtp') {
+    if (settings.context_length || gguf === undefined || backend === 'metal') return { settings }
+    const floorBytes = estimateStrata(descriptor, {
+      backend,
+      unified: false,
+      installed: true,
+      prepared: true,
+      previousBytes: 0,
+    }).vram_bytes
+    const context = strataPlannedContext({ baseCtx: descriptor.context_length, floorBytes, gpuBytes, gguf })
+    return context === descriptor.context_length
+      ? { settings }
+      : { settings: { ...settings, context_length: context } }
+  }
   const compact = gpuBytes < QWEN36_CUDA_EXTENDED_VRAM
+  // Below 10 GiB the measured text profile stands (ADR 2026-11-16): a longer window needs the 10 GiB floor.
   const autoContext = compact
     ? Math.min(descriptor.context_length, QWEN36_CUDA_TEXT_CONTEXT)
-    : descriptor.context_length
+    : strataPlannedContext({
+        baseCtx: descriptor.context_length,
+        floorBytes: QWEN36_CUDA_EXTENDED_VRAM,
+        gpuBytes,
+        gguf,
+      })
   const context = settings.context_length || autoContext
   const vision = compact ? 'off' : settings.vision
   const extended = context > QWEN36_CUDA_TEXT_CONTEXT || (vision === 'auto' && descriptor.capabilities.vision)

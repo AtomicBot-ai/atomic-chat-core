@@ -57,4 +57,13 @@ describe('autoIncreaseCtx', () => {
     const failed = deps([demo], () => Promise.reject(new Error('boom')))
     expect(await autoIncreaseCtx(failed, 'llamacpp-upstream', 'demo', 'error')).toBeUndefined()
   })
+
+  it('has nothing to retry on when the grown session is gone by the time it is looked up', async () => {
+    const sessions = [demo]
+    const vanishing = deps(sessions, async () => {
+      sessions.length = 0
+      return { ok: true, new_ctx_len: 65536 }
+    })
+    expect(await autoIncreaseCtx(vanishing, 'llamacpp-upstream', 'demo', 'error')).toBeUndefined()
+  })
 })

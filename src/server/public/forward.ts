@@ -14,6 +14,10 @@
  *   400 — replaying the request would only poison the fresh backend again;
  * - a non-streamed 200 cut off by the context window (`finish_reason: length` with no client cap)
  *   is grown and replayed like an overflow;
+ * - a local `/chat/completions` that does not fit its session's window has its oldest turns
+ *   summarized by the same model (`server/compaction`): before it is sent, when the one overflow rule
+ *   says to compact rather than grow, or once after an overflow or a cut-off that growing did not fix
+ *   (a session that declares its routes is never grown, so it is only compacted);
  * - a local engine's unstructured error is wrapped in an OpenAI error envelope.
  *
  * One deliberate difference from the Rust: a remote provider's configured custom headers are sent.
@@ -33,6 +37,14 @@ import { RESUMABLE_REQUEST_HEADER } from '../../contracts/index.js'
 import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
 import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
+import { COMPACTED_RESPONSE_HEADER, COMPACTION_REQUEST_HEADER } from '../../contracts/index.js'
+import {
+  HistoryCompactor,
+  RequestCompaction,
+  compactionDisabledByHeader,
+  isContextLengthExceeded,
+} from '../compaction/index.js'
+import type { CompactedChat } from '../compaction/index.js'
 import { autoIncreaseCtx } from './ctx.js'
 import { sessionWindow } from './context-window.js'
 import { SseLineReader } from './sse.js'
@@ -52,14 +64,14 @@ import {
   structureBackendErrorBody,
   structuredErrorJson,
 } from './errors.js'
-import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
+import { answer, clientGone, connectTimeoutMs, header, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
 import { pendingRun, relayAsRun } from './runs.js'
 import { placedSystemMessages } from './system-messages.js'
 import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
 import type { Exchange } from './exchange.js'
-import type { LocalTarget } from './types.js'
+import type { LocalTarget, PublicServerDeps } from './types.js'
 import {
   forwardableHeaders,
   pipeBody,
@@ -202,7 +214,8 @@ export async function serveForward(ex: Exchange): Promise<void> {
   const isMessages = ex.path === '/messages'
   const parsed = await readModelRequest(ex)
   if (!parsed) return
-  const { raw, json, modelId, stream } = parsed
+  const { json, modelId, stream } = parsed
+  let raw = parsed.raw
 
   let backend: Backend
   let url: string | undefined
@@ -281,6 +294,11 @@ export async function serveForward(ex: Exchange): Promise<void> {
     return
   }
 
+  // A local chat that does not fit its session's window is compacted before it is sent.
+  const compaction = backend.kind === 'local' ? chatCompaction(ex, backend.session, json) : undefined
+  const compacted = await compaction?.beforeSend().catch(() => undefined)
+  if (compacted && backend.kind === 'local') raw = compactedBody(ex, backend.session, compacted)
+
   // An Anthropic request that asks for no thinking gets none from a llama.cpp chat template either
   // (QA B08): on `/v1/messages` and on the chat-completions fallback alike.
   const noThinking =
@@ -343,16 +361,94 @@ export async function serveForward(ex: Exchange): Promise<void> {
 
   if (!isSuccess(response.status)) {
     if (isMessages) await messagesFallback(ex, backend, url, key, messagesJson, noThinking, response)
-    else await upstreamError(ex, backend, modelId, raw, response)
+    else await upstreamError(ex, backend, modelId, raw, response, compaction)
     return
   }
 
   if (!stream && backend.kind === 'local') {
-    await inspectFinish(ex, backend.session, modelId, raw, response)
+    await inspectFinish(ex, backend.session, modelId, raw, response, compaction)
     return
   }
-  if (resumable && (await relayAsRun(ex, response, resumable, injected !== undefined))) return
-  await relayObserved(ex, response, injected !== undefined)
+  // A run is followed to its end or until the client leaves, so its prompt count, once the engine
+  // reported it, calibrates the compactor like a plain stream's.
+  if (!(resumable && (await relayAsRun(ex, response, resumable, injected !== undefined))))
+    await relayObserved(ex, response, injected !== undefined)
+  compaction?.observe(trace.telemetry?.promptTokens)
+}
+
+/** The compactor of a host that brought none: one per server, so its cache outlives the request. */
+const ownCompactors = new WeakMap<PublicServerDeps, HistoryCompactor>()
+
+/**
+ * History compaction for this request: a local `/chat/completions` to a chat session, unless the host
+ * turned compaction off or the client sent `x-atomic-compaction: off`. `/messages` and `/responses`
+ * are never compacted: the agents that speak them compact their own conversations.
+ */
+function chatCompaction(ex: Exchange, session: LocalTarget, json: JsonValue): RequestCompaction | undefined {
+  const setup = ex.deps.compaction
+  if (setup === false || ex.path !== '/chat/completions' || session.isEmbedding || !isJsonObject(json))
+    return undefined
+  if (setup?.enabled?.() === false) return undefined
+  if (compactionDisabledByHeader(header(ex.req, COMPACTION_REQUEST_HEADER))) return undefined
+  let compactor = setup?.compactor ?? ownCompactors.get(ex.deps)
+  if (!compactor) {
+    compactor = new HistoryCompactor(ex.deps.fetch ? { fetch: ex.deps.fetch } : {})
+    ownCompactors.set(ex.deps, compactor)
+  }
+  const maxWindow = setup?.maxWindow
+  return new RequestCompaction(session, json, {
+    compactor,
+    window: () => sessionWindow(ex.deps, session),
+    ...(maxWindow ? { maxWindow: () => maxWindow(session) } : {}),
+    signal: () => clientGone(ex),
+  })
+}
+
+/** Say what compaction did: `x-atomic-compacted` on the answer, and `session:history-compacted`. */
+function announceCompaction(ex: Exchange, session: LocalTarget, compacted: CompactedChat): void {
+  const { result } = compacted
+  if (!ex.res.headersSent) ex.res.setHeader(COMPACTED_RESPONSE_HEADER, String(result.summarizedCount))
+  ex.deps.emit?.('session:history-compacted', {
+    provider: session.provider,
+    modelId: session.modelId,
+    summarizedMessages: result.summarizedCount,
+    tokensBefore: result.tokensBefore,
+    tokensAfter: result.tokensAfter,
+    cached: result.cached,
+    source: 'api',
+  })
+}
+
+function compactedBody(ex: Exchange, session: LocalTarget, compacted: CompactedChat): Buffer {
+  announceCompaction(ex, session, compacted)
+  return Buffer.from(serdeToString(compacted.body as JsonValue))
+}
+
+/**
+ * Compact a request the engine refused for its size, or cut off at the window, and replay it once to
+ * the session as it is now. `false` when there is nothing to compact or the replay failed as well:
+ * the client then gets the engine's first answer.
+ */
+async function compactAndRetry(
+  ex: Exchange,
+  session: LocalTarget,
+  compaction: RequestCompaction | undefined,
+  errorBody?: string
+): Promise<boolean> {
+  if (!compaction) return false
+  const current = ex.deps.findLocal(session.provider, session.modelId) ?? session
+  const compacted = await compaction.afterOverflow(current, errorBody).catch(() => undefined)
+  if (!compacted) return false
+  const retry = await retryLocal(
+    ex,
+    current.port,
+    current.apiKey,
+    Buffer.from(serdeToString(compacted.body as JsonValue))
+  )
+  if (!retry) return false
+  announceCompaction(ex, current, compacted)
+  await relay(ex.res, retry, ex.cors)
+  return true
 }
 
 /** The largest non-SSE body kept for telemetry: a chat completion envelope, not an arbitrary file. */
@@ -507,7 +603,8 @@ async function upstreamError(
   backend: Backend,
   modelId: string,
   raw: Buffer,
-  response: UpstreamResponse
+  response: UpstreamResponse,
+  compaction?: RequestCompaction
 ): Promise<void> {
   const errorBody = await readUpstreamText(response)
   const status = response.status
@@ -524,11 +621,18 @@ async function upstreamError(
     const policy = backend.session.policy
     if (policy) {
       // A session that declares its routes is never grown or recreated: its context was fixed when
-      // it started. An error it knows (a context overflow) gets its own OpenAI body; any other is
-      // wrapped like every local engine's.
+      // it started, so an overflow is compacted and replayed once. An error it knows (a context
+      // overflow) gets its own OpenAI body; any other is wrapped like every local engine's.
+      const mapped = policy.mapError(status, errorBody)
+      const overflow =
+        isContextLimitError(status, errorBody) ||
+        isContextLengthExceeded(mapped) ||
+        isContextLengthExceeded(errorBody)
+      // The mapped wording names the window when the engine's own does not (TensorRT-LLM's).
+      const named = mapped === null ? errorBody : `${errorBody}\n${serdeToString(mapped as JsonValue)}`
+      if (overflow && (await compactAndRetry(ex, backend.session, compaction, named))) return
       recordFailure()
       reportInferenceFailure(ex, backend, status, errorBody)
-      const mapped = policy.mapError(status, errorBody)
       if (mapped !== null) {
         answer(ex, status, serdeToString(mapped as JsonValue), [['Content-Type', 'application/json']])
         return
@@ -540,8 +644,11 @@ async function upstreamError(
       ])
       return
     }
-    if (isContextLimitError(status, errorBody) && (await growAndRetry(ex, provider, modelId, raw, 'error')))
-      return
+    // An overflow grows the window when the runtime can; one that did not grow is compacted.
+    if (isContextLimitError(status, errorBody)) {
+      if (await growAndRetry(ex, provider, modelId, raw, 'error')) return
+      if (await compactAndRetry(ex, backend.session, compaction, errorBody)) return
+    }
 
     if (isComputeBackendError(status, errorBody)) {
       // Only the llama.cpp upstream runtime understands a same-context reload; the others would
@@ -577,7 +684,8 @@ async function inspectFinish(
   session: LocalTarget,
   modelId: string,
   raw: Buffer,
-  response: UpstreamResponse
+  response: UpstreamResponse,
+  compaction?: RequestCompaction
 ): Promise<void> {
   const bytes = await readBody(response.body).catch(() => Buffer.alloc(0))
   let parsed: JsonValue | undefined
@@ -591,17 +699,28 @@ async function inspectFinish(
     const telemetry = new StreamTelemetry({ previews: ex.trace.inspecting })
     telemetry.onJson(parsed, performance.now())
     ex.trace.stash(telemetry.finishFields(0))
+    compaction?.observe(telemetry.promptTokens)
   }
-  if (
-    parsed !== undefined &&
-    // A session with a fixed context (a route policy) returns its cut-off answer as it is.
-    session.policy === undefined &&
-    isContextOverflowFinishLength(parsed, raw) &&
-    (await growAndRetry(ex, session.provider, modelId, raw, 'finish_length'))
-  ) {
-    return
+  if (parsed !== undefined && cutAtWindow(session, parsed, raw)) {
+    // A session with a fixed context (a route policy) is never grown: only compacted.
+    if (
+      session.policy === undefined &&
+      (await growAndRetry(ex, session.provider, modelId, raw, 'finish_length'))
+    )
+      return
+    if (await compactAndRetry(ex, session, compaction)) return
   }
   answer(ex, response.status, bytes, [['Content-Type', 'application/json']])
+}
+
+/**
+ * A non-streamed answer the window cut off rather than an output cap. A session that declares its
+ * routes caps output itself: only a stop clearly short of its known cap is the window's.
+ */
+function cutAtWindow(session: LocalTarget, parsed: JsonValue, raw: Buffer): boolean {
+  if (session.policy === undefined) return isContextOverflowFinishLength(parsed, raw)
+  const cap = session.policy.maxOutputTokens
+  return cap !== undefined && isContextOverflowFinishLength(parsed, raw, cap)
 }
 
 /**

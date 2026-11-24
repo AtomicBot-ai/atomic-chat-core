@@ -69,6 +69,8 @@ describe('LocalSessions: route policies for the public server', () => {
       increaseCtx: async () => ({ ok: false, reason: 'not-loaded' }),
       recreateSession: async () => ({ ok: false, reason: 'not-loaded' }),
       externalPolicy: (provider) => (provider === 'tensorrt-llm' ? { ...policy, tools: true } : undefined),
+      knownWindow: (provider, modelId) =>
+        provider === 'llamacpp-upstream' && modelId === 'gguf' ? 8192 : undefined,
     })
   })
   afterEach(() => data.cleanup())
@@ -80,6 +82,14 @@ describe('LocalSessions: route policies for the public server', () => {
       ['gguf', true],
       ['trt', false],
     ])
+  })
+
+  it('carries the window a runtime started its own session with, and none for anyone else', () => {
+    expect(sessions.localTarget('llamacpp-upstream', 'gguf')).toMatchObject({ contextLength: 8192 })
+    expect(sessions.localTarget('tensorrt-llm', 'trt')).not.toHaveProperty('contextLength')
+    expect(sessions.listLocalTargets().map((t) => t.contextLength)).toEqual([8192, undefined])
+    externals.publish('app', 1, [{ provider: 'llamacpp-upstream', model_id: 'ext', port: 6003 }])
+    expect(sessions.localTarget('llamacpp-upstream', 'ext')).not.toHaveProperty('contextLength')
   })
 
   it("gives an external session the provider's static policy", () => {

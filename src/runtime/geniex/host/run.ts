@@ -211,6 +211,7 @@ async function serve(
       defaultMaxTokens: Math.min(args.maxTokens, nCtx),
       grammar: args.plugin !== 'qairt',
       tmpDir: args.tmp,
+      contextLength: nCtx,
       log: (line) => deps.stderr(line),
     })
     try {

@@ -37,6 +37,7 @@ import {
   type ResolvedCheckpoint,
 } from '../managed-models/compatibility.js'
 import type { JsonObject } from '../managed-models/quant-format.js'
+import { autoLimitCandidates, checkpointMaxContext } from '../managed-models/auto-limits.js'
 import { TENSORRT_LLM_ENGINE_ID } from '../environment/index.js'
 import {
   TENSORRT_LLM_CUDA_GRAPHS_RESERVE_BYTES,
@@ -219,20 +220,84 @@ export function engineOverheadBytes(configJson: JsonObject, contextLength: numbe
 /** What sizes the KV-cache reserve: the provider's settings, resolved by the caller (`check.ts`, `runtime.ts`). */
 export interface MemorySizingInputs {
   /** The session's context length: stored provider settings, a load's own overrides, or the
-   * adapter's default. */
+   * adapter's default; 0 is automatic (`tensorrtLlmAutoContextLength`). */
   contextLength: number
   kvCacheFreeGpuMemoryFraction: number
   /** The provider's `cuda_graphs`. Only `on` adds the graphs' memory: `auto` turns them off where
    *  they would not fit (`tensorrtLlmLaunchPlan`), `off` never captures them. Absent is `auto`. */
   cudaGraphs?: TensorrtLlmCudaGraphsSetting
+  /** The output cap: an automatic window is always longer than it. Absent is 0. */
+  maxOutputTokens?: number
 }
 
-/** TensorRT-LLM's memory rule on `gpu`: its weights as the engine lays them out, plus that card's own kind of KV reserve, plus the engine. */
+/** The checkpoint fields TensorRT-LLM's memory rule reads. */
+type MemoryCheckpoint = {
+  weightBytesTotal: number
+  configJson: JsonObject
+  hfQuantConfigJson: JsonObject | null
+}
+
+/** The longest window this engine release starts with (`TENSORRT_LLM_MAX_CONTEXT_LENGTH` in `adapter.ts`). */
+const MAX_AUTO_CONTEXT_LENGTH = 1_048_576
+/** An automatic window with no candidate at all: the old fixed default. */
+const UNSIZED_CONTEXT_LENGTH = 8192
+
+/**
+ * The window an automatic load (`context_length: 0`) runs with on `gpu`: the widest of the managed
+ * engines' candidates (`autoLimitCandidates` — the checkpoint's own maximum first, then down to 8K,
+ * one sequence as this check counts it) that TensorRT-LLM's memory rule passes on the card's free
+ * memory, or the smallest when none does — the check then refuses as it did at the old fixed 8192.
+ * Where `cuda_graphs: auto` would keep CUDA graphs for the card's size, the window is first sized
+ * with their memory counted, so it never takes the room they had at the old default; only when no
+ * window fits that way is it sized without them. A pinned window is returned as it is.
+ */
+export function tensorrtLlmAutoContextLength(
+  memory: MemorySizingInputs,
+  checkpoint: MemoryCheckpoint,
+  gpu: GpuFacts,
+  host?: HostMemory
+): number {
+  if (memory.contextLength > 0) return memory.contextLength
+  const free = host !== undefined ? freeMemoryBytes(gpu, host) : (gpu.free_vram_bytes ?? 0)
+  const trained = checkpointMaxContext(checkpoint.configJson)
+  const contexts = autoLimitCandidates({
+    contextAuto: true,
+    sequencesAuto: false,
+    context: 0,
+    sequences: 1,
+    maxOutputTokens: memory.maxOutputTokens ?? 0,
+    trainedContext: trained === undefined ? undefined : Math.min(trained, MAX_AUTO_CONTEXT_LENGTH),
+  }).map(([context]) => context)
+  const setting = memory.cudaGraphs ?? 'auto'
+  const fitting = (cudaGraphs: TensorrtLlmCudaGraphsSetting) =>
+    contexts.find(
+      (contextLength) =>
+        tensorrtLlmMemoryNeed(gpu, checkpoint, { ...memory, contextLength, cudaGraphs }).neededBytes <= free
+    )
+  const keepGraphs = setting === 'auto' && tensorrtLlmCudaGraphsOn('auto', gpu.total_vram_bytes)
+  return (
+    (keepGraphs ? fitting('on') : undefined) ??
+    fitting(setting) ??
+    contexts[contexts.length - 1] ??
+    UNSIZED_CONTEXT_LENGTH
+  )
+}
+
+/**
+ * TensorRT-LLM's memory rule on `gpu`: its weights as the engine lays them out, plus that card's own
+ * kind of KV reserve, plus the engine. An automatic window is first resolved on the same card
+ * (`tensorrtLlmAutoContextLength`).
+ */
 export function tensorrtLlmMemoryNeed(
   gpu: GpuFacts,
-  checkpoint: { weightBytesTotal: number; configJson: JsonObject; hfQuantConfigJson: JsonObject | null },
-  memory: MemorySizingInputs
+  checkpoint: MemoryCheckpoint,
+  memory: MemorySizingInputs,
+  host?: HostMemory
 ): MemoryNeed {
+  if (!(memory.contextLength > 0)) {
+    const contextLength = tensorrtLlmAutoContextLength(memory, checkpoint, gpu, host)
+    return tensorrtLlmMemoryNeed(gpu, checkpoint, { ...memory, contextLength }, host)
+  }
   const unified = isUnifiedMemory(gpu)
   const reserve = kvCacheReserveBytes(
     checkpoint.weightBytesTotal,
@@ -270,11 +335,17 @@ export function tensorrtLlmLaunchPlan(
   gpu: GpuFacts,
   host: HostMemory
 ): TensorrtLlmLaunchPlan {
+  // An automatic window is decided here, on the card as it stands right before the container.
+  const contextLength = tensorrtLlmAutoContextLength(memory, checkpoint, gpu, host)
   const setting = memory.cudaGraphs ?? 'auto'
-  if (setting !== 'auto') return { cudaGraphs: setting === 'on' }
-  const withoutGraphs = tensorrtLlmMemoryNeed(gpu, checkpoint, { ...memory, cudaGraphs: 'off' })
+  if (setting !== 'auto') return { cudaGraphs: setting === 'on', contextLength }
+  const withoutGraphs = tensorrtLlmMemoryNeed(gpu, checkpoint, {
+    ...memory,
+    contextLength,
+    cudaGraphs: 'off',
+  })
   const headroomBytes = freeMemoryBytes(gpu, host) - withoutGraphs.neededBytes
-  return { cudaGraphs: tensorrtLlmCudaGraphsOn('auto', gpu.total_vram_bytes, headroomBytes) }
+  return { cudaGraphs: tensorrtLlmCudaGraphsOn('auto', gpu.total_vram_bytes, headroomBytes), contextLength }
 }
 
 /** The skeleton's hooks for TensorRT-LLM, sized by the provider's settings. */
@@ -282,7 +353,7 @@ export function tensorrtLlmCheckEngine(memory: MemorySizingInputs): ManagedCheck
   return {
     engineId: TENSORRT_LLM_ENGINE_ID,
     checkpointProblems: tensorrtLlmCheckpointProblems,
-    memoryNeed: (gpu, checkpoint) => tensorrtLlmMemoryNeed(gpu, checkpoint, memory),
+    memoryNeed: (gpu, checkpoint, host) => tensorrtLlmMemoryNeed(gpu, checkpoint, memory, host),
   }
 }
 

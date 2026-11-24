@@ -6,17 +6,16 @@
  * Owns: settings merge, `latest/` sentinel resolution, flash-attn clamp for old builds, AVX preflight,
  * model.yml → paths (first shard, mmproj), artifact validation, Llama 3 template override, MTP/DFlash
  * draft resolution and capability gates, `dflash_n_max`, mutual exclusion, ctx clamp, env, port and
- * API key; beyond the extension, the default window with fit off, the answer cap (`n_predict` 0 is
- * automatic) and the host prompt cache on a small machine. Does NOT spawn; `nextRetry()` encodes the
- * two post-failure retries.
+ * API key; beyond the extension, the context plan (the default window with fit off, fit's floor on a
+ * discrete GPU), the answer cap (`n_predict` 0 is automatic) and the host prompt cache on a small
+ * machine. Does NOT spawn; `nextRetry()` encodes the two post-failure retries.
  */
 
 import { AtomicCoreError } from '../../contracts/index.js'
-import type { DeviceInfo, LlamacppConfig, LocalProviderId } from '../../contracts/index.js'
+import type { ContextPlan, DeviceInfo, LlamacppConfig, LocalProviderId } from '../../contracts/index.js'
 import type { ModelYmlDocument } from '../../models/index.js'
 import {
   effectiveCtxSize,
-  estimateKvCache,
   firstGgufShardPath,
   ggufShardSetPaths,
   isMtpCapable,
@@ -27,6 +26,14 @@ import { generateApiKey } from '../shared/index.js'
 import type { GpuCards } from '../shared/index.js'
 import { resolveFitCtx, withLlamacppDefaults } from './args.js'
 import type { LlamacppConfigInput } from './args.js'
+import {
+  GPU_OFFLOAD_WEIGHT_SHARE,
+  contextPlanDevice,
+  ggufKvBytesAt,
+  isDefaultFitCtx,
+  planGgufContextWindow,
+  previousDefaultCtx,
+} from './context-plan.js'
 import { DEFAULT_CTX_LEN } from './ctx-ladder.js'
 import { validateDeviceList } from './devices.js'
 import {
@@ -99,10 +106,11 @@ export interface LoadPlanDeps {
    */
   unifiedMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
   /**
-   * The machine's physical RAM on any platform, for the host prompt cache (`--cache-ram`); absent or
-   * `undefined`, llama.cpp keeps its own cache size.
+   * The machine's physical RAM on any platform, for the host prompt cache (`--cache-ram`) and the
+   * context plan, and the RAM free now, which bounds the layers a plan may move off a GPU; absent or
+   * `undefined`, llama.cpp keeps its own cache size and a CPU-only load gets no plan.
    */
-  systemMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
+  systemMemory?: () => Promise<{ totalMemoryBytes: number; freeMemoryBytes?: number } | undefined>
   /** `<exe> --list-devices`: what fit will measure as free on each device. */
   listDevices?: (exePath: string) => Promise<DeviceInfo[]>
   exists: (path: string) => Promise<boolean>
@@ -143,6 +151,12 @@ export interface LoadPlan {
   fitCtxCeiling?: number
   /** `--cache-ram` (MiB) on a machine with at most 16 GiB of RAM; absent: llama.cpp's 8192 MiB. */
   cacheRamMiB?: number
+  /**
+   * The window this device holds for the model (context-plan.ts): fit-off loads without a window run
+   * at it, fit on a discrete GPU keeps it as its floor. Absent for an embedding model, or when the
+   * GGUF or the device cannot tell.
+   */
+  contextPlan?: ContextPlan
   /**
    * Set by the runtime on the plan of a backend fallback: the `version_backend` the settings asked for,
    * which `config.version_backend` (the build that runs) no longer is.
@@ -425,22 +439,44 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     }
   }
 
-  // 19c. fit off with no window chosen: llama.cpp would take the whole trained context (`n_ctx = 0`,
-  // `common/common.h:459`) — 256K on a current coder model. Core picks DEFAULT_CTX_LEN instead, the
-  // trained context when smaller, narrowed on a small unified-memory Mac like fit's ceiling.
+  // 19c. the context plan: the largest window this device holds for the model, never above the
+  // trained one (context-plan.ts).
+  const contextPlan = input.isEmbedding
+    ? undefined
+    : await planLoadContext(exePath, modelPath, cfg, maxCtxTrain, deps)
+
+  // 19d. fit on a discrete GPU: llama.cpp shrinks the window down to `--fit-ctx` (4096) before it
+  // moves a layer off the card. The plan's window becomes that floor, so fit keeps it and moves layers
+  // instead — only while the floor is nobody's choice (empty, or llama.cpp's own 4096).
+  if (
+    cfg.fit &&
+    contextPlan?.basis === 'gpu' &&
+    isDefaultFitCtx(cfg.fit_ctx) &&
+    contextPlan.recommendedCtx > DEFAULT_FIT_CTX
+  ) {
+    cfg.fit_ctx = String(contextPlan.recommendedCtx)
+    warn(
+      `GPU: fit keeps at least ${cfg.fit_ctx} tokens for "${modelId}", moving layers to system RAM if it must.`
+    )
+  }
+
+  // 19e. fit off with no window chosen: llama.cpp would take the whole trained context (`n_ctx = 0`,
+  // `common/common.h:459`) — 256K on a current coder model, whatever the memory. Core takes the plan's
+  // window, never below the previous default (DEFAULT_CTX_LEN, the trained context when smaller, the
+  // 16K floor on a small Mac); without a plan, that default.
   if (!cfg.fit && !input.isEmbedding && !(cfg.ctx_size > 0)) {
-    cfg.ctx_size = await defaultFitOffCtx(modelPath, cfg, maxCtxTrain, deps)
+    cfg.ctx_size = contextPlan?.recommendedCtx ?? (await defaultFitOffCtx(modelPath, cfg, maxCtxTrain, deps))
     warn(`No context size is set with fit off; loading "${modelId}" with ${cfg.ctx_size} tokens.`)
   }
 
-  // 19d. the answer cap: `n_predict` 0 is automatic, never above the window core knows the load runs
+  // 19f. the answer cap: `n_predict` 0 is automatic, never above the window core knows the load runs
   // with (fit off: the window; fit on: the ceiling, else at most the trained context).
   if (!input.isEmbedding) {
     const window = !cfg.fit ? cfg.ctx_size : (fitCtxCeiling ?? maxCtxTrain)
     cfg.n_predict = resolveNPredict(cfg.n_predict, window)
   }
 
-  // 19e. the host prompt cache on a machine with at most 16 GiB of RAM (generation-limits.ts).
+  // 19g. the host prompt cache on a machine with at most 16 GiB of RAM (generation-limits.ts).
   const cacheRamMiB = input.isEmbedding
     ? undefined
     : promptCacheRamMiB((await deps.systemMemory?.().catch(() => undefined))?.totalMemoryBytes)
@@ -462,6 +498,7 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     maxCtxTrain,
     ...(fitCtxCeiling !== undefined ? { fitCtxCeiling } : {}),
     ...(cacheRamMiB !== undefined ? { cacheRamMiB } : {}),
+    ...(contextPlan !== undefined ? { contextPlan } : {}),
     warnings,
   }
 }
@@ -622,16 +659,6 @@ async function gpuWeightsBytes(modelPath: string, cfg: LlamacppConfig, deps: Loa
   return total
 }
 
-/**
- * The sequences llama.cpp sizes the cache for: concurrent mode's slots, else `--parallel` (0 leaves
- * it to llama.cpp, whose auto is 4 slots, `tools/server/server.cpp:126-130`). With one unified pool
- * they no longer multiply the cache; only each sliding-window layer keeps a window per sequence.
- */
-function fitSlots(cfg: LlamacppConfig): number {
-  if (cfg.concurrent_mode) return Math.max(cfg.concurrent_slots, 2)
-  return cfg.parallel > 0 ? cfg.parallel : 4
-}
-
 /** `--fit-ctx`, the smallest window fit may settle on, or llama.cpp's default. */
 function fitMinCtx(cfg: LlamacppConfig): number {
   const fitCtx = parseInt(String(cfg.fit_ctx).trim(), 10)
@@ -647,21 +674,59 @@ async function kvCacheEstimator(
   cfg: LlamacppConfig,
   deps: LoadPlanDeps
 ): Promise<(ctx: number) => number | undefined> {
-  const layout = { nSeq: fitSlots(cfg), ...(cfg.ubatch_size > 0 ? { nUbatch: cfg.ubatch_size } : {}) }
-  let meta: Record<string, string> | undefined
-  try {
-    meta = await deps.readGgufMetadata(modelPath)
-  } catch {
-    meta = undefined
-  }
-  return (ctx) => {
-    if (!meta) return undefined
-    try {
-      return estimateKvCache(meta, ctx, cfg.cache_type_k, cfg.cache_type_v, layout).size
-    } catch {
-      return undefined
-    }
-  }
+  return ggufKvBytesAt(await deps.readGgufMetadata(modelPath).catch(() => undefined), cfg)
+}
+
+/**
+ * The context plan of this load: sized by RAM on Apple silicon (under fit, by what the margin leaves
+ * llama.cpp of Metal's free memory), else by the build's own devices — the free memory of the GPU it
+ * lists, or system RAM when it lists none. Fit on plans from fit's floor and lets the window move
+ * layers off a GPU; fit off keeps every layer where `n_gpu_layers` puts it and never goes below the
+ * previous default.
+ */
+async function planLoadContext(
+  exePath: string,
+  modelPath: string,
+  cfg: LlamacppConfig,
+  maxCtxTrain: number | undefined,
+  deps: LoadPlanDeps
+): Promise<ContextPlan | undefined> {
+  if (maxCtxTrain === undefined) return undefined
+  const meta = await deps.readGgufMetadata(modelPath).catch(() => undefined)
+  if (!meta) return undefined
+  const unifiedMemory = await deps.unifiedMemory?.().catch(() => undefined)
+  const system = await deps.systemMemory?.().catch(() => undefined)
+  const listed =
+    deps.listDevices && (!unifiedMemory || cfg.fit)
+      ? await deps.listDevices(exePath).catch(() => undefined)
+      : undefined
+  const device = contextPlanDevice({ unifiedMemory, devices: listed, deviceSetting: cfg.device, system })
+  if (!device) return undefined
+  const weightsBytes = await gpuWeightsBytes(modelPath, cfg, deps)
+  if (!cfg.fit)
+    return planGgufContextWindow({
+      meta,
+      weightsBytes,
+      config: cfg,
+      device,
+      floorCtx: previousDefaultCtx(maxCtxTrain, device),
+      offloadShare: 0,
+    })
+  const fitTarget = parseInt(String(cfg.fit_target).trim(), 10)
+  const marginMiB = fitTarget > 0 ? fitTarget : DEFAULT_FIT_TARGET_MIB
+  const metal = device.kind === 'unified' ? metalDevice(listed ?? []) : undefined
+  return planGgufContextWindow({
+    meta,
+    weightsBytes,
+    config: cfg,
+    device:
+      device.kind === 'unified' && metal
+        ? { ...device, budgetBytes: (metal.free - marginMiB) * 2 ** 20 }
+        : device,
+    floorCtx: fitMinCtx(cfg),
+    offloadShare: GPU_OFFLOAD_WEIGHT_SHARE,
+    marginBytes: marginMiB * 2 ** 20,
+  })
 }
 
 /** `{arch}.context_length` from the GGUF, or `undefined` (with a warning) when unreadable. */

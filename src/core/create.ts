@@ -13,7 +13,7 @@ import {
   createFlmProbe,
 } from '../runtime/fastflowlm/index.js'
 import { randomUUID } from 'node:crypto'
-import { homedir, release as osRelease, totalmem } from 'node:os'
+import { freemem, homedir, release as osRelease, totalmem } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { AtomicCoreError, ENGINE_KINDS } from '../contracts/index.js'
 import type {
@@ -32,8 +32,9 @@ import {
   EmbedService,
   ModelCapabilityService,
   ModelRegistry,
+  modelYmlContextPlan,
 } from '../models/index.js'
-import { LlamacppRuntime, processPackDirs } from '../runtime/llamacpp/index.js'
+import { LlamacppRuntime, ggufContextPlanner, processPackDirs } from '../runtime/llamacpp/index.js'
 import { ExternalSessions } from '../runtime/index.js'
 import type { LocalRuntime } from '../runtime/index.js'
 import { FoundationModelsRuntime } from '../runtime/foundation-models/index.js'
@@ -66,7 +67,7 @@ import {
   parseGeniexCheckRequest,
 } from '../runtime/geniex/index.js'
 import type { GeniexBuild, GeniexHostPlatform } from '../runtime/geniex/index.js'
-import { SettingsStore } from '../settings/index.js'
+import { SettingsStore, canonicalProviderDefaults } from '../settings/index.js'
 import { TRANSCRIPTION_MODEL_ID } from '../speculative/index.js'
 import type { SettingsScope } from '../settings/index.js'
 import { ApiKeyStore, ChatGptAuth } from '../credentials/index.js'
@@ -335,8 +336,8 @@ export async function createAtomicCore(
           probeUnifiedMemory(
             nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
           ),
-        // Any platform: the host prompt cache (`--cache-ram`) is sized by the machine's RAM.
-        systemMemory: async () => ({ totalMemoryBytes: totalmem() }),
+        // Any platform: the host prompt cache (`--cache-ram`) and the context plan are sized by RAM.
+        systemMemory: async () => ({ totalMemoryBytes: totalmem(), freeMemoryBytes: freemem() }),
         log: runtimeLog,
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
@@ -619,6 +620,16 @@ export async function createAtomicCore(
     const capabilities = new ModelCapabilityService({
       layout,
       registry: (provider) => registries.get(provider) as ModelRegistry,
+      // The default window of a GGUF that is not loaded, on the hardware probe's facts (context plan).
+      planContext: ggufContextPlanner({
+        settings: (provider) => ({ ...canonicalProviderDefaults(provider), ...settings.get(provider) }),
+        unifiedMemory: async () =>
+          probeUnifiedMemory(
+            nodeProbeDeps({ platform, arch: process.arch, env: options.env ?? process.env })
+          ),
+        systemMemory: async () => ({ totalMemoryBytes: totalmem(), freeMemoryBytes: freemem() }),
+        gpus: async () => (await hardware.facts()).gpus,
+      }),
     })
     const embeddings = new EmbedService({
       findSession: (provider, modelId) =>
@@ -1260,6 +1271,12 @@ export async function createAtomicCore(
           (core as AtomicCore).increaseCtx(provider as LocalProviderId, modelId, reason),
         recreateSession: (provider: string, modelId: string) =>
           (core as AtomicCore).recreateSession(provider as LocalProviderId, modelId),
+        context: {
+          measure: (provider, modelId, request) =>
+            (core as AtomicCore).measureContext(provider as LocalProviderId, modelId, request),
+          compact: (provider, modelId, request) =>
+            (core as AtomicCore).compactHistory(provider as LocalProviderId, modelId, request),
+        },
         hardware,
         fastFlowLmAccelerators: async () => (await flmPreparation()).facts,
         fastFlowLmMaintenance,
@@ -1336,9 +1353,11 @@ export async function createAtomicCore(
             if (provider === 'fastflowlm') {
               if (!flmHost.platform) throw unknownProvider(provider, registries.keys())
               const installed = await flmModels.get(modelId)
+              const contextPlan = modelYmlContextPlan(installed.yml)
               return {
                 modelId,
                 maxCtxTrain: installed.yml.fastflowlm.context_length,
+                ...(contextPlan ? { contextPlan } : {}),
                 mmprojExists: false,
                 isEmbedding: false,
                 isDecision: false,
@@ -1592,6 +1611,8 @@ export async function createAtomicCore(
       embedding,
       errors: reporter,
       telemetry: reporter,
+      contextPlan: (provider, modelId) =>
+        capabilities.capabilities(provider, modelId).then((found) => found.contextPlan),
       remoteAccess: await wireRemoteAccess({
         overrides: options.remoteAccess,
         cloudflaredPath: options.cloudflaredPath,

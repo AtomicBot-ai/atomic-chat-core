@@ -22,7 +22,10 @@ export interface DefaultMigration {
 
 const LLAMACPP: readonly LocalProviderId[] = ['llamacpp-upstream', 'llamacpp', 'atomic-prism']
 
-/** Integrations audit 2026-11-03 (S2, S3, X6, P3); the reasons sit beside each new default in code. */
+/**
+ * Integrations audit 2026-11-03 (S2, S3, X6, P3) and the context plan (2026-11-23); the reasons sit
+ * beside each new default in code.
+ */
 export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   // Two slots over one unified KV pool (args.ts): side requests no longer wait behind an agent turn.
   { id: 'llamacpp-parallel-2', providers: LLAMACPP, key: 'parallel', from: 1, to: 2 },
@@ -35,6 +38,9 @@ export const DEFAULT_MIGRATIONS: readonly DefaultMigration[] = [
   { id: 'vllm-auto-seqs', providers: ['vllm'], key: 'max_num_seqs', from: 1, to: 0 },
   { id: 'sglang-auto-context', providers: ['sglang'], key: 'context_length', from: 8192, to: 0 },
   { id: 'sglang-auto-requests', providers: ['sglang'], key: 'max_running_requests', from: 1, to: 0 },
+  // The largest window the card holds for the checkpoint, up to its own maximum (context plan,
+  // tensorrt-llm/compatibility.ts `tensorrtLlmAutoContextLength`), instead of a fixed 8K.
+  { id: 'tensorrt-llm-auto-context', providers: ['tensorrt-llm'], key: 'context_length', from: 8192, to: 0 },
 ]
 
 /** Where the ids of the migrations already applied are kept. */

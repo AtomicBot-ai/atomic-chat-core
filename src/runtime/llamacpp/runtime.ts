@@ -22,6 +22,7 @@ import type { WriteStream } from 'node:fs'
 import { dirname, win32 } from 'node:path'
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
+  ContextPlan,
   CoreEvents,
   DeviceInfo,
   LocalProviderId,
@@ -265,6 +266,11 @@ export class LlamacppRuntime implements LocalRuntime {
 
   getMaxCtxTrain(modelId: string): number | undefined {
     return this.sessions.get(modelId)?.plan.maxCtxTrain
+  }
+
+  /** The context plan a session was loaded with (`context-plan.ts`): the largest window this device holds for it. */
+  getContextPlan(modelId: string): ContextPlan | undefined {
+    return this.sessions.get(modelId)?.plan.contextPlan
   }
 
   isLoading(modelId: string): boolean {
@@ -852,8 +858,12 @@ export class LlamacppRuntime implements LocalRuntime {
    *
    * - `fit`: with fit on, llama.cpp sizes the window itself at load and `--ctx-size` is not even
    *   emitted, so a reload would change nothing and cost the user a model load.
-   * - `at_max`: the ladder has reached what the model was trained for. Reloading at the same size
-   *   would loop — the next request would overflow again and ask again.
+   * - `at_max`: the ladder has reached what the model was trained for, or the window is already the
+   *   largest the load's context plan says this device holds. Reloading at the same size would loop —
+   *   the next request would overflow again and ask again.
+   *
+   * With a context plan the window grows once, straight to the plan's maximum, instead of a ladder
+   * step: every step is a model load, and a step short of the request only overflows again.
    *
    * The unload is allowed to fail: a session that is already gone is still a reload candidate, and
    * refusing to reload because the corpse would not die is worse than reloading.
@@ -865,8 +875,9 @@ export class LlamacppRuntime implements LocalRuntime {
     if (session.plan.config.fit === true) return { ok: false, reason: 'fit' }
 
     const currentCtxLen = this.getCtxSize(modelId) ?? DEFAULT_CTX_LEN
-    const maxCtxLen = session.plan.maxCtxTrain
-    const newCtxLen = computeNextCtxLen(currentCtxLen, maxCtxLen)
+    const deviceMax = session.plan.contextPlan?.maxCtx
+    const maxCtxLen = deviceMax ?? session.plan.maxCtxTrain
+    const newCtxLen = deviceMax ?? computeNextCtxLen(currentCtxLen, maxCtxLen)
     if (newCtxLen <= currentCtxLen)
       return {
         ok: false,

@@ -11,6 +11,7 @@ import {
   tensorrtLlmRewriteRequestBody,
   tensorrtLlmRewriteResponseFor,
   TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH,
+  TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH,
   TENSORRT_LLM_DEFAULT_MAX_OUTPUT_TOKENS,
   TENSORRT_LLM_MAX_CONTEXT_LENGTH,
   TENSORRT_LLM_MAX_KV_CACHE_FREE_FRACTION,
@@ -22,6 +23,7 @@ import {
   TENSORRT_LLM_REWRITABLE_ROUTES,
   TENSORRT_LLM_ROUTES,
   tensorrtLlmAdapter,
+  tensorrtLlmLaunchContextLength,
   type TensorrtLlmSettings,
 } from './adapter.js'
 import { TENSORRT_LLM_DEFAULT_KV_CACHE_FREE_FRACTION } from './kv-cache.js'
@@ -304,13 +306,14 @@ describe('buildLaunch', () => {
       '0.0.0.0',
       '--port',
       String(launch.engine.container_port),
+      // The default window is automatic; a launch with no plan to name it gets the old 8192.
       '--max_seq_len',
-      String(TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH),
+      String(TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH),
       '--max_num_tokens',
       // --max_num_tokens caps the pytorch backend's PROMPT alone (llmapi/llm.py's
       // _check_arguments, adapter.ts file header), never the output, so it always tracks
       // context_length here, never max_output_tokens (findings-2.13-r1.md item 1's ruling).
-      String(TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH),
+      String(TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH),
       // A desktop's concurrency, not trtllm-serve's 2048: hybrid (Mamba) models reserve their
       // recurrent state per sequence up front (adapter.ts, TENSORRT_LLM_MAX_BATCH_SIZE).
       '--max_batch_size',
@@ -375,7 +378,7 @@ describe('buildLaunch', () => {
     expect(flagValue(launch.argv, '--extra_llm_api_options')).toBe('/atomic/heartbeat/llm-api-options.yaml')
     expect(parseYaml(launch.files?.['llm-api-options.yaml'] ?? '')).toEqual({
       guided_decoding_backend: 'xgrammar',
-      kv_cache_config: { max_tokens: TENSORRT_LLM_DEFAULT_CONTEXT_LENGTH * TENSORRT_LLM_MAX_BATCH_SIZE },
+      kv_cache_config: { max_tokens: TENSORRT_LLM_UNPLANNED_CONTEXT_LENGTH * TENSORRT_LLM_MAX_BATCH_SIZE },
     })
   })
 
@@ -1404,6 +1407,52 @@ describe('classifyReady: a ready engine that cannot hold one sequence of its con
 
   it('is fit when the log carries no capacity line at all (another engine build)', () => {
     expect(tensorrtLlmAdapter.classifyReady!('INFO: Application startup complete.', at(4096))).toBeNull()
+  })
+
+  it('measures an automatic window against the window its launch was built with', () => {
+    const settings = tensorrtLlmAdapter.validateSettings({ context_length: 0 })
+    tensorrtLlmAdapter.buildLaunch(
+      baseContext({ settings, plan: { cudaGraphs: false, contextLength: 4096 } })
+    )
+    expect(tensorrtLlmAdapter.classifyReady!(final, settings)).toMatchObject({
+      kind: 'out-of-memory',
+      numbers: { kv_capacity_tokens: 224, context_length: 4096 },
+    })
+    expect(tensorrtLlmAdapter.classifyReady!(profiling, settings)).toBeNull()
+  })
+})
+
+describe('the automatic window at launch (context_length 0, the default)', () => {
+  const auto = () => tensorrtLlmAdapter.validateSettings({})
+
+  it('is the default, and reads 0 as automatic rather than below the smallest window', () => {
+    expect(auto().context_length).toBe(0)
+    expect(tensorrtLlmAdapter.validateSettings({ context_length: 0 }).context_length).toBe(0)
+    expect(() => tensorrtLlmAdapter.validateSettings({ context_length: 511 })).toThrow(AtomicCoreError)
+    expect(() => tensorrtLlmAdapter.validateSettings({ max_output_tokens: 65_536 })).toThrow(
+      /must be less than context_length \(65536\)/
+    )
+  })
+
+  it('launches with the plan’s window, a pinned one, or the old 8192 without either', () => {
+    expect(tensorrtLlmLaunchContextLength(auto(), { cudaGraphs: true, contextLength: 40_960 })).toBe(40_960)
+    expect(tensorrtLlmLaunchContextLength(auto(), { cudaGraphs: true })).toBe(8192)
+    expect(tensorrtLlmLaunchContextLength(auto(), { cudaGraphs: true, contextLength: 0.5 })).toBe(8192)
+    expect(tensorrtLlmLaunchContextLength(auto(), undefined)).toBe(8192)
+    const pinned = tensorrtLlmAdapter.validateSettings({ context_length: 16_384 })
+    expect(tensorrtLlmLaunchContextLength(pinned, { cudaGraphs: true, contextLength: 16_384 })).toBe(16_384)
+    expect(tensorrtLlmLaunchContextLength(pinned, undefined)).toBe(16_384)
+  })
+
+  it('writes the planned window into every flag and the KV bound that track it', () => {
+    const launch = tensorrtLlmAdapter.buildLaunch(
+      baseContext({ settings: auto(), plan: { cudaGraphs: true, contextLength: 40_960 } })
+    )
+    expect(flagValue(launch.argv, '--max_seq_len')).toBe('40960')
+    expect(flagValue(launch.argv, '--max_num_tokens')).toBe('40960')
+    expect(parseYaml(launch.files?.['llm-api-options.yaml'] ?? '')).toMatchObject({
+      kv_cache_config: { max_tokens: 40_960 * TENSORRT_LLM_MAX_BATCH_SIZE },
+    })
   })
 })
 

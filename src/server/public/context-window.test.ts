@@ -71,4 +71,16 @@ describe('SessionWindows', () => {
     expect(await sessionWindow({ ...deps, contextWindow: () => Promise.resolve(1) }, declared)).toBe(16384)
     expect(await sessionWindow(deps, localSession(1))).toBeUndefined()
   })
+
+  it('takes the window a runtime started the session with (MLX) over asking the host', async () => {
+    const mlx = localSession(1, { provider: 'mlx', apiKey: '', contextLength: 32768 })
+    let asked = false
+    const contextWindow = () => {
+      asked = true
+      return Promise.resolve(1)
+    }
+    expect(await sessionWindow({ contextWindow }, mlx)).toBe(32768)
+    expect(asked).toBe(false)
+    expect(await sessionWindow({ contextWindow }, { ...mlx, contextLength: 0 })).toBe(1)
+  })
 })

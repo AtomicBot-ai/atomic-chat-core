@@ -269,11 +269,12 @@ describe('the gateway routes and request rewrites', () => {
     sglangAdapter.rewriteRequestBody?.(route, body, with_, capabilities)
 
   // Scenario "Служебный маршрут движка": the gateway answers 404 for any route not declared here.
-  it('Служебный маршрут движка: declares only chat, completions and the model list; the two POST routes are rewritable', () => {
+  it('Служебный маршрут движка: declares only chat, completions, the model list and the chat tokenizer; the two POST routes are rewritable', () => {
     expect(sglangAdapter.routes).toEqual([
       { method: 'POST', path: '/v1/chat/completions' },
       { method: 'POST', path: '/v1/completions' },
       { method: 'GET', path: '/v1/models' },
+      { method: 'POST', path: '/tokenize' },
     ])
     expect(sglangAdapter.rewritableRoutes).toEqual([
       { method: 'POST', path: '/v1/chat/completions' },

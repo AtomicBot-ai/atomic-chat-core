@@ -60,7 +60,7 @@ import {
   mlxModelMissing,
   mlxTimeout,
 } from './errors.js'
-import { smallMemoryDefaultCtx } from '../llamacpp/fit-margin.js'
+import { planContextWindow, previousDefaultCtx } from '../llamacpp/context-plan.js'
 import { resolveNPredict } from '../llamacpp/generation-limits.js'
 import {
   readMlxMaxCtxTrain,
@@ -117,8 +117,9 @@ export interface MlxRuntimeOptions {
    */
   resolveBinary?: () => Promise<string | undefined>
   /**
-   * RAM the GPU shares with the system (Apple silicon). Below 16 GiB the default window is narrowed
-   * toward 16K until the model fits half of it (`smallMemoryDefaultCtx`); absent, the 32K default.
+   * RAM the GPU shares with the system (Apple silicon): the default window is the largest that half
+   * of it holds beside the weights (`planContextWindow`), never below the previous default (32K,
+   * 16K below 16 GiB) and below 16 GiB never above 32K; absent, the 32K default.
    */
   unifiedMemory?: () => Promise<{ totalMemoryBytes: number } | undefined>
   /** Test seams. */
@@ -279,20 +280,28 @@ export class MlxRuntime implements LocalRuntime {
     const facts = memory
       ? await readMlxMemoryFacts(modelPath, kvQuantBits(cfg)).catch(() => undefined)
       : undefined
-    const narrowDefaultCtx =
+    // The context plan: the largest window half of RAM holds beside the weights, never below the
+    // previous default (32K, 16K below 16 GiB of RAM) — which is also what a KV shape `config.json`
+    // does not give leaves.
+    const plannedDefaultCtx =
       memory && facts
-        ? (defaultCtx: number) =>
-            smallMemoryDefaultCtx({
-              totalMemoryBytes: memory.totalMemoryBytes,
+        ? (trainMax: number) => {
+            const device = { kind: 'unified' as const, totalMemoryBytes: memory.totalMemoryBytes }
+            const perToken = facts.kvBytesPerToken
+            const plan = planContextWindow({
+              device,
               weightsBytes: facts.weightsBytes,
-              defaultCtx,
-              kvBytesAt: (ctx) =>
-                facts.kvBytesPerToken === undefined ? undefined : ctx * facts.kvBytesPerToken,
+              trainedCtx: trainMax,
+              kvBytesAt: (ctx) => (perToken === undefined ? undefined : ctx * perToken),
+              ...(perToken !== undefined ? { kvBytesPerToken: perToken } : {}),
+              floorCtx: previousDefaultCtx(trainMax, device),
             })
+            return plan?.recommendedCtx ?? previousDefaultCtx(trainMax, device)
+          }
         : undefined
     const config = buildMlxConfig(cfg, draft, {
       ...(maxCtxTrain !== undefined ? { maxCtxTrain } : {}),
-      ...(narrowDefaultCtx ? { narrowDefaultCtx } : {}),
+      ...(plannedDefaultCtx ? { plannedDefaultCtx } : {}),
     })
     const args = buildMlxServerArgs(modelPath, port, config)
     const timeoutSecs = opts.timeoutSecs ?? asNumber(cfg['timeout']) ?? MLX_DEFAULT_TIMEOUT_SECS

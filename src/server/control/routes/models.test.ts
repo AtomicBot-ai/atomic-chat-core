@@ -496,3 +496,106 @@ it('refuses caller-supplied FastFlowLM preparation facts before probing the host
     await owner.server.close()
   }
 })
+
+describe('context measure and compaction routes', () => {
+  const messages = [
+    { role: 'user', content: 'first' },
+    { role: 'assistant', content: 'answer' },
+    { role: 'user', content: 'second' },
+  ]
+  const asked: unknown[] = []
+  const context = {
+    measure: async (provider: string, modelId: string, request: unknown) => {
+      asked.push(['measure', provider, modelId, request])
+      return {
+        promptTokens: 120,
+        exact: true,
+        windowTokens: 4096,
+        resize: 'reload' as const,
+        supportsPromptProgress: true,
+      }
+    },
+    compact: async (provider: string, modelId: string, request: unknown) => {
+      asked.push(['compact', provider, modelId, request])
+      return {
+        summary: 's',
+        keepFrom: 2,
+        summarizedCount: 2,
+        tokensBefore: 120,
+        tokensAfter: 40,
+        cached: false,
+      }
+    },
+  }
+
+  it('hands a measure and a compaction of a model id with slashes to the core, and answers what it says', async () => {
+    asked.length = 0
+    const owner = await start({ context })
+    try {
+      const measure = await owner.get('/atomic/v1/models/llamacpp-upstream/Owner/Repo-GGUF/context/measure', {
+        method: 'POST',
+        body: JSON.stringify({ messages, tools: [], chat_template_kwargs: { enable_thinking: false } }),
+      })
+      expect(measure.status).toBe(200)
+      expect(await measure.json()).toMatchObject({ promptTokens: 120, windowTokens: 4096, resize: 'reload' })
+      const compact = await owner.get('/atomic/v1/models/mlx/m/compact', {
+        method: 'POST',
+        body: JSON.stringify({ messages, reserveTokens: 256, targetRatio: 0.4 }),
+      })
+      expect(compact.status).toBe(200)
+      expect(await compact.json()).toMatchObject({ keepFrom: 2, summary: 's' })
+      expect(asked).toEqual([
+        [
+          'measure',
+          'llamacpp-upstream',
+          'Owner/Repo-GGUF',
+          { messages, tools: [], chat_template_kwargs: { enable_thinking: false } },
+        ],
+        ['compact', 'mlx', 'm', { messages, reserveTokens: 256, targetRatio: 0.4 }],
+      ])
+    } finally {
+      await owner.server.close()
+    }
+  })
+
+  it('refuses a body that is not a chat, and passes the core’s own refusal through', async () => {
+    const owner = await start({
+      context: {
+        ...context,
+        compact: async () => {
+          throw Object.assign(new Error('demo is not loaded on mlx.'), { code: 'MODEL_NOT_LOADED' })
+        },
+      },
+    })
+    try {
+      for (const [path, body] of [
+        ['context/measure', { messages: 'hi' }],
+        ['compact', { messages, targetRatio: 2 }],
+      ] as const) {
+        const res = await owner.get(`/atomic/v1/models/mlx/m/${path}`, {
+          method: 'POST',
+          body: JSON.stringify(body),
+        })
+        expect(res.status, path).toBe(400)
+        expect(await res.json()).toMatchObject({ error: { code: 'INVALID_ARGUMENT' } })
+      }
+      const missing = await owner.get('/atomic/v1/models/mlx/m/compact', {
+        method: 'POST',
+        body: JSON.stringify({ messages }),
+      })
+      expect(missing.status).toBe(404)
+      expect(await missing.json()).toMatchObject({ error: { code: 'MODEL_NOT_LOADED' } })
+    } finally {
+      await owner.server.close()
+    }
+  })
+
+  it('answers PROVIDER_NOT_FOUND in a build without context control', async () => {
+    const res = await h.get('/atomic/v1/models/mlx/m/context/measure', {
+      method: 'POST',
+      body: JSON.stringify({ messages }),
+    })
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ error: { code: 'PROVIDER_NOT_FOUND' } })
+  })
+})

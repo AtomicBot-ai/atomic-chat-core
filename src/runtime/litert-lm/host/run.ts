@@ -180,6 +180,7 @@ async function serve(
       engine,
       modelId: args.id,
       caps: { vision: visionBackend !== null, reasoning: args.reasoning },
+      contextLength: maxNumTokens,
       log: (line) => deps.stderr(line),
     })
     try {

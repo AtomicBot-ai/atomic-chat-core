@@ -15,6 +15,7 @@ import type {
   GeniexLibrary,
   GeniexModel,
   GeniexModelSettings,
+  GeniexStopReason,
   GeniexTemplateInput,
 } from '../../src/runtime/geniex/host/library.js'
 
@@ -56,7 +57,9 @@ export class FakeGeniexModel implements GeniexModel {
   result(prompt: string, scripted: string[], given: number): GeniexGenerateResult {
     this.delivered.push(given)
     return {
-      stopReason: scripted.length >= this.generations.at(-1)!.config.maxTokens ? 'length' : 'eos',
+      stopReason:
+        this.library.stopReason ??
+        (scripted.length >= this.generations.at(-1)!.config.maxTokens ? 'length' : 'eos'),
       promptTokens: Math.ceil(prompt.length / 4),
       generatedTokens: given,
     }
@@ -98,6 +101,8 @@ export class FakeGeniexLibrary implements GeniexLibrary {
   pluginList = ['llama_cpp', 'qairt']
   deviceList: Record<string, string[]> = { llama_cpp: ['HTP0', 'GPUOpenCL', 'CPU'], qairt: ['HTP0'] }
   script: FakeGeniexScript = () => ['Hello', ' world', '!']
+  /** The stop reason every generation reports, when set (`context_length`: the window ran out). */
+  stopReason: GeniexStopReason | null = null
   /** The Worker stand-in waits this long before each token. */
   tokenDelayMs = 0
   /** `createModel` throws this instead, when set. */

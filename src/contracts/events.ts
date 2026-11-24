@@ -23,6 +23,7 @@ import type { EnvironmentOperation, EnvironmentSnapshot } from './environment.js
 import type { DecisionErrorEvent, DecisionStateEvent } from './decision.js'
 import type { EmbeddingErrorEvent, EmbeddingStateEvent } from './embedding.js'
 import type { RemoteAccessStatus } from './remote-access.js'
+import type { HistoryCompactedEvent } from './context.js'
 import type { LocalProviderId, RuntimeDeviceInfo, SessionInfo, SessionLoadStage } from './session.js'
 
 export type DownloadKind = 'model' | 'backend' | 'draft' | 'cudart'
@@ -135,6 +136,8 @@ export interface CoreEvents {
     newCtx: number
     reason: string
   }
+  /** A chat's oldest turns were replaced by a summary so it fits the session's window. */
+  'session:history-compacted': HistoryCompactedEvent
   /** `pid` is null when the session was a container: it never had a host process to report. */
   'session:unloaded': { provider: LocalProviderId; model_id: string; pid: number | null }
   /**

@@ -35,6 +35,7 @@
  */
 import { AtomicCoreError } from '../../contracts/index.js'
 import type {
+  ContextPlan,
   ModelFamilySupport,
   RuntimeDescriptor,
   SessionInfo,
@@ -390,6 +391,34 @@ export class ManagedTextRuntime<
     this.sessionCapabilities.clear()
   }
 
+  /**
+   * The window a load of this model runs with, when it is known without loading: a loaded session's
+   * own (an automatic one is the engine's fit on the card), else the pinned setting. An automatic
+   * window of a model that is not loaded is decided on the card right before its container, after the
+   * models on it are stopped — no plan then, rather than a probe of the card per question.
+   */
+  private contextPlan(modelId: string, maxCtxTrain: number | undefined): ContextPlan | undefined {
+    const session = this.findSession(modelId)
+    const known = this.sessionCapabilities.get(modelId)
+    let window: number | undefined
+    if (session !== undefined && known !== undefined && known.generation === session.generation)
+      window = known.limits.contextLength
+    else {
+      try {
+        window = this.engine.settings(this.deps.settings()).context_length
+      } catch {
+        window = undefined
+      }
+    }
+    if (window === undefined || !(window > 0)) return undefined
+    return {
+      recommendedCtx: window,
+      maxCtx: window,
+      ...(maxCtxTrain !== undefined ? { trainedCtx: maxCtxTrain } : {}),
+      basis: 'engine',
+    }
+  }
+
   routePolicy(modelId: string): SessionRoutePolicy | undefined {
     const session = this.findSession(modelId)
     if (session === undefined) return undefined
@@ -417,6 +446,8 @@ export class ManagedTextRuntime<
       const model = await this.deps.model(modelId)
       const maxCtxTrain = await readCheckpointMaxContext(model.dir)
       if (maxCtxTrain !== undefined) base.maxCtxTrain = maxCtxTrain
+      const contextPlan = this.contextPlan(modelId, maxCtxTrain)
+      if (contextPlan !== undefined) base.contextPlan = contextPlan
       const ready = await this.deps.readyInstallation()
       const settings = this.engine.settings({})
       return {

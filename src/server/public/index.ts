@@ -48,6 +48,7 @@ export type {
   EmbeddingTarget,
   ImagesBackend,
   LocalTarget,
+  PublicCompaction,
   PublicServerConfig,
   PublicServerDeps,
   VideosBackend,
@@ -64,7 +65,8 @@ export {
 } from './run-registry.js'
 export type { RunLimits } from './run-registry.js'
 export { withRunRoutes } from './runs-openapi.js'
-export { SessionWindows } from './context-window.js'
+export { SessionWindows, sessionWindow } from './context-window.js'
+export { isLlamaCppServer } from './thinking.js'
 export {
   forwardableHeaders,
   pipeBody,

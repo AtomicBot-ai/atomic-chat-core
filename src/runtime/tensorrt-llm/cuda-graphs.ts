@@ -25,6 +25,8 @@ export type TensorrtLlmCudaGraphsSetting = 'auto' | 'on' | 'off'
  *  it stands right before the container is created. */
 export interface TensorrtLlmLaunchPlan {
   cudaGraphs: boolean
+  /** The window the session runs with: the pinned one, or the automatic one decided on this card. */
+  contextLength?: number
 }
 
 /**
