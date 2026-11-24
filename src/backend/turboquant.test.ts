@@ -305,7 +305,7 @@ describe('archives', () => {
     expect(turboquantDefaultAssetName('odd', 'win32')).toBe('llama-turboquant-odd.zip')
     expect(turboquantDefaultAssetName('odd', 'linux')).toBe('llama-turboquant-odd.tar.gz')
     expect(turboquantArchiveUrl('﻿b10018-1.3.0', 'linux-x64-rocm', undefined, 'linux')).toBe(
-      'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download/b10018-1.3.0/llama-turboquant-linux-x64-rocm.tar.gz'
+      'https://github.com/AtomicBot-ai/atomic-engine/releases/download/b10018-1.3.0/llama-turboquant-linux-x64-rocm.tar.gz'
     )
     expect(turboquantArchiveUrl('b1-1.0.0', 'linux-x64-rocm', ' custom.tar.gz ')).toMatch(
       /\/b1-1\.0\.0\/custom\.tar\.gz$/

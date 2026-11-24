@@ -28,10 +28,13 @@ import type { BackendFeatures, BackendVersion, GpuProbeInfo, SupportedFeatures }
 import { compareVersions, parseBackendVersion, parseRustU32, stripBom } from './version.js'
 import { gpuMeetsCuda13ArchFloor, gpuMeetsCuda13DriverForArch, isAmdGpu } from './select/index.js'
 
-export const TURBOQUANT_DOWNLOAD_BASE =
-  'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download'
-export const TURBOQUANT_RELEASE_INDEX_URL =
-  'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/latest/download/index.json'
+/**
+ * The fork's repository. It was `atomic-llama-cpp-turboquant` until the rename to `atomic-engine`;
+ * GitHub still redirects the old name, which is what released cores keep requesting.
+ */
+export const TURBOQUANT_REPO_URL = 'https://github.com/AtomicBot-ai/atomic-engine'
+export const TURBOQUANT_DOWNLOAD_BASE = `${TURBOQUANT_REPO_URL}/releases/download`
+export const TURBOQUANT_RELEASE_INDEX_URL = `${TURBOQUANT_REPO_URL}/releases/latest/download/index.json`
 /** The extension's disk copy of the last good release index (`<data>/llamacpp/release-index.cache.json`). */
 export const TURBOQUANT_RELEASE_INDEX_CACHE_FILE = 'release-index.cache.json'
 export const GGML_ORG_CUDART_DOWNLOAD_BASE = 'https://github.com/ggml-org/llama.cpp/releases/download'

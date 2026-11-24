@@ -37,6 +37,13 @@ import {
 } from './turboquant-index.js'
 import type { CachedTurboquantCatalog, TurboquantCatalog } from './turboquant-index.js'
 
+/**
+ * Redirects followed after the first `/releases/latest` answer before the last `Location` is handed
+ * to the parser as is. GitHub needs at most two (old name → new name → tag page).
+ */
+const LATEST_REDIRECT_MAX_HOPS = 4
+const RELEASE_TAG_PAGE = /\/releases\/tag\/[^/?#]+/
+
 export interface TurboquantCatalogServiceDeps {
   layout: DataLayout
   /** The `fetch` to use for a request carrying this proxy policy (`policyFetchFor` in the core). */
@@ -165,38 +172,47 @@ export class TurboquantCatalogService {
   }
 
   /**
-   * The URL `/releases/latest` lands on. The request is made with `redirect: 'manual'` and the
+   * The URL `/releases/latest` lands on. Each request is made with `redirect: 'manual'` and the
    * `Location` header read, because the core's proxy `fetch` builds its `Response` itself and cannot
-   * carry `response.url`; a fetch that followed anyway is read through `response.url`. When neither
-   * names a URL the step is skipped with a warning rather than guessed.
+   * carry `response.url`; a fetch that followed anyway is read through `response.url`. Hops are
+   * followed until one names a `/releases/tag/` page: a renamed repository answers its old
+   * `/releases/latest` with a 301 to the new name's `/releases/latest`, and only that one points at
+   * the tag. When no hop names a URL the step is skipped with a warning rather than guessed.
    */
   private async resolveLatestRedirect(fetchImpl: typeof fetch, timeoutMs: number): Promise<string | null> {
-    const controller = new AbortController()
-    const request = fetchImpl(TURBOQUANT_LATEST_RELEASE_URL, {
-      headers: { 'Accept': 'text/html', 'User-Agent': 'atomic-chat' },
-      redirect: 'manual',
-      signal: controller.signal,
-    })
-    const response = await withHardTimeout(
-      request,
-      timeoutMs,
-      `/releases/latest timed out after ${timeoutMs}ms`
-    ).catch((err: unknown) => {
-      controller.abort()
-      throw err
-    })
-    await response.body?.cancel().catch(() => {})
-    const location = response.headers.get('location')
-    if (response.status >= 300 && response.status < 400 && location) {
-      return new URL(location, TURBOQUANT_LATEST_RELEASE_URL).href
+    let url = TURBOQUANT_LATEST_RELEASE_URL
+    for (let hop = 0; hop <= LATEST_REDIRECT_MAX_HOPS; hop++) {
+      const controller = new AbortController()
+      const request = fetchImpl(url, {
+        headers: { 'Accept': 'text/html', 'User-Agent': 'atomic-chat' },
+        redirect: 'manual',
+        signal: controller.signal,
+      })
+      const response = await withHardTimeout(
+        request,
+        timeoutMs,
+        `/releases/latest timed out after ${timeoutMs}ms`
+      ).catch((err: unknown) => {
+        controller.abort()
+        throw err
+      })
+      await response.body?.cancel().catch(() => {})
+      const location = response.headers.get('location')
+      if (response.status >= 300 && response.status < 400 && location) {
+        const next = new URL(location, url).href
+        if (RELEASE_TAG_PAGE.test(next) || hop === LATEST_REDIRECT_MAX_HOPS) return next
+        url = next
+        continue
+      }
+      if (typeof response.url === 'string' && response.url && response.url !== url) {
+        return response.url
+      }
+      this.deps.log?.(
+        'warn',
+        `[fetchStableIndex] /releases/latest answered ${response.status} without a redirect target; skipping this source`
+      )
+      return null
     }
-    if (typeof response.url === 'string' && response.url && response.url !== TURBOQUANT_LATEST_RELEASE_URL) {
-      return response.url
-    }
-    this.deps.log?.(
-      'warn',
-      `[fetchStableIndex] /releases/latest answered ${response.status} without a redirect target; skipping this source`
-    )
     return null
   }
 

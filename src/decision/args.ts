@@ -11,7 +11,7 @@
  *
  * The key travels in `LLAMA_API_KEY`, never in argv, where any local user could read it with `ps`.
  *
- * `-t` is always passed. The engine's precedence (atomic-llama-cpp-turboquant `server-decision.cpp`,
+ * `-t` is always passed. The engine's precedence (atomic-engine `server-decision.cpp`,
  * `engine-laya.cpp`): the laya engine runs with `-t`, or without it llama.cpp's own default
  * (`common_cpu_get_num_math`: the performance cores on Apple silicon and on hybrid Linux x86, the
  * physical cores elsewhere, uncapped). A spec's `plan.n_threads` is never applied: the engine only

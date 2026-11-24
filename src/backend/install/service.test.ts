@@ -373,7 +373,7 @@ describe('install on the TurboQuant provider', () => {
     const [call] = downloader.download.mock.calls
     expect(call?.[1]).toEqual([
       {
-        url: 'https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant/releases/download/b10018-1.3.0/llama-turboquant-macos-arm64.tar.gz',
+        url: 'https://github.com/AtomicBot-ai/atomic-engine/releases/download/b10018-1.3.0/llama-turboquant-macos-arm64.tar.gz',
         save_path: join(
           data.layout.provider('llamacpp').backendsDir,
           'b10018-1.3.0',

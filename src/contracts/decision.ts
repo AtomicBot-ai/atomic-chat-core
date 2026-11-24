@@ -9,7 +9,7 @@
  *    `<arch>.decision.type` (laya, openjev, lev, kev, nimble, clef). No router.
  *
  * Two halves live here:
- *  - the engine's wire contract (`DECISION.md` in atomic-llama-cpp-turboquant, API version 1, which
+ *  - the engine's wire contract (`DECISION.md` in atomic-engine, API version 1, which
  *    upstream's `/v1/systemone` shares for requests), mirrored as types only. Fields the engine may
  *    add later are tolerated: every object keeps an index signature, and nothing in the core rejects
  *    an unknown key;
