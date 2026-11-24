@@ -31,6 +31,7 @@ import type { LocalProvider, RemoteProvider } from '../../router/index.js'
 import type { ChatGptBackend } from '../../cloud/index.js'
 import type { ErrorSink } from '../../telemetry/index.js'
 import type { HistoryCompactor } from '../compaction/index.js'
+import type { ChatRunRegistry } from './run-registry.js'
 
 /**
  * What a session whose engine declares its routes requires of this server (the runtime's
@@ -272,6 +273,12 @@ export interface PublicServerDeps {
   embedding?: EmbeddingBackend
   /** Where a request that failed on our side, or a failing local engine, is reported. */
   errors?: ErrorSink | undefined
+  /**
+   * The resumable chat-completion runs (`X-Atomic-Resumable`, `/atomic/runs/*`). `PublicServer.start`
+   * gives each listener its own when none is passed, and closes it with the listener; without one a
+   * resumable request streams as a plain one and every run route answers 404.
+   */
+  runs?: ChatRunRegistry
   /**
    * History compaction for `/chat/completions` to a local session. Absent: on, with a compactor of
    * this server's own; `false`: off for every request. A request opts out with `x-atomic-compaction: off`.

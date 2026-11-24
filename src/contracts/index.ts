@@ -25,6 +25,7 @@ export * from './litert-lm.js'
 export * from './geniex.js'
 export * from './fastflowlm.js'
 export * from './load-diag.js'
+export * from './runs.js'
 export * from './context.js'
 
 export * from './strata.js'

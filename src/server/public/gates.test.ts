@@ -1,6 +1,6 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
-import { extractHostFromOrigin, hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
+import { extractHostFromOrigin, hostAndKeyGate, isValidHost, presentedKey, removePrefix } from './gates.js'
 
 /** A request as `hostAndKeyGate` reads it: only `.headers` matters. */
 function req(headers: Record<string, string>): IncomingMessage {
@@ -113,5 +113,38 @@ describe('hostAndKeyGate', () => {
   it('never returns CORS headers or a hidden-path 404: callers with no docs paths get only host/key', () => {
     const refused = hostAndKeyGate(req({}), config)
     expect(refused?.headers).toEqual([])
+  })
+})
+
+describe('presentedKey', () => {
+  const keyed = { apiKey: 'server-key', apiKeys: ['server-key', 'device-key'], trustedHosts: [] }
+
+  it.each([
+    ['a Bearer key', { authorization: 'Bearer device-key' }, 'device-key'],
+    ['an x-api-key', { 'x-api-key': 'server-key' }, 'server-key'],
+    [
+      'the Bearer key when both match',
+      { 'authorization': 'Bearer device-key', 'x-api-key': 'server-key' },
+      'device-key',
+    ],
+    [
+      'the x-api-key when the Bearer one is wrong',
+      { 'authorization': 'Bearer nope', 'x-api-key': 'server-key' },
+      'server-key',
+    ],
+    ['nothing for a wrong key', { authorization: 'Bearer nope' }, undefined],
+    ['nothing for no key', {}, undefined],
+    ['nothing for a lowercase scheme', { authorization: 'bearer device-key' }, undefined],
+  ])('names %s', (_label, headers, expected) => {
+    expect(presentedKey(req(headers), keyed)).toBe(expected)
+  })
+
+  it("names the listener's own key when it has no keyring, and nothing on a keyless listener", () => {
+    expect(
+      presentedKey(req({ authorization: 'Bearer secret' }), { apiKey: 'secret', trustedHosts: [] })
+    ).toBe('secret')
+    expect(
+      presentedKey(req({ authorization: 'Bearer secret' }), { apiKey: '', trustedHosts: [] })
+    ).toBeUndefined()
   })
 })
