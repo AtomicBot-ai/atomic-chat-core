@@ -13,7 +13,7 @@ import { createServer, type Server } from 'node:http'
 import { connect, type AddressInfo } from 'node:net'
 import { describe, expect, it } from 'vitest'
 import { loadFixtureSet } from './fixtures.js'
-import { PublicServer } from '../../src/server/public/index.js'
+import { PublicServer, withRunRoutes } from '../../src/server/public/index.js'
 import type { CtxIncreaseOutcome, LocalTarget, PublicServerDeps } from '../../src/server/public/index.js'
 import { modelIdsMatch } from '../../src/router/index.js'
 import type { RemoteProvider } from '../../src/router/index.js'
@@ -103,6 +103,11 @@ const REMOTE_BEARER = 'Bearer sk-remote'
  * `prompt is too long: N tokens > M maximum`, without the fallback, where the proxy tried the fallback
  * and relayed its error. `/v1/models` gives a local model whose window the host knows
  * `context_length` and `meta.n_ctx` (the replay has no `contextWindow`, so no case shows them).
+ *
+ * Also later: the served `/openapi.json` describes the core's own resumable-run routes and the
+ * `X-Atomic-Resumable` header on `/chat/completions`, added to the app's document as it is served
+ * (`runs-openapi.ts`, ADR 2026-11-23-resumable-chat-completion-runs); the title and everything the
+ * app's document describes stay as recorded.
  */
 const UNKNOWN_MODEL_TEXT = /^No running session found for model '(.*)'$/
 const SESSION_BEARER = 'Bearer session-key'
@@ -147,6 +152,9 @@ function applyKnownDivergence(expected: Expected, input: Input): void {
     }
   }
   const { response } = expected
+  const document = isJsonObject(response.body) ? response.body['json'] : undefined
+  if (input.request.path.split('?')[0]?.endsWith('/openapi.json') && document !== undefined)
+    withRunRoutes(document)
   const text = isJsonObject(response.body) ? response.body['text'] : undefined
   const unknown = response.status === 404 && typeof text === 'string' ? UNKNOWN_MODEL_TEXT.exec(text) : null
   if (unknown) {

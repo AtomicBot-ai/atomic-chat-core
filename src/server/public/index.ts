@@ -32,6 +32,8 @@ import { serveSubscriptionIfOwned } from './subscription.js'
 import { gate, preflight, removePrefix } from './gates.js'
 import { serveMetrics, serveModels, serveMuseCatalog } from './listing.js'
 import { serveResponses } from './responses.js'
+import { ChatRunRegistry } from './run-registry.js'
+import { matchRunPath, serveRun } from './runs.js'
 import { serveStatic } from './static.js'
 import { RequestTrace, endpointFromPath } from './trace.js'
 import type { PublicServerConfig, PublicServerDeps } from './types.js'
@@ -53,6 +55,15 @@ export type {
 export { hostAndKeyGate, isValidHost, removePrefix } from './gates.js'
 export type { HostAndKeyConfig } from './gates.js'
 export { DynamicTrustedHosts, socketAddressLiteral } from './dynamic-hosts.js'
+export {
+  ChatRunRegistry,
+  RUN_MAX_AGE_MS,
+  RUN_MAX_BUFFER_BYTES,
+  RUN_MAX_RETAINED,
+  RUN_TTL_AFTER_FINISH_MS,
+} from './run-registry.js'
+export type { RunLimits } from './run-registry.js'
+export { withRunRoutes } from './runs-openapi.js'
 export { SessionWindows } from './context-window.js'
 export {
   forwardableHeaders,
@@ -191,6 +202,9 @@ export async function handlePublicRequest(
   }
 
   const ex = newExchange(req, res, path, config, deps, trace)
+  // Resuming or cancelling a resumable chat stream; POST only (ADR 2026-11-23-resumable-chat-completion-runs).
+  const run = matchRunPath(path)
+  if (run) return serveRun(ex, run)
   if (ex.method === 'POST') {
     if (path === '/responses') return serveResponses(ex)
     // A model served by the ChatGPT subscription speaks another protocol and takes other headers,
@@ -259,10 +273,14 @@ export class PublicServer {
   private constructor(
     private readonly server: Server,
     private readonly config: PublicServerConfig,
+    private readonly runs: ChatRunRegistry,
     private readonly keyring?: () => readonly string[] | undefined
   ) {}
 
-  static async start(deps: PublicServerDeps, options: PublicServerOptions = {}): Promise<PublicServer> {
+  static async start(given: PublicServerDeps, options: PublicServerOptions = {}): Promise<PublicServer> {
+    // The listener's own resumable runs: they stop with it, as every stream to it does.
+    const runs = given.runs ?? new ChatRunRegistry()
+    const deps: PublicServerDeps = { ...given, runs }
     const host = options.host ?? DEFAULT_PUBLIC_HOST
     const port = options.port ?? DEFAULT_PUBLIC_PORT
     // The OpenAPI document advertises the bound port, so the config is completed after listening.
@@ -312,7 +330,7 @@ export class PublicServer {
     }
     const address = server.address()
     if (typeof address === 'object' && address) config.port = address.port
-    return new PublicServer(server, config, deps.apiKeys)
+    return new PublicServer(server, config, runs, deps.apiKeys)
   }
 
   get host(): string {
@@ -343,6 +361,7 @@ export class PublicServer {
   }
 
   async close(): Promise<void> {
+    this.runs.close()
     this.server.closeAllConnections?.()
     await new Promise<void>((resolve) => this.server.close(() => resolve()))
   }

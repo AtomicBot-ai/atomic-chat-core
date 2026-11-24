@@ -29,6 +29,7 @@ import {
   serdeToString,
 } from '../shims/index.js'
 import type { JsonObject, JsonValue } from '../shims/index.js'
+import { RESUMABLE_REQUEST_HEADER } from '../../contracts/index.js'
 import { LOCAL_SEARCH_ORDER, resolveRemoteProvider, resolveSelectedRoute } from '../../router/index.js'
 import type { LocalProvider, RemoteProvider, SelectedRoute } from '../../router/index.js'
 import { captureReport, inferenceFailureReport } from '../../telemetry/index.js'
@@ -53,6 +54,7 @@ import {
 } from './errors.js'
 import { answer, clientGone, connectTimeoutMs, invalidJsonMessage } from './exchange.js'
 import { policyRefusal } from './policy.js'
+import { pendingRun, relayAsRun } from './runs.js'
 import { placedSystemMessages } from './system-messages.js'
 import { isLlamaCppServer, noThinkingTemplateKwargs } from './thinking.js'
 import { embeddingInputRefusal, messageRolesRefusal } from './validate.js'
@@ -319,12 +321,16 @@ export async function serveForward(ex: Exchange): Promise<void> {
         )
       : undefined
 
-  const signal = clientGone(ex)
+  // A resumable chat stream outlives its client once the engine answers; until then it is a request
+  // like any other, which the client leaving stops (ADR 2026-11-23-resumable-chat-completion-runs).
+  const resumable = pendingRun(ex, stream)
+  const signal = resumable?.signal ?? clientGone(ex)
   let response: UpstreamResponse
   try {
     response = await sendUpstream(url, {
       method: ex.method,
-      headers: outboundHeaders(ex, ['host', 'authorization'], backend, key),
+      // The opt-in is addressed to this core: an upstream that is another core must not keep a run too.
+      headers: outboundHeaders(ex, ['host', 'authorization', RESUMABLE_REQUEST_HEADER], backend, key),
       body: injected ?? rewritten ?? raw,
       connectTimeoutMs: connectTimeoutMs(ex),
       signal,
@@ -345,6 +351,7 @@ export async function serveForward(ex: Exchange): Promise<void> {
     await inspectFinish(ex, backend.session, modelId, raw, response)
     return
   }
+  if (resumable && (await relayAsRun(ex, response, resumable, injected !== undefined))) return
   await relayObserved(ex, response, injected !== undefined)
 }
 
