@@ -231,3 +231,115 @@ describe('MLX install probe bounded diagnostics', () => {
     expect(error.message).toBe('The downloaded mlx-server does not run on this Mac.')
   })
 })
+
+describe('LiteRT-LM host load bounded diagnostics', () => {
+  const load = { component: 'runtime', operation: 'load' } as const
+
+  it('tags the stopped-before-ready branch with a finite diagnostic code', () => {
+    const cause = Object.assign(new Error('spawn /private/fixture/litert-host ENOENT'), {
+      code: 'ENOENT',
+    })
+    const error = new AtomicCoreError(
+      'LITERT_LM_HOST_ERROR',
+      'The LiteRT-LM host stopped before the model was ready.',
+      '/private/fixture/litert-host: exit code 4',
+      { cause }
+    )
+    expect(diagnosticTags(error, classifyFailure(error, load))).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'runtime',
+      operation: 'load',
+      failure_category: 'unknown',
+      failure_reason: 'unknown',
+      cause_code: 'ENOENT',
+      diagnostic_code: 'LITERTLM_HOST_STOPPED_BEFORE_READY',
+      diagnostic_cause_code: 'ENOENT',
+    })
+    const tags = diagnosticTags(error, classifyFailure(error, load))
+    expect(JSON.stringify(tags)).not.toContain('/private')
+    expect(JSON.stringify(tags)).not.toContain('litert-host')
+    expect(error.toJSON()).toEqual({
+      code: 'LITERT_LM_HOST_ERROR',
+      message: 'The LiteRT-LM host stopped before the model was ready.',
+      details: '/private/fixture/litert-host: exit code 4',
+    })
+  })
+
+  it('tags the library load branch with a finite diagnostic code', () => {
+    const error = new AtomicCoreError(
+      'LITERT_LM_HOST_ERROR',
+      'The LiteRT-LM library does not load on this computer.',
+      '/private/fixture/litert-host: exit code 3'
+    )
+    expect(diagnosticTags(error, classifyFailure(error, load))).toMatchObject({
+      diagnostic_version: 'core-v1',
+      component: 'runtime',
+      operation: 'load',
+      failure_category: 'unknown',
+      failure_reason: 'unknown',
+      cause_code: 'LITERT_LM_HOST_ERROR',
+      diagnostic_code: 'LITERTLM_HOST_LIBRARY_LOAD_FAILED',
+    })
+    const tags = diagnosticTags(error, classifyFailure(error, load))
+    expect(tags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(tags)).not.toContain('/private')
+    expect(error.code).toBe('LITERT_LM_HOST_ERROR')
+    expect(error.message).toBe('The LiteRT-LM library does not load on this computer.')
+  })
+
+  it('leaves an unmapped LiteRT-LM message untagged and keeps its text private', () => {
+    const error = new AtomicCoreError(
+      'LITERT_LM_HOST_ERROR',
+      'The LiteRT-LM host answered with an unexpected document.',
+      '/private/fixture/model: exit code 5'
+    )
+    const tags = diagnosticTags(error, classifyFailure(error, load))
+    expect(tags['diagnostic_code']).toBeUndefined()
+    expect(JSON.stringify(tags)).not.toContain('/private')
+    expect(JSON.stringify(tags)).not.toContain('unexpected document')
+    expect(error.message).toBe('The LiteRT-LM host answered with an unexpected document.')
+  })
+
+  it('survives a hostile message getter and a cyclic cause chain without leaking text', () => {
+    const hostile = new Proxy(new Error('hostile /private/fixture'), {
+      getOwnPropertyDescriptor: () => {
+        throw new Error('hostile getter /private/fixture')
+      },
+    })
+    expect(() => diagnosticTags(hostile, classifyFailure(hostile, load))).not.toThrow()
+    const hostileTags = diagnosticTags(hostile, classifyFailure(hostile, load))
+    expect(JSON.stringify(hostileTags)).not.toContain('/private')
+
+    const cycleA = Object.assign(new Error('/private/fixture/cycle-a'), { code: 'PRIVATE_CODE' })
+    const cycleB = new Error('The LiteRT-LM host stopped before the model was ready.', {
+      cause: cycleA,
+    })
+    cycleA.cause = cycleB
+    const cycleTags = diagnosticTags(cycleA, classifyFailure(cycleA, load))
+    expect(cycleTags['diagnostic_cause_code']).toBeUndefined()
+    expect(JSON.stringify(cycleTags)).not.toContain('PRIVATE_CODE')
+    expect(JSON.stringify(cycleTags)).not.toContain('/private')
+  })
+
+  it('reports the failure as before with only finite tags added', () => {
+    const capture = vi.fn()
+    const observe = failureObserver({ capture })
+    const error = new AtomicCoreError(
+      'LITERT_LM_HOST_ERROR',
+      'The LiteRT-LM host stopped before the model was ready.',
+      '/private/fixture/litert-host: exit code 2'
+    )
+    observe(error, load)
+    expect(capture).toHaveBeenCalledTimes(1)
+    expect(capture).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: 'operation',
+        error,
+        level: 'error',
+      })
+    )
+    expect(error.code).toBe('LITERT_LM_HOST_ERROR')
+    expect(error.message).toBe('The LiteRT-LM host stopped before the model was ready.')
+    expect(error.details).toBe('/private/fixture/litert-host: exit code 2')
+  })
+})
