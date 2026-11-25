@@ -121,6 +121,8 @@ export interface LoadPlanDeps {
   ensureGemmaMtpDraft: (modelId: string) => Promise<void>
   checkDflashSupport: (modelId: string) => boolean
   ensureDflashDraft: (modelId: string) => Promise<void>
+  selectedDsparkPath?: (modelId: string) => Promise<string | undefined>
+  backendSupportsDsparkSpec?: (exePath: string, env: Record<string, string>) => Promise<boolean>
   backendSupportsDflashSpec: (exePath: string, env: Record<string, string>) => Promise<boolean>
   resolveLlama3TemplateOverride: (modelId: string, embedded: string | undefined) => string | undefined
   strictSystemGuardSignature?: string
@@ -344,6 +346,19 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
   if (input.provider === 'llamacpp') {
     cfg.mtp = false
     cfg.dflash = false
+  }
+
+  delete cfg.dspark_draft_path
+  if (input.provider === 'llamacpp-upstream' && !input.isEmbedding && !input.modelPath) {
+    const draft = await deps.selectedDsparkPath?.(modelId)
+    if (draft) {
+      if (!(await deps.backendSupportsDsparkSpec?.(exePath, env))) {
+        throw new Error('This llama.cpp build does not support draft-dspark. Update the upstream engine.')
+      }
+      cfg.dspark_draft_path = draft
+      cfg.dflash = false
+      cfg.mtp = false
+    }
   }
 
   // 13. Gemma MTP draft head
@@ -652,6 +667,7 @@ function isDefaultFitTarget(value: string): boolean {
 /** Every shard of the model plus any draft model: what fit measures as weights on the GPU. */
 async function gpuWeightsBytes(modelPath: string, cfg: LlamacppConfig, deps: LoadPlanDeps): Promise<number> {
   const files = parseGgufShard(modelPath) ? ggufShardSetPaths(modelPath) : [modelPath]
+  if (cfg.dspark_draft_path) files.push(cfg.dspark_draft_path)
   if (cfg.mtp_draft_path) files.push(cfg.mtp_draft_path)
   if (cfg.dflash_draft_path) files.push(cfg.dflash_draft_path)
   let total = 0

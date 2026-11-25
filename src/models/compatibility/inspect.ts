@@ -65,7 +65,13 @@ const REMOTE_GGUF_WHOLE_FILE_MAX_BYTES = 4 * 1024 * 1024
  */
 export async function inspectRemoteGguf(
   url: string,
-  options: { fetch: typeof fetch; token?: string; maxBytes?: number; timeoutMs?: number }
+  options: {
+    fetch: typeof fetch
+    token?: string
+    maxBytes?: number
+    timeoutMs?: number
+    streamPrefix?: boolean
+  }
 ): Promise<GgufEvidence> {
   const auth: Record<string, string> = options.token ? { authorization: `Bearer ${options.token}` } : {}
   const maxBytes = options.maxBytes ?? REMOTE_GGUF_MAX_BYTES
@@ -73,6 +79,43 @@ export async function inspectRemoteGguf(
   const deadline = new AbortController()
   const timer = timeoutMs === undefined ? undefined : setTimeout(() => deadline.abort(), timeoutMs)
   try {
+    if (options.streamPrefix) {
+      // A single bounded request avoids a fresh CDN redirect for every doubling on tokenized heads.
+      const response = await options.fetch(url, {
+        headers: { ...auth, Range: `bytes=0-${maxBytes - 1}` },
+        signal: deadline.signal,
+      })
+      const reader = response.body?.getReader()
+      if (!reader || !(response.status === 206 || response.status === 200)) {
+        await reader?.cancel()
+        throw new Error(`GGUF header request returned HTTP ${response.status}`)
+      }
+      let prefix = Buffer.alloc(0)
+      let used = 0
+      let leftover: Uint8Array | undefined
+      try {
+        const summary = await readGgufTensorSummaryChunked(
+          async (want) => {
+            const next = Buffer.allocUnsafe(want)
+            prefix.copy(next, 0, 0, used)
+            prefix = next
+            while (used < want) {
+              const chunk = leftover?.length ? leftover : (await reader.read()).value
+              if (!chunk?.length) break
+              const count = Math.min(chunk.length, want - used)
+              prefix.set(chunk.subarray(0, count), used)
+              used += count
+              leftover = chunk.subarray(count)
+            }
+            return prefix.subarray(0, used)
+          },
+          { chunkSize: Math.min(REMOTE_GGUF_FIRST_BYTES, maxBytes), maxBytes, growth: 'doubling' }
+        )
+        return evidenceFromSummary(summary)
+      } finally {
+        await reader.cancel().catch(() => {})
+      }
+    }
     const summary = await readGgufTensorSummaryChunked(
       async (byteLength) => {
         const response = await options.fetch(url, {

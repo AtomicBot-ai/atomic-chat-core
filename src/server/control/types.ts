@@ -1,5 +1,6 @@
 import type { StrataMaintenanceService, StrataPreparationService } from '../../runtime/strata/index.js'
 import type { FlmMaintenance } from '../../runtime/fastflowlm/index.js'
+import type { DrafterService } from '../../drafters/index.js'
 import type { PreparationCoordinator } from '../../runtime/fastflowlm/environment/index.js'
 /**
  * The control API's dependency surface: what the owner injects into the control server, and the
@@ -496,6 +497,10 @@ export interface ModelCompatibilityControl {
 }
 
 export interface ControlServerDeps {
+  drafters?: Pick<
+    DrafterService,
+    'list' | 'search' | 'variants' | 'install' | 'cancel' | 'remove' | 'selection' | 'choices' | 'select'
+  >
   strata?: {
     contextLimit: (id: string) => Promise<number>
     preparations: Pick<StrataPreparationService, 'store' | 'list' | 'get' | 'begin' | 'cancel' | 'resume'>

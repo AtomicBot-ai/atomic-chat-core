@@ -37,6 +37,7 @@ export interface GgufTensorTypeSummary {
 
 export interface GgufTensorSummary {
   version: number
+  hasDsparkHead?: true
   tensorCount: number
   /** Scalar metadata stringified (`String(value)`); arrays appear as `[array]`. */
   metadata: Record<string, string>
@@ -186,9 +187,11 @@ export function readGgufTensorSummary(
       ? alignmentRaw
       : DEFAULT_ALIGNMENT
 
+  const markov = new Set<string>()
   const infos: Array<{ type: number; elements: number; offset: number }> = []
   for (let i = 0; i < tensorCount; i++) {
-    c.string()
+    const name = c.string()
+    if (name === 'markov_w1.weight' || name === 'markov_w2.weight') markov.add(name)
     const dims = c.u32()
     if (dims < 1 || dims > MAX_GGUF_TENSOR_DIMS)
       throw new GgufParseError(`Tensor ${i} has ${dims} dimensions`)
@@ -229,7 +232,17 @@ export function readGgufTensorSummary(
     .map((t) => ({ ...t, bitsPerWeight: t.sizedElements > 0 ? (t.bytes * 8) / t.sizedElements : null }))
     .sort((a, b) => a.type - b.type)
 
-  return { version, tensorCount, metadata, alignment, dataOffset, types }
+  return {
+    version,
+    tensorCount,
+    metadata,
+    alignment,
+    dataOffset,
+    types,
+    ...(metadata['general.architecture'] === 'dflash' && markov.size === 2
+      ? { hasDsparkHead: true as const }
+      : {}),
+  }
 }
 
 /**

@@ -72,7 +72,7 @@ export const NON_TEXT_GGUF_ARCHITECTURES = new Set([
  * Architectures that exist only as a speculative-decoding draft: the file is a drafter for one main
  * model (`--spec-type draft-dspark`) and carries no tokenizer of its own (Bonsai-27B-dspark).
  */
-export const DRAFT_ONLY_GGUF_ARCHITECTURES = new Set(['dspark'])
+export const DRAFT_ONLY_GGUF_ARCHITECTURES = new Set(['dspark', 'dflash'])
 
 /** `tokenizer.ggml.model` values llama.cpp loads as no vocabulary at all (`LLAMA_VOCAB_TYPE_NONE`). */
 export const NO_TOKENIZER_MODELS = new Set(['none', 'no_vocab'])

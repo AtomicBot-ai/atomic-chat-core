@@ -420,10 +420,11 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
       String(cfg.dflash_n_max > 0 ? cfg.dflash_n_max : 15)
     )
   }
-  if (cfg.dflash && cfg.mtp) {
+  const selectedDspark = input.provider === 'llamacpp-upstream' && !input.isEmbedding && cfg.dspark_draft_path
+  if (!selectedDspark && cfg.dflash && cfg.mtp) {
     warnings.push('Both MTP and DFlash are enabled; applying DFlash only')
     addDflash()
-  } else {
+  } else if (!selectedDspark) {
     addMtp()
     addDflash()
   }
@@ -520,6 +521,8 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
   } catch (error) {
     warnings.push(`Ignoring invalid extra llama-server arguments: ${(error as Error).message}`)
   }
+
+  if (selectedDspark) push('--model-draft', selectedDspark, '--spec-type', 'draft-dspark')
 
   // A config field that arrives as null/undefined would otherwise reach the process as the string
   // "null"; Rust's types made that impossible, so the port checks it explicitly.

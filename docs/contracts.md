@@ -400,3 +400,18 @@ A scoped process journal retains GPU and build ownership until the owner and
 its descendants are confirmed gone. Process-ledger recovery requires the
 bundled Atomic owner contract version 3. Hardware and live qualification
 remain tracked in OpenSpec.
+
+## Desktop DSpark drafters
+
+The authenticated control API serves upstream GGUF drafters independently of chat models.
+
+| Method and path under /atomic/v1 | Result |
+| --- | --- |
+| GET /drafters/search | Curated and installed artifacts. Optional `source` is the conversion repository, `target` the exact checkpoint, `q` the text filter. Set `live=1` to include Hugging Face. Discovery uses zero-based `page` and returns `hasMore`. Searches scoped to one model return every verified matching GGUF variant on each page. A row with `moreVariants` offers additional files. Request `variants=<repository>&target=<checkpoint>` to inspect those files and return their GGUF variants. |
+| GET /drafters | Installed files and the downloader's active progress. |
+| POST /drafters/:sha256/install or /cancel | Install an artifact returned by discovery or cancel its transfer. Install returns after validation. |
+| DELETE /drafters/:sha256 | Detach the artifact from its model installations and remove it. |
+| GET or PUT /models/llamacpp-upstream/*modelId/drafter | Read the compatible installed files and selection, or set it with `{"id":"<sha256>"}` or `{"id":null}`. |
+| GET /models/llamacpp-upstream/*modelId/drafter/selection | Read just the selected ID for chat routing. |
+
+The data folder holds `llamacpp/drafters/<sha256>.gguf` and its inventory in `llamacpp/drafters/index.json`. Each model installation can contain `upstream-drafter.json` with its selected content ID and target-file identity. Legacy installations default to no DSpark selection.
