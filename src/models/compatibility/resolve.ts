@@ -20,12 +20,14 @@ export const Q2_0_G64_MIN_BITS_PER_WEIGHT = 2.1875
 export const FIRST_NON_STOCK_GGML_TYPE = 41
 
 export interface GgufEvidence {
+  hasDsparkHead?: true
   tensorTypes: Array<{ type: number; bitsPerWeight: number | null }>
   metadataKeys: string[]
 }
 
 export function evidenceFromSummary(summary: GgufTensorSummary): GgufEvidence {
   return {
+    ...(summary.hasDsparkHead ? { hasDsparkHead: true as const } : {}),
     tensorTypes: summary.types.map((t) => ({ type: t.type, bitsPerWeight: t.bitsPerWeight })),
     metadataKeys: Object.keys(summary.metadata),
   }

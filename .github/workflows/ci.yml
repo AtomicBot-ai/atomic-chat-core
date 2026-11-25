@@ -7,6 +7,11 @@ on:
   # No schedule: the live suites run when someone dispatches this workflow, against the newest
   # llama.cpp build (a nightly nobody watched stayed red for weeks).
   workflow_dispatch:
+    inputs:
+      dspark:
+        description: 'Exercise DSpark with the pinned Qwen3-4B pair on each native runner (3 GB)'
+        type: boolean
+        default: false
   # `release.yml` runs these same gates before it publishes anything.
   workflow_call:
     inputs:
@@ -159,6 +164,23 @@ jobs:
           export ATOMIC_LIVE_UPSTREAM_TAG="$(cat "$RUNNER_TEMP/live/tag.txt")"
           export ATOMIC_LIVE_REPORT_DIR="$RUNNER_TEMP/live-report"
           npx vitest run --project live
+      - name: Verify DSpark switching on llama.cpp b12722
+        if: ${{ inputs.dspark }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ATOMIC_LIVE: '1'
+          ATOMIC_LIVE_UPSTREAM_TAG: b12722
+        run: |
+          fixtures="$RUNNER_TEMP/dspark"
+          node scripts/fetch-live-fixtures.mjs --out "$fixtures" --tag b12722 --skip-model
+          repo=https://huggingface.co/ggml-org/spec-for-testing-GGUF/resolve/a0736c8e98d3fe580352dacffa3fbd5e9c22a437
+          export ATOMIC_LIVE_UPSTREAM_BIN="$(cat "$fixtures/bin-path.txt")"
+          export ATOMIC_LIVE_UPSTREAM_MODEL="$fixtures/Qwen3-4B-Q4_K_M.gguf"
+          export ATOMIC_LIVE_DSPARK_HEAD="$fixtures/dspark-Qwen3-4B-Q4_K_M.gguf"
+          curl --fail --location --retry 3 "$repo/Qwen3-4B-Q4_K_M.gguf" -o "$ATOMIC_LIVE_UPSTREAM_MODEL"
+          curl --fail --location --retry 3 "$repo/dspark-Qwen3-4B-Q4_K_M.gguf" -o "$ATOMIC_LIVE_DSPARK_HEAD"
+          npx vitest run --project live test/live/dspark.test.ts
       # What the contract probe (test/live/llamacpp-contract.test.ts) saw on this OS, drift included.
       - uses: actions/upload-artifact@v4
         if: always()

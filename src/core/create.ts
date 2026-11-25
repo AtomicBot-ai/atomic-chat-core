@@ -5,6 +5,14 @@
  */
 
 import { lstat } from 'node:fs/promises'
+import catalogBaseline from '../client/model-catalog-baseline.json' with { type: 'json' }
+import {
+  DrafterService,
+  curatedDrafters,
+  catalogCheckpointSources,
+  catalogCheckpointFiles,
+} from '../drafters/index.js'
+import { loadHostModelCatalog } from '../models/index.js'
 import { wireStrata } from './strata.js'
 import {
   FastFlowLmRuntime,
@@ -289,10 +297,22 @@ export async function createAtomicCore(
     const cudaGuard = new CudaRuntimeGuard({ platform, env, log })
     // The three llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
+    const drafters = new DrafterService(
+      layout.root,
+      registries.get(LOCAL_PROVIDER) as ModelRegistry,
+      downloader,
+      options.fetch ?? fetch,
+      curatedDrafters(catalogBaseline),
+      async (id, rollback) => upstreamRuntime.recreateSession(id, rollback),
+      async () => curatedDrafters(await loadHostModelCatalog(options.env, options.fetch)),
+      catalogCheckpointSources(catalogBaseline),
+      catalogCheckpointFiles(catalogBaseline)
+    )
     const llamacppRuntime = (provider: LlamacppProviderId) =>
       new LlamacppRuntime({
         layout,
         registry: registries.get(provider) as ModelRegistry,
+        selectedDsparkPath: (id) => drafters.resolve(id),
         instanceId: lock.instanceId,
         provider,
         journal,
@@ -343,9 +363,10 @@ export async function createAtomicCore(
         ...(options.backendOutput ? { backendOutput: options.backendOutput } : {}),
       })
     // The managed engines this core can run (change `add-vllm-runtime`, design D3).
+    const upstreamRuntime: LlamacppRuntime = llamacppRuntime('llamacpp-upstream')
     const managedEngines = managedEngineRegistry()
     const runtimes = new Map<LocalProviderId, LocalRuntime>([
-      [LOCAL_PROVIDER, llamacppRuntime('llamacpp-upstream')],
+      [LOCAL_PROVIDER, upstreamRuntime],
       ['llamacpp', llamacppRuntime('llamacpp')],
       ['atomic-prism', llamacppRuntime('atomic-prism')],
     ])
@@ -1255,6 +1276,7 @@ export async function createAtomicCore(
         version: CORE_VERSION,
         ownerScope: scope,
         dataFolder: layout.root,
+        drafters,
         environments: managed.service,
         environmentsSnapshot: managed.environments,
         environmentOperations: managed.operations,

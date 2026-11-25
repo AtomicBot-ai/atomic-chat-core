@@ -199,7 +199,7 @@ describe('standaloneGgufRefusal', () => {
   ])('%j → %j', (metadata, expected) => expect(standaloneGgufRefusal(metadata)).toEqual(expected))
 
   it('names the draft architecture and the no-vocabulary tokenizer values llama.cpp knows', () => {
-    expect([...DRAFT_ONLY_GGUF_ARCHITECTURES]).toEqual(['dspark'])
+    expect([...DRAFT_ONLY_GGUF_ARCHITECTURES]).toEqual(['dspark', 'dflash'])
     expect([...NO_TOKENIZER_MODELS].sort()).toEqual(['no_vocab', 'none'])
   })
 })

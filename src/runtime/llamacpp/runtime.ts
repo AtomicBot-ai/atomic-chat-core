@@ -128,6 +128,7 @@ export interface LoadOptions {
 }
 
 export interface LlamacppRuntimeOptions {
+  selectedDsparkPath?: (modelId: string) => Promise<string | undefined>
   layout: DataLayout
   registry: ModelRegistry
   /** Owner instance that will be recorded as the parent of every spawned process. */
@@ -638,6 +639,9 @@ export class LlamacppRuntime implements LocalRuntime {
       ensureGemmaMtpDraft: this.options.ensureGemmaMtpDraft ?? draftDownloadUnavailable,
       checkDflashSupport,
       ensureDflashDraft: this.options.ensureDflashDraft ?? draftDownloadUnavailable,
+      ...(this.options.selectedDsparkPath ? { selectedDsparkPath: this.options.selectedDsparkPath } : {}),
+      backendSupportsDsparkSpec: (exePath, env) =>
+        checkSpecTypeSupport(exePath, 'draft-dspark', env, dirname(exePath)),
       backendSupportsDflashSpec: (exePath, env) =>
         checkSpecTypeSupport(exePath, DFLASH_SPEC_TYPE, env, dirname(exePath)),
       resolveLlama3TemplateOverride: (modelId, embedded) =>
@@ -918,10 +922,22 @@ export class LlamacppRuntime implements LocalRuntime {
    * an out-of-memory failure more likely. As with `autoIncreaseCtx`, a failed unload does not stop
    * the reload.
    */
-  async recreateSession(modelId: string): Promise<RecreateResult> {
+  async recreateSession(modelId: string, rollback?: () => Promise<void>): Promise<RecreateResult> {
     this.assertRunning()
+    if (rollback) await this.loading.get(modelId)
     const session = this.sessions.get(modelId)
     if (!session) return { ok: false, reason: 'not-loaded' }
+    if (rollback) {
+      const response = await this.fetchImpl(`http://127.0.0.1:${session.plan.port}/slots`, {
+        headers: { Authorization: 'Bearer ' + session.plan.apiKey },
+        signal: AbortSignal.timeout(3000),
+      })
+      if (response.ok) {
+        const slots = (await response.json()) as Array<{ is_processing?: boolean }>
+        if (Array.isArray(slots) && slots.some((slot) => slot.is_processing))
+          throw new AtomicCoreError('JOB_BUSY', 'Wait for the current response before changing the drafter.')
+      }
+    }
     const ctxLen = this.getCtxSize(modelId)
     const unloaded = await this.unloadSession(modelId)
     if (!unloaded.success)
@@ -931,11 +947,20 @@ export class LlamacppRuntime implements LocalRuntime {
       })
     // The model's own settings (its `fit_ctx` under fit, its layers) survive the restart.
     const overrides = { ...session.overrides, ...(ctxLen !== undefined ? { ctx_size: ctxLen } : {}) }
-    const info = await this.load(modelId, {
-      ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
-      bypassAutoUnload: true,
-    })
-    return { ok: true, session: info }
+    const reload = () =>
+      this.load(modelId, {
+        ...(Object.keys(overrides).length > 0 ? { overrides } : {}),
+        bypassAutoUnload: true,
+      })
+    try {
+      return { ok: true, session: await reload() }
+    } catch (error) {
+      if (rollback) {
+        await rollback()
+        await reload()
+      }
+      throw error
+    }
   }
 
   private unloadSession(modelId: string): Promise<UnloadResult> {

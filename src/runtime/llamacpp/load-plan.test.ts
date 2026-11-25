@@ -1064,3 +1064,26 @@ describe('planLlamaLoad — the context plan as the default window', () => {
     expect(plan.contextPlan).toBeUndefined()
   })
 })
+
+describe('installed DSpark head', () => {
+  it('uses the prepared head in place of other modes only on upstream', async () => {
+    const support = vi.fn(async () => true)
+    const data = {
+      ...deps(),
+      selectedDsparkPath: async () => '/data/drafters/head.gguf',
+      backendSupportsDsparkSpec: support,
+    }
+    const plan = await planLlamaLoad(input({ dflash: true, mtp: true }), data)
+    expect(plan.config).toMatchObject({
+      dflash: false,
+      mtp: false,
+      dspark_draft_path: '/data/drafters/head.gguf',
+    })
+    const fork = await planLlamaLoad({ ...input(), provider: 'llamacpp' }, data)
+    expect(fork.config.dspark_draft_path).toBeUndefined()
+    expect(support).toHaveBeenCalledTimes(1)
+    await expect(
+      planLlamaLoad(input(), { ...data, backendSupportsDsparkSpec: async () => false })
+    ).rejects.toThrow(/Update the upstream engine/)
+  })
+})

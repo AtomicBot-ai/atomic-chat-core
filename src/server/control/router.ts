@@ -1,3 +1,4 @@
+import { registerDrafterRoutes } from './routes/drafters.js'
 import { registerStrataRoutes } from './routes/strata.js'
 /**
  * Composes the control route table from its families. Registration order is the matching order
@@ -74,6 +75,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerClientRoutes(router, deps, ctx)
   registerFastFlowLmRoutes(router, deps, ctx)
   registerStrataRoutes(router, deps, ctx)
+  registerDrafterRoutes(router, deps, ctx)
   registerModelRoutes(router, deps, ctx)
   registerModelCompatibilityRoutes(router, deps, ctx)
   registerBackendRoutes(router, deps, ctx)
