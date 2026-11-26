@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 /**
  * Hand-ported from the `#[test]` table of `args.rs` in `tauri-plugin-atomic-diffusion` (app commit
  * `767ff6350`); see ADR 2026-09-17-pin-the-diffusion-port-with-hand-ported-tables-and-a-live-test.
@@ -103,7 +104,8 @@ describe('buildServerArgs', () => {
     expect(idx('--vae-format')).toBeLessThan(idx('--listen-ip'))
     expect(valueAfter(args, '--listen-ip')).toBe('127.0.0.1')
     expect(valueAfter(args, '--listen-port')).toBe('4242')
-    for (const flag of ['--lora-model-dir', '--hires-upscalers-dir', '--embd-dir'])
+    expect(valueAfter(args, '--lora-model-dir')).toBe(join('/s', '..', 'loras'))
+    for (const flag of ['--hires-upscalers-dir', '--embd-dir'])
       expect(valueAfter(args, flag), flag).toBe('/s')
     expect(args).toContain('-v')
   })

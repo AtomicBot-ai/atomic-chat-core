@@ -1,3 +1,4 @@
+import type { LoraService } from '../../drafters/lora-service.js'
 import type { StrataMaintenanceService, StrataPreparationService } from '../../runtime/strata/index.js'
 import type { FlmMaintenance } from '../../runtime/fastflowlm/index.js'
 import type { DrafterService } from '../../drafters/index.js'
@@ -497,6 +498,7 @@ export interface ModelCompatibilityControl {
 }
 
 export interface ControlServerDeps {
+  loras?: Pick<LoraService, 'list' | 'search' | 'choices' | 'select' | 'install' | 'cancel' | 'remove'>
   drafters?: Pick<
     DrafterService,
     'list' | 'search' | 'variants' | 'install' | 'cancel' | 'remove' | 'selection' | 'choices' | 'select'

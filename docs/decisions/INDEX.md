@@ -11,6 +11,8 @@ add a new one that says which record it supersedes.
 
 ## Records
 
+- **2026-11-26** — [Bind LoRA adapters to local model installations](2026-11-26-model-lora-selection.md)
+
 - [Prepare text-only DeepSeek on Metal](2026-11-19-strata-metal-deepseek-text.md)
 
 - [Use the GGUF context limit for manual Strata loads](2026-11-19-strata-gguf-context-limit.md)

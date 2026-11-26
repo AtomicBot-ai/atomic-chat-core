@@ -1,3 +1,4 @@
+import { registerLoraRoutes } from './routes/loras.js'
 import { registerDrafterRoutes } from './routes/drafters.js'
 import { registerStrataRoutes } from './routes/strata.js'
 /**
@@ -75,6 +76,7 @@ export function buildRouter(deps: ControlServerDeps, self: () => ControlServer |
   registerClientRoutes(router, deps, ctx)
   registerFastFlowLmRoutes(router, deps, ctx)
   registerStrataRoutes(router, deps, ctx)
+  registerLoraRoutes(router, deps, ctx)
   registerDrafterRoutes(router, deps, ctx)
   registerModelRoutes(router, deps, ctx)
   registerModelCompatibilityRoutes(router, deps, ctx)

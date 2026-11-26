@@ -7,6 +7,7 @@
  * (and in `required-flags.txt`); the live test holds the binary's `--help` to the flags of its build.
  */
 
+import { join } from 'node:path'
 import type {
   DiffusionBackend,
   DiffusionFamilyDefaults,
@@ -195,7 +196,8 @@ export function buildServerArgs(
   for (const [flag, value] of optional) if (value) args.push(flag, value)
   if (files.vaeFormat) args.push('--vae-format', files.vaeFormat)
   args.push('--listen-ip', '127.0.0.1', '--listen-port', String(port))
-  for (const flag of ['--lora-model-dir', '--hires-upscalers-dir', '--embd-dir']) args.push(flag, scratchDir)
+  args.push('--lora-model-dir', join(scratchDir, '..', 'loras'))
+  for (const flag of ['--hires-upscalers-dir', '--embd-dir']) args.push(flag, scratchDir)
   if (spec.threads !== undefined) args.push('--threads', String(spec.threads))
   args.push(
     ...offloadFlags(spec.offload),

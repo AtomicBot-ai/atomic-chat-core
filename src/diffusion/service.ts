@@ -1,3 +1,4 @@
+import type { LoraLease } from '../drafters/lora-service.js'
 import type { FailureObserver } from '../contracts/index.js'
 /**
  * The image-generation service: the twenty operations of the app's `DiffusionService`, one method
@@ -92,6 +93,7 @@ import { historyMultiplier, VideoHistory } from './video-history.js'
 import { VIDEO_JOB_KIND } from './video-job.js'
 
 export interface DiffusionServiceDeps {
+  acquireLora?: (mode: 'image' | 'video', model: string) => Promise<LoraLease | undefined>
   onFailure?: FailureObserver
 
   paths: DiffusionPaths
@@ -206,6 +208,7 @@ export class DiffusionService {
             : {}),
         }))
     this.deps = {
+      ...(options.acquireLora ? { acquireLora: options.acquireLora } : {}),
       ...(options.onFailure ? { onFailure: options.onFailure } : {}),
       state: this.state,
       emit: options.emit,

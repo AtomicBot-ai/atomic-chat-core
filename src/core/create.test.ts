@@ -1412,6 +1412,99 @@ describe('the embedding model through the owner', () => {
   })
 })
 
+describe('LoRA checkpoint discovery through the owner', () => {
+  it('returns the source adapter before global search and retains it when the feed is offline', async () => {
+    const source = 'publisher/flux-GGUF'
+    const target = 'black-forest-labs/FLUX.2-klein-4B'
+    const revision = 'a'.repeat(40)
+    const adapter = buildGguf({
+      metadata: { 'general.type': 'adapter', 'adapter.type': 'lora' },
+      tensors: [],
+    })
+    let feeds = 0
+    let probes = 0
+    const core = await createCore({
+      fetch: async (input) => {
+        const url = String(input)
+        if (url.includes('/api/models/' + source + '?'))
+          return Response.json({
+            id: source,
+            sha: revision,
+            tags: ['base_model:quantized:' + target],
+            cardData: { base_model: target },
+            siblings: [
+              { rfilename: 'bundle/adapter.gguf', lfs: { sha256: '9'.repeat(64), size: adapter.length } },
+            ],
+          })
+        if (url.includes('/resolve/' + revision)) {
+          probes++
+          return new Response(new Uint8Array(adapter))
+        }
+        if (url.includes('/api/models?')) feeds++
+        throw new Error('offline')
+      },
+    })
+    const url = core.control.url + '/atomic/v1/loras/search?live=1&source=' + source
+    const headers = { authorization: 'Bearer ' + core.controlToken }
+    const search = async (suffix: string) =>
+      (await (await fetch(url + suffix, { headers })).json()) as {
+        results: { repo: string }[]
+        target: string
+        partial: boolean
+      }
+    const direct = await search('&scope=repo')
+    expect(direct.results[0]?.repo).toBe(source)
+    expect(direct.target).toBe(target)
+    expect(feeds).toBe(0)
+    const full = await search('')
+    expect(full.results[0]?.repo).toBe(source)
+    expect(full.results.some((r) => r.repo !== source)).toBe(true)
+    expect(full.partial).toBe(true)
+    expect(feeds).toBe(1)
+    expect(probes).toBe(1)
+  })
+
+  it('resolves an unlisted conversion before returning patches for its declared base model', async () => {
+    const target = 'black-forest-labs/FLUX.2-klein-4B'
+    const core = await createCore({
+      fetch: async (url) => {
+        if (String(url).includes('/api/models/author/converted?'))
+          return Response.json({ id: 'author/converted', tags: ['base_model:quantized:' + target] })
+        return Response.json([])
+      },
+    })
+    const path = core.control.url + '/atomic/v1/loras/search?source='
+    const options = { headers: { authorization: 'Bearer ' + core.controlToken } }
+    expect((await fetch(path + '../invalid', options)).status).toBe(400)
+    const first = await fetch(path + 'author/converted', options)
+    expect(await first.json()).toMatchObject({ target: 'author/converted', results: [] })
+    const live = await fetch(path + 'author/converted&live=1', options)
+    const result = (await live.json()) as { target: string; results: { target: string }[] }
+    expect(result.target).toBe(target)
+    expect(result.results.length).toBeGreaterThan(0)
+    expect(new Set(result.results.map((row) => row.target))).toEqual(new Set([target]))
+    const cached = await fetch(path + 'author/converted', options)
+    expect(await cached.json()).toMatchObject({ target, results: result.results })
+  })
+
+  it('derives the base of a quantized media model from its declared provenance and respects the mode', async () => {
+    const core = await createCore({
+      fetch: async () => Response.json({ tags: ['base_model:quantized:black-forest-labs/FLUX.1-schnell'] }),
+    })
+    const choices = (mode: string) =>
+      fetch(core.control.url + '/atomic/v1/loras/choices/' + mode + '/flux.1:q4_k_m', {
+        headers: { authorization: 'Bearer ' + core.controlToken },
+      }).then((r) => r.json())
+    expect(await choices('image')).toEqual({
+      source: 'unsloth/FLUX.1-schnell-GGUF',
+      target: 'black-forest-labs/FLUX.1-schnell',
+      adapterId: null,
+      files: [],
+    })
+    expect(await choices('video')).toEqual({ adapterId: null, files: [] })
+  })
+})
+
 describe('remote media through the owner', () => {
   it('answers the catalog and a registered provider’s models over control', async () => {
     const fake = (async (input: string | URL | Request) => {

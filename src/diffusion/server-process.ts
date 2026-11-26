@@ -115,6 +115,8 @@ export function parseCapabilities(body: unknown): ServerCapabilities {
   const capabilities: ServerCapabilities = {
     cancelGenerating: byMode('features_by_mode', 'img_gen')?.['cancel_generating'] === true,
   }
+  if (byMode('features_by_mode', 'img_gen')?.['lora'] === true) capabilities.imageLora = true
+  if (byMode('features_by_mode', 'vid_gen')?.['lora'] === true) capabilities.videoLora = true
   const defaults = byMode('defaults_by_mode', 'img_gen')
   if (defaults !== undefined) capabilities.imgGenDefaults = defaults
   const modes = root['supported_modes']
@@ -187,6 +189,9 @@ async function spawnServerOnce(
     throw diffusionError('ENGINE_MISSING', 'The image engine is not installed.', `missing binary: ${exe}`)
   await mkdir(scratchDir, { recursive: true }).catch((error: unknown) => {
     throw ioError('Could not create the scratch directory.', error)
+  })
+  await mkdir(join(scratchDir, '..', 'loras'), { recursive: true }).catch((error: unknown) => {
+    throw ioError('Could not create the LoRA directory.', error)
   })
   const port = await (deps.freePort ?? (() => randomFreePort([])))().catch((error: unknown) => {
     throw diffusionError(

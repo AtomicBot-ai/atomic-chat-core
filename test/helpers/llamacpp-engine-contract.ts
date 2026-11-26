@@ -124,6 +124,7 @@ const VARIANTS: { [K in keyof LlamacppConfig]: ReadonlyArray<LlamacppConfig[K]> 
   reasoning_budget: [-1, 8192, 0],
   mtp: [false, true],
   mtp_draft_path: ['', '/mtp-draft.gguf'],
+  lora_path: ['', '/adapter.gguf'],
   dflash: [false, true],
   dflash_draft_path: ['/dflash-draft.gguf', ''],
   dflash_spec_supported: [true, false],

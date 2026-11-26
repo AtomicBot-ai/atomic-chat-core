@@ -1,3 +1,4 @@
+import type { LoraLease } from '../drafters/lora-service.js'
 /**
  * Jobs: validate, submit to `sd-server`, poll, save, and the cancel path. Shared by the control
  * routes and the OpenAI facades, so every caller gets the same validation, events, gallery and idle
@@ -70,6 +71,7 @@ export const DEFAULT_JOB_TIMINGS: JobTimings = {
 }
 
 export interface JobDeps extends SessionDeps {
+  acquireLora?: (mode: 'image' | 'video', model: string) => Promise<LoraLease | undefined>
   http: SdHttpClient
   gallery: Gallery
   videoGallery: VideoGallery
@@ -195,6 +197,13 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
   const plan = await kind.prepare?.(deps, request, spec)
   current()
 
+  const lora = await deps.acquireLora?.(kind.modality, spec.modelId)
+  try {
+    current()
+  } catch (error) {
+    lora?.release()
+    throw error
+  }
   const id = randomUUID().replaceAll('-', '')
   state.activeJobId = id
   state.clearIdle()
@@ -209,28 +218,30 @@ export async function startJob<Req, Job extends JobCommon<Item, Progress>, Item,
   state.insertJob(record)
   emitJob(deps, id)
 
-  const done = execute(deps, kind, id, request, record.cancel, spec).then(
-    (outcome): JobResult<Job> => {
-      finishJob(deps, id, { ok: true, outputs: outcome.job.outputs })
-      if (state.activeJobId === id) state.activeJobId = undefined
-      state.touchIdle()
-      const job = (state.anyJob(id) as Job | undefined) ?? outcome.job
-      return { ok: true, outcome: { job, images: outcome.images } }
-    },
-    (raw: unknown): JobResult<Job> => {
-      deps.onFailure?.(raw, { component: 'diffusion', operation: 'job' })
-      const error = errorBody(raw)
-      finishJob(deps, id, { ok: false, error })
-      if (state.activeJobId === id) state.activeJobId = undefined
-      state.touchIdle()
-      if (error.code !== 'CANCELLED') {
-        const payload = { ...error, jobId: id }
-        deps.emit('diffusion:error', payload)
+  const done = execute(deps, kind, id, request, record.cancel, spec, lora?.file)
+    .finally(() => lora?.release())
+    .then(
+      (outcome): JobResult<Job> => {
+        finishJob(deps, id, { ok: true, outputs: outcome.job.outputs })
+        if (state.activeJobId === id) state.activeJobId = undefined
+        state.touchIdle()
+        const job = (state.anyJob(id) as Job | undefined) ?? outcome.job
+        return { ok: true, outcome: { job, images: outcome.images } }
+      },
+      (raw: unknown): JobResult<Job> => {
+        deps.onFailure?.(raw, { component: 'diffusion', operation: 'job' })
+        const error = errorBody(raw)
+        finishJob(deps, id, { ok: false, error })
+        if (state.activeJobId === id) state.activeJobId = undefined
+        state.touchIdle()
+        if (error.code !== 'CANCELLED') {
+          const payload = { ...error, jobId: id }
+          deps.emit('diffusion:error', payload)
+        }
+        // The record is authoritative: a cancel that raced the runner may already have marked it.
+        return { ok: false, error: state.anyJob(id)?.error ?? error }
       }
-      // The record is authoritative: a cancel that raced the runner may already have marked it.
-      return { ok: false, error: state.anyJob(id)?.error ?? error }
-    }
-  )
+    )
   return { id, done }
 }
 
@@ -329,7 +340,8 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
   id: string,
   request: Req,
   cancel: CancelFlag,
-  spec: ServerSpec
+  spec: ServerSpec,
+  loraFile?: string
 ): Promise<JobOutcome<Job>> {
   const current = () => {
     if (cancel.requested || deps.state.closing || deps.state.spec !== spec || deps.state.activeJobId !== id)
@@ -349,6 +361,12 @@ async function execute<Req, Job extends JobCommon<Item, Progress>, Item, Progres
     const view = await ensureSession(deps, cancel)
     kind.preflight?.(deps.state.session?.server.capabilities)
     const body = kind.buildBody(request, view.spec, seed, inputs, record)
+    if (loraFile) {
+      const caps = deps.state.session?.server.capabilities
+      if (!(kind.modality === 'video' ? caps?.videoLora : caps?.imageLora))
+        throw diffusionError('MODEL_INCOMPATIBLE', 'This engine build does not support LoRA in this mode.')
+      body.lora = [{ path: loraFile, multiplier: 1 }]
+    }
     const attempt = await runAttempt(deps, kind, id, request, view, body, seed, cancel, started, model)
     if (attempt.kind === 'done') return attempt.outcome
     if (attempt.kind === 'retry-with-offload') {

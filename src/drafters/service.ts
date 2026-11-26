@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { FifoLock } from '../runtime/shared/fifo-lock.js'
+import { rm, stat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { optionalJson, save } from './storage.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { Downloader } from '../downloads/index.js'
 import { sha256File } from '../downloads/index.js'
@@ -8,24 +9,6 @@ import { hfResolveUrl, inspectLocalGguf, readGgufMetadataFromFile } from '../mod
 import type { ModelRegistry } from '../models/index.js'
 import { DrafterDiscovery, fileId, repoId, type CheckpointFile, type Drafter } from './catalog.js'
 
-async function optionalJson<T>(path: string): Promise<T | undefined> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as T
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw e
-  }
-}
-async function save(path: string, value: unknown) {
-  await mkdir(dirname(path), { recursive: true })
-  const temporary = path + '.' + randomUUID() + '.tmp'
-  try {
-    await writeFile(temporary, JSON.stringify(value))
-    await rename(temporary, path)
-  } finally {
-    await rm(temporary, { force: true })
-  }
-}
 interface Inventory {
   files: Drafter[]
 }
@@ -39,10 +22,10 @@ type Restart = (model: string, rollback: () => Promise<void>) => Promise<unknown
 
 export class DrafterService {
   private readonly entries = new Map<string, Drafter>()
+  private readonly publications = new Map<string, Drafter>()
   private readonly transfers = new Map<string, Promise<void>>()
   private readonly verified = new Map<string, string>()
   private readonly discovery: DrafterDiscovery
-  private tail: Promise<unknown> = Promise.resolve()
   constructor(
     private root: string,
     private registry: ModelRegistry,
@@ -52,7 +35,8 @@ export class DrafterService {
     private restart: Restart,
     private remoteCatalog?: () => Promise<Drafter[]>,
     private knownSources = new Map<string, string>(),
-    private checkpointFiles: CheckpointFile[] = []
+    private checkpointFiles: CheckpointFile[] = [],
+    private mutations = new FifoLock()
   ) {
     this.discovery = new DrafterDiscovery(request, (row) => this.remember([row]))
     this.discovery.trust(curated)
@@ -60,16 +44,15 @@ export class DrafterService {
   }
   remember(rows: Drafter[]) {
     for (const row of rows) {
+      this.publications.set(row.repo.toLowerCase() + ':' + row.sha256 + ':' + row.target.toLowerCase(), row)
       const stored = this.entries.get(row.sha256)
       if (!stored) this.entries.set(row.sha256, row)
-      else if (row.moreVariants && row.repo === stored.repo && row.target === stored.target)
+      else if (row.target.toLowerCase() !== stored.target.toLowerCase()) {
+        const compatibleTargets = [...new Set([...(stored.compatibleTargets ?? []), row.target])]
+        this.entries.set(row.sha256, { ...stored, compatibleTargets })
+      } else if (row.moreVariants && row.repo === stored.repo)
         this.entries.set(row.sha256, { ...stored, moreVariants: true })
     }
-  }
-  private exclusive<T>(fn: () => Promise<T>) {
-    const result = this.tail.then(fn, fn)
-    this.tail = result.catch(() => {})
-    return result
   }
   private get index() {
     return join(this.root, 'llamacpp', 'drafters', 'index.json')
@@ -119,12 +102,12 @@ export class DrafterService {
         this.refreshAt = Date.now() + 60_000
       }
     }
-    let rows = [...this.entries.values()]
+    let rows = [...this.publications.values()]
     if (live) {
       try {
-        const found = await this.discovery.search(target, source, query, page)
+        const found = await this.discovery.search(target, source ?? target, query, page)
         this.remember(found.results)
-        rows = [...this.entries.values()]
+        rows = [...this.publications.values()]
         partial ||= found.partial
         hasMore = found.hasMore
       } catch {
@@ -138,7 +121,12 @@ export class DrafterService {
         (!target || d.target.toLowerCase() === target.toLowerCase()) &&
         terms.every((term) => [d.target, d.repo, d.file, d.quant].join(' ').toLowerCase().includes(term))
     )
-    return { target, partial, hasMore, results: [...new Map(filtered.map((d) => [d.sha256, d])).values()] }
+    const preferredRepo = (source ?? target)?.toLowerCase()
+    const preferred = (d: Drafter) => Number(d.repo.toLowerCase() === preferredRepo)
+    filtered.sort((a, b) => preferred(b) - preferred(a))
+    const unique = new Map<string, Drafter>()
+    for (const row of filtered) if (!unique.has(row.sha256)) unique.set(row.sha256, row)
+    return { target, partial, hasMore, results: [...unique.values()] }
   }
   async variants(repo: string, target: string) {
     return this.discovery.variants(repo, target)
@@ -176,7 +164,7 @@ export class DrafterService {
         'MODEL_FILE_CORRUPT',
         'The downloaded GGUF does not contain a DSpark Markov head.'
       )
-    await this.exclusive(async () => {
+    await this.mutations.run(async () => {
       const files = await this.inventory()
       await save(this.index, { files: [...files.filter((f) => f.sha256 !== row.sha256), row] })
     })
@@ -225,7 +213,7 @@ export class DrafterService {
       size: info.size,
     }
   }
-  private async identity(model: string) {
+  private async identity(model: string, cache = true) {
     const ctx = await this.context(model)
     if (ctx.binding?.target) return { ...ctx, target: ctx.binding.target, source: ctx.binding.source }
     const known = this.curated.find((d) => d.targetSha256 && d.targetSha256 === ctx.yml.model_sha256)
@@ -259,16 +247,28 @@ export class DrafterService {
         this.knownSources.get(source.toLowerCase()) ??
         (await this.discovery.checkpoint(source).catch(() => undefined))
     if (target && source) this.knownSources.set(source.toLowerCase(), target)
-    if (target)
+    if (target && cache)
       await save(ctx.settings, { id: ctx.binding?.id ?? null, signature: ctx.signature, target, source })
     return { ...ctx, target, source }
   }
+  async checkpoint(model: string, previous?: { target: string; signature: string }) {
+    if (previous && (await this.context(model)).signature === previous.signature) return previous
+    const { target, source, signature } = await this.identity(model, false)
+    return { target: target ?? source, source, signature }
+  }
+  private supports(row: Drafter, target?: string) {
+    const known = this.entries.get(row.sha256)
+    return [
+      row.target,
+      ...(row.compatibleTargets ?? []),
+      known?.target,
+      ...(known?.compatibleTargets ?? []),
+    ].some((candidate) => !!candidate && candidate.toLowerCase() === target?.toLowerCase())
+  }
   async choices(model: string) {
-    return this.exclusive(async () => {
+    return this.mutations.run(async () => {
       const ctx = await this.identity(model)
-      const files = (await this.inventory()).filter(
-        (d) => d.target.toLowerCase() === ctx.target?.toLowerCase()
-      )
+      const files = (await this.inventory()).filter((d) => this.supports(d, ctx.target))
       return { target: ctx.target, source: ctx.source, id: ctx.binding?.id ?? null, files }
     })
   }
@@ -279,7 +279,7 @@ export class DrafterService {
     const ctx = await this.context(model)
     if (!ctx.binding?.id) return undefined
     const row = (await this.inventory()).find(
-      (f) => f.sha256 === binding.id && f.target.toLowerCase() === binding.target?.toLowerCase()
+      (f) => f.sha256 === binding.id && this.supports(f, binding.target)
     )
     if (!row)
       throw new AtomicCoreError(
@@ -298,20 +298,23 @@ export class DrafterService {
     return path
   }
   async select(model: string, id: string | null) {
-    return this.exclusive(() => this.change(model, id))
+    return this.mutations.run(() => this.change(model, id))
   }
   private async change(model: string, id: string | null) {
     const ctx =
       id === null
         ? { ...(await this.context(model)), target: undefined, source: undefined }
         : await this.identity(model)
-    if (
-      id !== null &&
-      !(await this.inventory()).some(
-        (d) => d.sha256 === id && d.target.toLowerCase() === ctx.target?.toLowerCase()
-      )
-    )
-      throw new AtomicCoreError('INVALID_ARGUMENT', 'This drafter is not installed for this checkpoint.')
+    if (id !== null) {
+      const files = await this.inventory()
+      const row = files.find((d) => d.sha256 === id)
+      if (!row || !ctx.target || !this.supports(row, ctx.target))
+        throw new AtomicCoreError('INVALID_ARGUMENT', 'This drafter is not installed for this checkpoint.')
+      if (row.target !== ctx.target && !row.compatibleTargets?.includes(ctx.target)) {
+        row.compatibleTargets = [...(row.compatibleTargets ?? []), ctx.target]
+        await save(this.index, { files })
+      }
+    }
     const old = ctx.binding ?? { id: null, target: ctx.target, source: ctx.source, signature: ctx.signature }
     if (old.id === id) return
     await save(ctx.settings, { ...old, id })
@@ -325,7 +328,7 @@ export class DrafterService {
     }
   }
   async remove(id: string) {
-    return this.exclusive(async () => {
+    return this.mutations.run(async () => {
       const path = this.path(id)
       if (this.transfers.has(id)) throw new AtomicCoreError('JOB_BUSY', 'Wait for the download to finish.')
       for (const entry of await this.registry.list()) {

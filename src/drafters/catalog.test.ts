@@ -95,3 +95,46 @@ describe('Hugging Face DSpark evidence', () => {
     expect((await discovery.search('other/Inkling-2-Mini', repo)).results).toEqual([])
   })
 })
+
+it('checks a pinned model repo before feeds and only returns its documented, verified head', async () => {
+  const source = 'publisher/baked-GGUF'
+  const revision = 'a'.repeat(40)
+  const file = buildGguf({
+    metadata: { 'general.architecture': 'dflash' },
+    tensors: ['markov_w1.weight', 'markov_w2.weight'].map((name) => ({
+      name,
+      type: 0,
+      dims: [2],
+      bitsPerWeight: 32,
+    })),
+  })
+  const inspected: string[] = []
+  const request = async (input: Parameters<typeof fetch>[0]) => {
+    const url = String(input)
+    inspected.push(url)
+    if (url.includes('/api/models?')) throw new Error('feed offline')
+    if (url.includes('/api/models/'))
+      return Response.json({
+        sha: revision,
+        cardData: { base_model: 'org/original' },
+        siblings: ['base.gguf', 'heads/dspark-Q8_0.gguf', 'other/dspark-Q8_0.gguf', 'README.md'].map(
+          (rfilename, i) => ({
+            rfilename,
+            size: file.length,
+            lfs: { sha256: String(i).repeat(64) },
+          })
+        ),
+      })
+    if (url.endsWith('/README.md'))
+      return new Response('llama-server -m ./base.gguf --model-draft ./heads/dspark-Q8_0.gguf')
+    return new Response(new Uint8Array(file))
+  }
+  const result = await new DrafterDiscovery(request).search(source, source)
+  expect(result.results.map((r) => [r.repo, r.file, r.target])).toEqual([
+    [source, 'heads/dspark-Q8_0.gguf', source],
+  ])
+  expect(result.partial).toBe(true)
+  expect(
+    inspected.findIndex((url) => url.endsWith('/resolve/' + revision + '/heads/dspark-Q8_0.gguf'))
+  ).toBeLessThan(inspected.findIndex((url) => url.includes('/api/models?')))
+})
