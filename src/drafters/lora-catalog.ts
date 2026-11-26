@@ -1,6 +1,6 @@
 import { hfResolveUrl, readGgufMetadataChunked } from '../models/index.js'
 import type { AtomicModelCatalog } from '../client/index.js'
-import { fileId, repoId } from './catalog.js'
+import { catalogCheckpointSources, fileId, repoId } from './catalog.js'
 
 export type LoraMode = 'chat' | 'image' | 'video'
 export function isLoraMode(value: unknown): value is LoraMode {
@@ -58,7 +58,14 @@ export function catalogLoras(catalog: Pick<AtomicModelCatalog, 'models'>) {
       }
     }
   }
-  return { files, families }
+  const sources = catalogCheckpointSources(catalog)
+  for (const [key, target] of families) {
+    const family = key.slice(key.indexOf(':') + 1)
+    const transformer = catalog.models['diffusion:' + family]?.definition.transformer as
+      { repo?: string } | undefined
+    if (repoId(transformer?.repo)) sources.set(transformer.repo.toLowerCase(), target)
+  }
+  return { files, families, sources }
 }
 interface Publication {
   id: string

@@ -1413,6 +1413,29 @@ describe('the embedding model through the owner', () => {
 })
 
 describe('LoRA checkpoint discovery through the owner', () => {
+  it('resolves an unlisted conversion before returning patches for its declared base model', async () => {
+    const target = 'black-forest-labs/FLUX.2-klein-4B'
+    const core = await createCore({
+      fetch: async (url) => {
+        if (String(url).includes('/api/models/author/converted?'))
+          return Response.json({ tags: ['base_model:quantized:' + target] })
+        return Response.json([])
+      },
+    })
+    const path = core.control.url + '/atomic/v1/loras/search?source='
+    const options = { headers: { authorization: 'Bearer ' + core.controlToken } }
+    expect((await fetch(path + '../invalid', options)).status).toBe(400)
+    const first = await fetch(path + 'author/converted', options)
+    expect(await first.json()).toMatchObject({ target: 'author/converted', results: [] })
+    const live = await fetch(path + 'author/converted&live=1', options)
+    const result = (await live.json()) as { target: string; results: { target: string }[] }
+    expect(result.target).toBe(target)
+    expect(result.results.length).toBeGreaterThan(0)
+    expect(new Set(result.results.map((row) => row.target))).toEqual(new Set([target]))
+    const cached = await fetch(path + 'author/converted', options)
+    expect(await cached.json()).toMatchObject({ target, results: result.results })
+  })
+
   it('derives the base of a quantized media model from its declared provenance and respects the mode', async () => {
     const core = await createCore({
       fetch: async () => Response.json({ tags: ['base_model:quantized:black-forest-labs/FLUX.1-schnell'] }),

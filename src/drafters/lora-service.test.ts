@@ -20,7 +20,11 @@ it('restores a failed reload, persists one binding per installation and clears i
       sha256: createHash('sha256').update(bytes).digest('hex'),
       size: bytes.length,
     }
-    const catalog = { files: [row], families: new Map<string, string>() }
+    const catalog = {
+      files: [row],
+      families: new Map<string, string>(),
+      sources: new Map([['quant/base-gguf', row.target]]),
+    }
     const fetcher = vi.fn(
       async () => new Response(new Uint8Array(bytes), { headers: { 'content-length': String(bytes.length) } })
     )
@@ -44,6 +48,14 @@ it('restores a failed reload, persists one binding per installation and clears i
         async () => undefined
       )
     const first = service()
+    expect(await first.search('', undefined, false, 'Quant/Base-GGUF')).toMatchObject({
+      target: row.target,
+      results: [row],
+    })
+    expect(await first.search('', undefined, false, 'other/model')).toMatchObject({
+      target: 'other/model',
+      results: [],
+    })
     await first.install(row.sha256)
     expect(await first.choices('chat', 'A')).toMatchObject({ adapterId: null, files: [row] })
     await expect(first.select('chat', 'B', row.sha256)).rejects.toThrow('installed adapter')

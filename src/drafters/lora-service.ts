@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import { sha256File, type Downloader } from '../downloads/index.js'
 import { hfResolveUrl, readGgufMetadataFromFile } from '../models/index.js'
-import { fileId } from './catalog.js'
+import { DrafterDiscovery, fileId } from './catalog.js'
 import { optionalJson, save } from './storage.js'
 import {
   hasLoraTensors,
@@ -95,20 +95,34 @@ export class LoraService {
       downloads: this.downloader.snapshot().filter((d) => d.taskId.startsWith('lora:')),
     }
   }
-  async search(q: string, target?: string, live = false) {
+  async search(q: string, target?: string, live = false, source?: string) {
     let partial = false
-    if (live) {
-      if (Date.now() >= this.refreshAt) {
-        this.refreshAt = Date.now() + 3600000
+    if (live && Date.now() >= this.refreshAt) {
+      this.refreshAt = Date.now() + 3600000
+      try {
+        const update = await this.refresh()
+        this.remember(update.files)
+        for (const [k, v] of update.sources) this.catalog.sources.set(k, v)
+        for (const [k, v] of update.families) this.catalog.families.set(k, v)
+      } catch {
+        this.refreshAt = Date.now() + 60000
+        partial = true
+      }
+    }
+    if (source && !target) {
+      const key = source.toLowerCase()
+      target = this.catalog.sources.get(key)
+      if (!target && live) {
         try {
-          const update = await this.refresh()
-          this.remember(update.files)
-          for (const [k, v] of update.families) this.catalog.families.set(k, v)
+          target = await new DrafterDiscovery(this.request).checkpoint(source)
+          if (target) this.catalog.sources.set(key, target)
         } catch {
-          this.refreshAt = Date.now() + 60000
           partial = true
         }
       }
+      target ??= source
+    }
+    if (live) {
       try {
         const found = await discoverLoras(this.request, q, target)
         this.remember(found.results)
@@ -121,6 +135,7 @@ export class LoraService {
     const words = q.toLowerCase().trim().split(/\s+/)
     return {
       partial,
+      target,
       results: [...this.entries.values()].filter(
         (row) =>
           (!target || target.toLowerCase() === row.target.toLowerCase()) &&

@@ -2,7 +2,10 @@ import { expect, it, vi } from 'vitest'
 import { catalogLoras, discoverLoras, hasLoraTensors } from './lora-catalog.js'
 import catalog from '../client/model-catalog-baseline.json' with { type: 'json' }
 it('projects only supported adapters with pinned provenance and exact target families', () => {
-  const { files, families } = catalogLoras(catalog)
+  const { files, families, sources } = catalogLoras(catalog)
+  expect(sources.get('atomicchat/qwen3.8-27b-gguf')).toBe('Qwen/Qwen3.8-27B')
+  expect(sources.get('unsloth/wan2.2-ti2v-5b-gguf')).toBe('Wan-AI/Wan2.2-TI2V-5B')
+  expect(sources.get('unsloth/flux.2-klein-4b-gguf')).toBe('black-forest-labs/FLUX.2-klein-4B')
   expect(new Set(files.map((f) => f.mode))).toEqual(new Set(['chat', 'image', 'video']))
   expect(families.get('video:wan2.2-ti2v-5b')).toBe('Wan-AI/Wan2.2-TI2V-5B')
   expect(

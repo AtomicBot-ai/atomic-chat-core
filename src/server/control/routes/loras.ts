@@ -10,8 +10,14 @@ export function registerLoraRoutes(router: Router, deps: ControlServerDeps, { p 
   router.get(p('/loras/search'), async (req, res) => {
     const params = queryOf(req)
     const target = params.get('target') ?? undefined
+    const source = params.get('source') ?? undefined
+    if (source && !repoId(source)) throw new AtomicCoreError('INVALID_ARGUMENT', 'Invalid source repository.')
     if (target && !repoId(target)) throw new AtomicCoreError('INVALID_ARGUMENT', 'Invalid target checkpoint.')
-    sendJson(res, 200, await service.search(params.get('q') ?? '', target, params.get('live') === '1'))
+    sendJson(
+      res,
+      200,
+      await service.search(params.get('q') ?? '', target, params.get('live') === '1', source)
+    )
   })
   router.post(p('/loras/:id/install'), async (_req, res, { params }) => {
     await service.install(params.id!)
