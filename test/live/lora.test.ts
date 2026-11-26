@@ -2,7 +2,6 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { decodePng } from '../../src/diffusion/png.js'
 import { sha256File } from '../../src/downloads/index.js'
-import { openAsBlob } from 'node:fs'
 import { cp, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expect, it } from 'vitest'
@@ -13,6 +12,12 @@ import { makeTmpDataFolder } from '../helpers/tmp-data-folder.js'
 import { installUpstreamPack, liveUpstreamTag } from '../helpers/live-llamacpp.js'
 import type { LoraArtifact } from '../../src/drafters/lora-catalog.js'
 
+// Run with ATOMIC_LIVE=1 and ATOMIC_LIVE_LORA_CHAT, IMAGE or VIDEO
+// (each value is the catalog SHA-256 or a local reference file to hash).
+// The owner downloads the pinned adapter into a fresh data directory. Chat uses
+// ATOMIC_LIVE_UPSTREAM_BIN and ATOMIC_LIVE_UPSTREAM_MODEL; ATOMIC_LIVE_LORA_DSPARK
+// optionally selects a second verified download. Media uses the SD engine and
+// component paths below. The video comparison needs ffmpeg on PATH.
 const env = process.env
 for (const mode of ['chat', 'image', 'video'] as const) {
   const adapter = env['ATOMIC_LIVE_LORA_' + mode.toUpperCase()]
@@ -22,32 +27,13 @@ for (const mode of ['chat', 'image', 'video'] as const) {
       const data = await makeTmpDataFolder('atomic-lora-live-')
       let core: AtomicCore | undefined
       try {
-        const blob = await openAsBlob(adapter!)
-        const draft =
-          mode === 'chat' && env.ATOMIC_LIVE_LORA_DSPARK
-            ? await openAsBlob(env.ATOMIC_LIVE_LORA_DSPARK)
-            : undefined
-        core = await AtomicCore.create({
-          dataFolder: data.root,
-          controlPort: 0,
-          telemetry: false,
-          fetch: async (url, init) => {
-            if (draft && /dspark[^/]*\.gguf$/i.test(String(url)))
-              return new Response(init?.method === 'HEAD' ? null : draft, {
-                headers: { 'content-length': String(draft.size) },
-              })
-            if (String(url).includes('/resolve/') && /\.(gguf|safetensors)$/.test(String(url)))
-              return new Response(init?.method === 'HEAD' ? null : blob, {
-                headers: { 'content-length': String(blob.size) },
-              })
-            return fetch(url, init)
-          },
-        })
+        const draft = mode === 'chat' ? env.ATOMIC_LIVE_LORA_DSPARK : undefined
+        core = await AtomicCore.create({ dataFolder: data.root, controlPort: 0, telemetry: false })
         const host = core
         const client = new CoreClient({ baseUrl: host.control.url, token: host.controlToken })
         const call = <T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET', body?: unknown) =>
           client.request<T>(method, path, body)
-        const digest = await sha256File(adapter!)
+        const digest = /^[a-f0-9]{64}$/.test(adapter!) ? adapter : await sha256File(adapter!)
         const family = mode === 'video' ? 'wan2.2-ti2v-5b' : 'flux.2-klein'
         const model = mode === 'chat' ? 'live' : family + ':live'
         const row = (await call<{ results: LoraArtifact[] }>('/loras/search')).results.find(
@@ -72,11 +58,12 @@ for (const mode of ['chat', 'image', 'video'] as const) {
               '\n'
           )
           if (draft) {
+            const draftId = /^[a-f0-9]{64}$/.test(draft) ? draft : await sha256File(draft)
             const drafter = (
               await call<{ results: LoraArtifact[] }>(
                 '/drafters/search?target=' + encodeURIComponent(row.target)
               )
-            ).results[0]!
+            ).results.find((entry) => entry.sha256 === draftId)!
             await call('/drafters/' + drafter.sha256 + '/install', 'POST')
             await call('/models/llamacpp-upstream/live/drafter', 'PUT', { id: drafter.sha256 })
           }
