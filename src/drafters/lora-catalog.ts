@@ -75,9 +75,9 @@ export function hasLoraTensors(header: unknown) {
     typeof header === 'object' &&
     Object.keys(header).some(
       (name) =>
-        // sd-server accepts the converted FLUX block names. PEFT's base_model wrapper
-        // leaves these weights unmatched even though generation itself succeeds.
-        !/^base_model\.model\.(?:double|single)_blocks\./.test(name) &&
+        // These unconverted PEFT names leave tensors unmatched in sd-server, even when generation succeeds.
+        !name.startsWith('base_model.model.') &&
+        !/\.lora_[AB]\.default\.weight$/i.test(name) &&
         /(?:^|[._])lora[._](?:up|down|a|b)(?:[._]|$)/i.test(name)
     )
   )
@@ -120,9 +120,10 @@ async function hasRemoteWeights(request: typeof fetch, row: LoraArtifact) {
   return hasLoraTensors(JSON.parse(data.toString('utf8', 8, size + 8)))
 }
 export async function discoverLoras(request: typeof fetch, query: string, target?: string) {
-  const params = new URLSearchParams({ filter: 'lora', limit: '24', full: 'true', cardData: 'true' })
+  const params = new URLSearchParams({ limit: '24', full: 'true', cardData: 'true' })
   if (query.trim()) params.set('search', query.trim())
-  if (target) params.append('filter', 'base_model:adapter:' + target)
+  if (target) params.set('filter', 'base_model:adapter:' + target)
+  else if (!query.trim()) params.set('filter', 'lora')
   const get = async (url: string) => {
     const response = await request(url, { signal: AbortSignal.timeout(12000) })
     if (!response.ok) throw new Error('Hugging Face returned ' + response.status)

@@ -43,5 +43,7 @@ it('discovers a pinned media adapter only for its declared base model', async ()
 
 it('only offers FLUX LoRA blocks that the media backend can address', () => {
   expect(hasLoraTensors({ 'base_model.model.double_blocks.0.img_attn.proj.lora_A.weight': {} })).toBe(false)
+  expect(hasLoraTensors({ 'blocks.0.cross_attn.k.lora_A.default.weight': {} })).toBe(false)
+  expect(hasLoraTensors({ 'diffusion_model.blocks.0.cross_attn.k.lora_A.weight': {} })).toBe(true)
   expect(hasLoraTensors({ 'diffusion_model.double_blocks.0.img_attn.proj.lora_A.weight': {} })).toBe(true)
 })
