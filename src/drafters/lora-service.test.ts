@@ -23,6 +23,7 @@ it('restores a failed reload, persists one binding per installation and clears i
     const catalog = {
       files: [row],
       families: new Map<string, string>(),
+      familyRepos: new Map<string, string>(),
       sources: new Map([['quant/base-gguf', row.target]]),
     }
     const fetcher = vi.fn(

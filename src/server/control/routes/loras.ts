@@ -16,7 +16,13 @@ export function registerLoraRoutes(router: Router, deps: ControlServerDeps, { p 
     sendJson(
       res,
       200,
-      await service.search(params.get('q') ?? '', target, params.get('live') === '1', source)
+      await service.search(
+        params.get('q') ?? '',
+        target,
+        params.get('live') === '1',
+        source,
+        params.get('scope') === 'repo'
+      )
     )
   })
   router.post(p('/loras/:id/install'), async (_req, res, { params }) => {

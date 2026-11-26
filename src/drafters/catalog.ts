@@ -9,6 +9,7 @@ export interface Drafter {
   file: string
   size: number
   quant: string
+  compatibleTargets?: string[]
   moreVariants?: boolean
   targetSize?: number
   targetSha256?: string
@@ -98,6 +99,7 @@ export function catalogCheckpointFiles(catalog: Pick<AtomicModelCatalog, 'models
   })
 }
 const draftName = /dspark/i
+const bundledDraftName = /dspark|drafter/i
 const ggufFile = /\.gguf(?:_file)?$/i
 const normalized = (name: string) => name.toLowerCase().replace(/[^a-z0-9]/g, '')
 function onlyRepoId(value: unknown): string | undefined {
@@ -162,6 +164,28 @@ export class DrafterDiscovery {
     const targets = [...new Set(links.map((m) => m[1]).filter(repoId))]
     return targets.length === 1 ? targets[0] : undefined
   }
+  /** A pinned usage example can explicitly pair a co-published head with a baked model,
+   * even when the repository is a derivative rather than a straight quantization. */
+  private async bundledPairs(repo: string, info: Publication, heads: string[]) {
+    const paired = new Set<string>()
+    const response = await this.request(hfResolveUrl(repo, 'README.md', info.sha), {
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!response.ok) return paired
+    const bases = (info.siblings ?? [])
+      .map((f) => f.rfilename)
+      .filter((f) => ggufFile.test(f) && !bundledDraftName.test(f) && !/(?:lora|mmproj)/i.test(f))
+    const matches = (path: string, file: string) => path === file || path.endsWith('/' + file)
+    const card = (await response.text()).replace(/\\\r?\n/g, ' ')
+    for (const line of card.split(/\r?\n/)) {
+      const model = line.match(/(?:^|\s)(?:-m|--model)\s+["']?([^\s"']+)/)?.[1]
+      const draft = line.match(/(?:^|\s)(?:-md|--model-draft)\s+["']?([^\s"']+)/)?.[1]
+      if (model && draft && bases.some((file) => matches(model, file))) {
+        for (const file of heads) if (matches(draft, file)) paired.add(file)
+      }
+    }
+    return paired
+  }
   private isHead(d: Drafter) {
     const cached = this.heads.get(d.sha256)
     if (cached) return cached
@@ -190,7 +214,7 @@ export class DrafterDiscovery {
     let partial = false
     const dedicated = draftName.test(repo)
     const files = (info.siblings ?? []).filter(
-      (f) => ggufFile.test(f.rfilename) && (dedicated || draftName.test(f.rfilename))
+      (f) => ggufFile.test(f.rfilename) && (dedicated || bundledDraftName.test(f.rfilename))
     )
     if (!files.length || !/^[a-f0-9]{40}$/.test(info.sha)) return { results, partial }
     const origin = quantizedFrom(info.tags) ?? (dedicated ? onlyRepoId(info.cardData?.base_model) : undefined)
@@ -201,12 +225,31 @@ export class DrafterDiscovery {
         () => undefined
       )
     }
+    let pairs = new Set<string>()
+    if (
+      !dedicated &&
+      !declared &&
+      !info.cardData?.dspark_targets &&
+      info.siblings?.some((file) => file.rfilename === 'README.md') &&
+      files.some((file) => !origin || !matchesCheckpoint(file.rfilename, origin))
+    ) {
+      try {
+        pairs = await this.bundledPairs(
+          repo,
+          info,
+          files.map((f) => f.rfilename)
+        )
+      } catch {
+        partial = true
+      }
+    }
     const candidates: Drafter[] = []
     for (const f of files) {
       const targetId =
         info.cardData?.dspark_targets?.[f.rfilename] ??
         declared ??
-        (origin && !draftName.test(origin) && matchesCheckpoint(f.rfilename, origin) ? origin : undefined)
+        (origin && !draftName.test(origin) && matchesCheckpoint(f.rfilename, origin) ? origin : undefined) ??
+        (pairs.has(f.rfilename) ? (origin ?? repo) : undefined)
       if (!repoId(targetId) || (target && target.toLowerCase() !== targetId.toLowerCase())) continue
       const row = {
         repo,
@@ -305,10 +348,14 @@ export class DrafterDiscovery {
     const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean)
     const term =
       target?.split('/')[1] ?? words.find((w) => !/^(?:dspark|gguf|i?q\d[\w]*|bf16|f16|f32)$/i.test(w))
+    const direct =
+      source && !page
+        ? await this.cachedRepo(source, target, !target, query).catch(() => ({ results: [], partial: true }))
+        : { results: [], partial: false }
     const feeds = [this.feed('gguf', 'dspark'), this.feed('gguf,dspark')]
     if (term) feeds.unshift(this.feed('gguf', term, !!target))
     const lists = await Promise.allSettled(feeds)
-    let partial = lists.some((v) => v.status === 'rejected')
+    let partial = direct.partial || lists.some((v) => v.status === 'rejected')
     // Interleave ranked feeds so co-published heads appear alongside dedicated repositories on page one.
     const ranked = lists.flatMap((v) => (v.status === 'fulfilled' ? [v.value] : []))
     const ids: string[] = []
@@ -319,7 +366,7 @@ export class DrafterDiscovery {
         if (repoId(id)) ids.push(id)
       }
     const matching = (id: string) => !term || normalized(id).includes(normalized(term))
-    const repos = [...new Set([...(source ? [source] : []), ...ids.filter(matching)])]
+    const repos = [...new Set(ids.filter((id) => matching(id) && id.toLowerCase() !== source?.toLowerCase()))]
     // A model-scoped page inspects all matching files per repository, up to three at a time.
     const n = target ? 3 : 10
     const batch = repos.slice(page * n, (page + 1) * n)
@@ -334,6 +381,6 @@ export class DrafterDiscovery {
       partial ||= v.value.partial
       return v.value.results
     })
-    return { results, partial, hasMore: repos.length > (page + 1) * n }
+    return { results: [...direct.results, ...results], partial, hasMore: repos.length > (page + 1) * n }
   }
 }

@@ -1,6 +1,6 @@
 import { hfResolveUrl, readGgufMetadataChunked } from '../models/index.js'
 import type { AtomicModelCatalog } from '../client/index.js'
-import { catalogCheckpointSources, fileId, repoId } from './catalog.js'
+import { catalogCheckpointSources, fileId, quantizedFrom, repoId } from './catalog.js'
 
 export type LoraMode = 'chat' | 'image' | 'video'
 export function isLoraMode(value: unknown): value is LoraMode {
@@ -59,13 +59,18 @@ export function catalogLoras(catalog: Pick<AtomicModelCatalog, 'models'>) {
     }
   }
   const sources = catalogCheckpointSources(catalog)
-  for (const [key, target] of families) {
-    const family = key.slice(key.indexOf(':') + 1)
-    const transformer = catalog.models['diffusion:' + family]?.definition.transformer as
-      { repo?: string } | undefined
-    if (repoId(transformer?.repo)) sources.set(transformer.repo.toLowerCase(), target)
+  const familyRepos = new Map<string, string>()
+  for (const [key, entry] of Object.entries(catalog.models)) {
+    if (entry.kind !== 'diffusion' || !key.startsWith('diffusion:')) continue
+    const repo = (entry.definition.transformer as { repo?: unknown } | undefined)?.repo
+    if (repoId(repo)) {
+      const family = entry.definition.modality + ':' + key.slice('diffusion:'.length)
+      familyRepos.set(family, repo)
+      const target = families.get(family)
+      if (target) sources.set(repo.toLowerCase(), target)
+    }
   }
-  return { files, families, sources }
+  return { files, families, sources, familyRepos }
 }
 interface Publication {
   id: string
@@ -89,7 +94,10 @@ export function hasLoraTensors(header: unknown) {
     )
   )
 }
-async function hasRemoteWeights(request: typeof fetch, row: LoraArtifact) {
+async function adapterMetadata(
+  request: typeof fetch,
+  row: Omit<LoraArtifact, 'target'>
+): Promise<{ base?: string } | undefined> {
   const url = hfResolveUrl(row.repo, row.file, row.revision)
   const signal = AbortSignal.timeout(10000)
   const prefix = async (want: number) => {
@@ -116,63 +124,121 @@ async function hasRemoteWeights(request: typeof fetch, row: LoraArtifact) {
     return bytes.subarray(0, offset)
   }
   if (row.mode === 'chat') {
-    const { metadata } = await readGgufMetadataChunked(prefix, { maxBytes: maxHeader })
-    return metadata['general.type'] === 'adapter' && metadata['adapter.type'] === 'lora'
+    const { metadata } = await readGgufMetadataChunked(prefix, { chunkSize: 65536, maxBytes: maxHeader })
+    if (metadata['general.type'] !== 'adapter' || metadata['adapter.type'] !== 'lora') return
+    const base = metadata['general.base_model.0.repo_url']
+      ?.replace(/^https:\/\/huggingface\.co\//, '')
+      .replace(/\/$/, '')
+    return repoId(base) ? { base } : {}
   }
   const first = await prefix(16384)
-  if (first.length < 8) return false
+  if (first.length < 8) return
   const size = Number(first.readBigUInt64LE())
-  if (size < 2 || size > maxHeader || size + 8 > row.size) return false
+  if (size < 2 || size > maxHeader || size + 8 > row.size) return
   const data = first.length >= size + 8 ? first : await prefix(size + 8)
-  return hasLoraTensors(JSON.parse(data.toString('utf8', 8, size + 8)))
+  return hasLoraTensors(JSON.parse(data.toString('utf8', 8, size + 8))) ? {} : undefined
 }
-export async function discoverLoras(request: typeof fetch, query: string, target?: string) {
+async function publicationJson<T>(request: typeof fetch, url: string): Promise<T> {
+  const response = await request(url, { signal: AbortSignal.timeout(12000) })
+  if (!response.ok) throw new Error('Hugging Face returned ' + response.status)
+  return (await response.json()) as T
+}
+
+async function publicationLoras(
+  request: typeof fetch,
+  publication: Publication,
+  target?: string,
+  bundled = false
+) {
+  const results: LoraArtifact[] = []
+  let partial = false
+  const base = publication.cardData?.base_model
+  const checkpoint = Array.isArray(base) && base.length === 1 ? base[0] : base
+  if (!repoId(publication.id) || !/^[a-f0-9]{40}$/.test(publication.sha)) return { results, partial }
+  if (!bundled && (!repoId(checkpoint) || (target && checkpoint.toLowerCase() !== target.toLowerCase())))
+    return { results, partial }
+  const tags = [publication.pipeline_tag, ...(publication.tags ?? [])]
+  const mode = tags.some((t) => t === 'text-to-video' || t === 'image-to-video')
+    ? 'video'
+    : tags.some((t) => t === 'text-to-image' || t === 'image-to-image')
+      ? 'image'
+      : 'chat'
+  for (const file of publication.siblings ?? []) {
+    if (!file.lfs) continue
+    const path = file.rfilename
+    const config = path.replace(/[^/]+$/, 'adapter_config.json')
+    const hasConfig = bundled && publication.siblings?.some((s) => s.rfilename === config)
+    if (bundled && !hasConfig && !/lora|adapter/i.test(path)) continue
+    const row = { mode, repo: publication.id, revision: publication.sha, file: path, ...file.lfs } as const
+    // Validate paths and digests before constructing a resolve URL.
+    if (!valid({ ...row, target: publication.id })) continue
+    try {
+      const metadata = await adapterMetadata(request, row)
+      if (!metadata) continue
+      const configBase =
+        hasConfig && !metadata.base
+          ? (
+              await publicationJson<{ base_model_name_or_path?: string }>(
+                request,
+                hfResolveUrl(row.repo, config, row.revision)
+              )
+            ).base_model_name_or_path
+          : undefined
+      const base = metadata.base ?? configBase ?? checkpoint
+      if (repoId(base) && (!target || target.toLowerCase() === base.toLowerCase()))
+        results.push({ ...row, target: base })
+    } catch {
+      partial = true
+    }
+  }
+  return { results, partial }
+}
+
+/** The blobs and commit in a single HF response identify immutable files. */
+export async function bundledLoras(request: typeof fetch, source: string) {
+  const publication = await publicationJson<Publication>(
+    request,
+    'https://huggingface.co/api/models/' + source + '?blobs=true'
+  )
+  const origin = quantizedFrom(publication.tags)
+  if (publication.id?.toLowerCase() !== source.toLowerCase()) return { origin, results: [], partial: true }
+  return { origin, ...(await publicationLoras(request, publication, undefined, true)) }
+}
+
+export async function discoverLoras(
+  request: typeof fetch,
+  query: string,
+  target?: string,
+  skipRepo?: string
+) {
   const params = new URLSearchParams({ limit: '24', full: 'true', cardData: 'true' })
   if (query.trim()) params.set('search', query.trim())
   if (target) params.set('filter', 'base_model:adapter:' + target)
   else if (!query.trim()) params.set('filter', 'lora')
-  const get = async (url: string) => {
-    const response = await request(url, { signal: AbortSignal.timeout(12000) })
-    if (!response.ok) throw new Error('Hugging Face returned ' + response.status)
-    return response.json()
-  }
-  const repos = (await get('https://huggingface.co/api/models?' + params)) as Publication[]
+  const repos = await publicationJson<Publication[]>(request, 'https://huggingface.co/api/models?' + params)
   const results: LoraArtifact[] = []
   let partial = false
   for (let offset = 0; offset < repos.length; offset += 6) {
     await Promise.all(
       repos.slice(offset, offset + 6).map(async (item) => {
-        if (!repoId(item.id) || !/^[a-f0-9]{40}$/.test(item.sha)) return
+        if (
+          !repoId(item.id) ||
+          !/^[a-f0-9]{40}$/.test(item.sha) ||
+          item.id.toLowerCase() === skipRepo?.toLowerCase()
+        )
+          return
         try {
-          const publication = (await get(
+          const publication = await publicationJson<Publication>(
+            request,
             'https://huggingface.co/api/models/' + item.id + '/revision/' + item.sha + '?blobs=true'
-          )) as Publication
-          const base = publication.cardData?.base_model
-          const checkpoint = Array.isArray(base) && base.length === 1 ? base[0] : base
-          if (!repoId(checkpoint) || (target && checkpoint.toLowerCase() !== target.toLowerCase())) return
-          const tags = [publication.pipeline_tag, ...(publication.tags ?? [])]
-          for (const file of publication.siblings ?? []) {
-            const mode = tags.some((t) => t === 'text-to-video' || t === 'image-to-video')
-              ? 'video'
-              : tags.some((t) => t === 'text-to-image' || t === 'image-to-image')
-                ? 'image'
-                : 'chat'
-            if (!file.lfs) continue
-            const row = {
-              mode,
-              repo: item.id,
-              revision: item.sha,
-              target: checkpoint,
-              file: file.rfilename,
-              ...file.lfs,
-            } satisfies LoraArtifact
-            if (!valid(row)) continue
-            try {
-              if (await hasRemoteWeights(request, row)) results.push(row)
-            } catch {
-              partial = true
-            }
-          }
+          )
+          const found = await publicationLoras(
+            request,
+            { ...publication, id: item.id, sha: item.sha },
+            target
+          )
+          results.push(...found.results)
+          partial ||= found.partial
         } catch {
           partial = true
         }

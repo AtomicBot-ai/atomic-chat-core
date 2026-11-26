@@ -90,6 +90,29 @@ describe('upstream DSpark installations', () => {
       await first.select('A', null)
       expect((await first.list()).files).toEqual([row])
       await first.select('B', row.sha256)
+      // The same head can ship in both the base repo and a derivative's tested bundle.
+      const baked = 'publisher/baked'
+      first.remember([{ ...row, repo: baked, target: baked }])
+      const scoped = await first.search(baked, '', false)
+      expect(scoped.results.map((d) => d.repo)).toEqual([baked])
+      await registry.write('baked-model', {
+        model_path: 'renamed.gguf',
+        name: 'baked-model',
+        source_repo: baked,
+      })
+      const linked = new DrafterService(
+        root,
+        registry,
+        downloader,
+        request,
+        [],
+        restart,
+        undefined,
+        new Map([[baked, baked]])
+      )
+      linked.remember(scoped.results)
+      await linked.select('baked-model', row.sha256)
+      expect(await service().resolve('baked-model')).toBeTruthy()
       await first.remove(row.sha256)
       expect(await service().resolve('B')).toBeUndefined()
       expect((await service().list()).files).toEqual([])

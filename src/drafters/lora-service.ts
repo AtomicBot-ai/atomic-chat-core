@@ -4,11 +4,12 @@ import { basename, join } from 'node:path'
 import { AtomicCoreError } from '../contracts/index.js'
 import { sha256File, type Downloader } from '../downloads/index.js'
 import { hfResolveUrl, readGgufMetadataFromFile } from '../models/index.js'
-import { DrafterDiscovery, fileId } from './catalog.js'
+import { fileId } from './catalog.js'
 import { optionalJson, save } from './storage.js'
 import {
   hasLoraTensors,
   discoverLoras,
+  bundledLoras,
   type LoraArtifact,
   type LoraMode,
   type catalogLoras,
@@ -20,6 +21,7 @@ interface Inventory {
   selections: Record<string, { id: string; target: string; signature: string }>
 }
 interface Identity {
+  source?: string | undefined
   target?: string | undefined
   signature: string
 }
@@ -55,6 +57,10 @@ async function validateAdapter(path: string, mode: LoraMode) {
 
 export class LoraService {
   private entries = new Map<string, LoraArtifact>()
+  private bundled = new Map<
+    string,
+    { published: Awaited<ReturnType<typeof bundledLoras>>; expires: number }
+  >()
   private transfers = new Map<string, Promise<void>>()
   private verified = new Map<string, string>()
   private refreshAt = 0
@@ -95,36 +101,46 @@ export class LoraService {
       downloads: this.downloader.snapshot().filter((d) => d.taskId.startsWith('lora:')),
     }
   }
-  async search(q: string, target?: string, live = false, source?: string) {
+  async search(q: string, target?: string, live = false, source?: string, repoOnly = false) {
     let partial = false
-    if (live && Date.now() >= this.refreshAt) {
+    const repo = source ?? target
+    const repoKey = repo?.toLowerCase()
+    let snapshot = repoKey ? this.bundled.get(repoKey) : undefined
+    if (live && repo && repoKey && (!snapshot || snapshot.expires <= Date.now())) {
+      try {
+        const published = await bundledLoras(this.request, repo)
+        snapshot = { published, expires: Date.now() + (published.partial ? 0 : 300_000) }
+        if (this.bundled.size >= 256) this.bundled.delete(this.bundled.keys().next().value!)
+        this.bundled.set(repoKey, snapshot)
+        this.remember(published.results)
+        if (published.origin) this.catalog.sources.set(repoKey, published.origin)
+      } catch {
+        partial = true
+      }
+    }
+    partial ||= snapshot?.published.partial ?? false
+    if (live && !repoOnly && Date.now() >= this.refreshAt) {
       this.refreshAt = Date.now() + 3600000
       try {
         const update = await this.refresh()
         this.remember(update.files)
         for (const [k, v] of update.sources) this.catalog.sources.set(k, v)
+        for (const [k, v] of update.familyRepos) this.catalog.familyRepos.set(k, v)
         for (const [k, v] of update.families) this.catalog.families.set(k, v)
       } catch {
         this.refreshAt = Date.now() + 60000
         partial = true
       }
     }
-    if (source && !target) {
-      const key = source.toLowerCase()
-      target = this.catalog.sources.get(key)
-      if (!target && live) {
-        try {
-          target = await new DrafterDiscovery(this.request).checkpoint(source)
-          if (target) this.catalog.sources.set(key, target)
-        } catch {
-          partial = true
-        }
-      }
-      target ??= source
-    }
-    if (live) {
+    if (!target && source) target = this.catalog.sources.get(source.toLowerCase()) ?? source
+    if (live && !repoOnly) {
       try {
-        const found = await discoverLoras(this.request, q, target)
+        const found = await discoverLoras(
+          this.request,
+          q,
+          target,
+          snapshot?.published.results.length && !snapshot.published.partial ? repo : undefined
+        )
         this.remember(found.results)
         partial ||= found.partial
       } catch {
@@ -133,15 +149,20 @@ export class LoraService {
     }
     this.remember((await this.state()).files)
     const words = q.toLowerCase().trim().split(/\s+/)
-    return {
-      partial,
-      target,
-      results: [...this.entries.values()].filter(
-        (row) =>
-          (!target || target.toLowerCase() === row.target.toLowerCase()) &&
-          words.every((w) => [row.repo, row.file, row.target, row.mode].join(' ').toLowerCase().includes(w))
+    const bundled = snapshot?.published.results ?? []
+    const matchesQuery = (row: LoraArtifact) =>
+      words.every((w) => [row.repo, row.file, row.target, row.mode].join(' ').toLowerCase().includes(w))
+    const rows = [
+      ...bundled.filter(
+        (r) => !target || target.toLowerCase() === repoKey || r.target.toLowerCase() === target.toLowerCase()
       ),
-    }
+      ...[...this.entries.values()]
+        .filter((row) => !target || target.toLowerCase() === row.target.toLowerCase())
+        .sort((a, b) => Number(b.repo.toLowerCase() === repoKey) - Number(a.repo.toLowerCase() === repoKey)),
+    ]
+    const unique = new Map<string, LoraArtifact>()
+    for (const row of rows) if (matchesQuery(row) && !unique.has(row.sha256)) unique.set(row.sha256, row)
+    return { partial, target, results: [...unique.values()] }
   }
   install(id: string) {
     const existing = this.transfers.get(id)
@@ -194,17 +215,18 @@ export class LoraService {
     if (previous?.signature === model) return previous
     const family = model.split(':')[0]
     const target = this.catalog.families.get(mode + ':' + family) ?? (await this.mediaIdentity(mode, model))
-    return { target, signature: model }
+    return { target, source: this.catalog.familyRepos.get(mode + ':' + family), signature: model }
   }
   async choices(mode: LoraMode, model: string) {
     const state = await this.state()
     const binding = state.selections[mode + ':' + model]
-    const { target, signature } = await this.identity(mode, model, binding)
+    const { target, source, signature } = await this.identity(mode, model)
     const files = state.files.filter(
       (row) => row.mode === mode && row.target.toLowerCase() === target?.toLowerCase()
     )
     return {
       target,
+      ...(source ? { source } : {}),
       adapterId:
         binding?.signature === signature && files.some((r) => r.sha256 === binding.id) ? binding.id : null,
       files,

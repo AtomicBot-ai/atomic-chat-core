@@ -1413,12 +1413,63 @@ describe('the embedding model through the owner', () => {
 })
 
 describe('LoRA checkpoint discovery through the owner', () => {
+  it('returns the source adapter before global search and retains it when the feed is offline', async () => {
+    const source = 'publisher/flux-GGUF'
+    const target = 'black-forest-labs/FLUX.2-klein-4B'
+    const revision = 'a'.repeat(40)
+    const adapter = buildGguf({
+      metadata: { 'general.type': 'adapter', 'adapter.type': 'lora' },
+      tensors: [],
+    })
+    let feeds = 0
+    let probes = 0
+    const core = await createCore({
+      fetch: async (input) => {
+        const url = String(input)
+        if (url.includes('/api/models/' + source + '?'))
+          return Response.json({
+            id: source,
+            sha: revision,
+            tags: ['base_model:quantized:' + target],
+            cardData: { base_model: target },
+            siblings: [
+              { rfilename: 'bundle/adapter.gguf', lfs: { sha256: '9'.repeat(64), size: adapter.length } },
+            ],
+          })
+        if (url.includes('/resolve/' + revision)) {
+          probes++
+          return new Response(new Uint8Array(adapter))
+        }
+        if (url.includes('/api/models?')) feeds++
+        throw new Error('offline')
+      },
+    })
+    const url = core.control.url + '/atomic/v1/loras/search?live=1&source=' + source
+    const headers = { authorization: 'Bearer ' + core.controlToken }
+    const search = async (suffix: string) =>
+      (await (await fetch(url + suffix, { headers })).json()) as {
+        results: { repo: string }[]
+        target: string
+        partial: boolean
+      }
+    const direct = await search('&scope=repo')
+    expect(direct.results[0]?.repo).toBe(source)
+    expect(direct.target).toBe(target)
+    expect(feeds).toBe(0)
+    const full = await search('')
+    expect(full.results[0]?.repo).toBe(source)
+    expect(full.results.some((r) => r.repo !== source)).toBe(true)
+    expect(full.partial).toBe(true)
+    expect(feeds).toBe(1)
+    expect(probes).toBe(1)
+  })
+
   it('resolves an unlisted conversion before returning patches for its declared base model', async () => {
     const target = 'black-forest-labs/FLUX.2-klein-4B'
     const core = await createCore({
       fetch: async (url) => {
         if (String(url).includes('/api/models/author/converted?'))
-          return Response.json({ tags: ['base_model:quantized:' + target] })
+          return Response.json({ id: 'author/converted', tags: ['base_model:quantized:' + target] })
         return Response.json([])
       },
     })
@@ -1445,6 +1496,7 @@ describe('LoRA checkpoint discovery through the owner', () => {
         headers: { authorization: 'Bearer ' + core.controlToken },
       }).then((r) => r.json())
     expect(await choices('image')).toEqual({
+      source: 'unsloth/FLUX.1-schnell-GGUF',
       target: 'black-forest-labs/FLUX.1-schnell',
       adapterId: null,
       files: [],

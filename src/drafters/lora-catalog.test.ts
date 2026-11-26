@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
-import { catalogLoras, discoverLoras, hasLoraTensors } from './lora-catalog.js'
+import { buildGguf } from '../../test/helpers/gguf-builder.js'
+import { bundledLoras, catalogLoras, discoverLoras, hasLoraTensors } from './lora-catalog.js'
 import catalog from '../client/model-catalog-baseline.json' with { type: 'json' }
 it('projects only supported adapters with pinned provenance and exact target families', () => {
   const { files, families, sources } = catalogLoras(catalog)
@@ -49,4 +50,31 @@ it('only offers FLUX LoRA blocks that the media backend can address', () => {
   expect(hasLoraTensors({ 'blocks.0.cross_attn.k.lora_A.default.weight': {} })).toBe(false)
   expect(hasLoraTensors({ 'diffusion_model.blocks.0.cross_attn.k.lora_A.weight': {} })).toBe(true)
   expect(hasLoraTensors({ 'diffusion_model.double_blocks.0.img_attn.proj.lora_A.weight': {} })).toBe(true)
+})
+
+it('reads bundled patches at a pinned revision and keeps the declared target of the standalone adapter', async () => {
+  const repo = 'org/baked-GGUF'
+  const sha = 'a'.repeat(40)
+  const base = 'model/original'
+  const adapter = buildGguf({ metadata: { 'general.type': 'adapter', 'adapter.type': 'lora' }, tensors: [] })
+  const regular = buildGguf({ metadata: { 'general.type': 'model' }, tensors: [] })
+  const request = async (input: Parameters<typeof fetch>[0]) => {
+    const url = String(input)
+    if (url.includes('/api/models/'))
+      return Response.json({
+        id: repo,
+        sha,
+        cardData: { base_model: base },
+        siblings: ['base-Q8.gguf', 'patch/lora.gguf', 'fake-lora.gguf'].map((rfilename, i) => ({
+          rfilename,
+          lfs: { size: i === 1 ? adapter.length : regular.length, sha256: String(i).repeat(64) },
+        })),
+      })
+    expect(url).toContain('/resolve/' + sha + '/')
+    expect(url).not.toContain('base-Q8')
+    return new Response(new Uint8Array(url.endsWith('fake-lora.gguf') ? regular : adapter))
+  }
+  const { results, partial } = await bundledLoras(request, repo)
+  expect(partial).toBe(false)
+  expect(results).toMatchObject([{ repo, target: base, file: 'patch/lora.gguf', revision: sha }])
 })
