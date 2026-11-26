@@ -44,6 +44,7 @@ export interface LlamacppConfig {
   mtp_draft_path: string
   /** Resolved exclusively from the upstream installation’s selected artifact. */
   dspark_draft_path?: string
+  lora_path?: string
   dflash: boolean
   dflash_draft_path: string
   dflash_spec_supported: boolean

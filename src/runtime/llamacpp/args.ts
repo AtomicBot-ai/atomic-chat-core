@@ -522,6 +522,8 @@ export function planLlamaArgs(config: LlamacppConfig, input: LlamaArgsInput): Ll
     warnings.push(`Ignoring invalid extra llama-server arguments: ${(error as Error).message}`)
   }
 
+  if (input.provider === 'llamacpp-upstream' && !input.isEmbedding && cfg.lora_path)
+    push('--lora', cfg.lora_path)
   if (selectedDspark) push('--model-draft', selectedDspark, '--spec-type', 'draft-dspark')
 
   // A config field that arrives as null/undefined would otherwise reach the process as the string

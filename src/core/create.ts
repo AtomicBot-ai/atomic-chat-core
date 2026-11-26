@@ -1,3 +1,4 @@
+import type { AtomicCatalogEntry } from '../client/model-catalog.js'
 /**
  * The dependency wiring behind `AtomicCore.create()`: take the instance lock, open every store, build
  * the runtimes and backend services, start the control listener, construct the facade, reap what a
@@ -6,6 +7,10 @@
 
 import { lstat } from 'node:fs/promises'
 import catalogBaseline from '../client/model-catalog-baseline.json' with { type: 'json' }
+import { FifoLock } from '../runtime/shared/fifo-lock.js'
+import { LoraService } from '../drafters/lora-service.js'
+import { catalogLoras } from '../drafters/lora-catalog.js'
+import { DrafterDiscovery, repoId } from '../drafters/catalog.js'
 import {
   DrafterService,
   curatedDrafters,
@@ -297,6 +302,7 @@ export async function createAtomicCore(
     const cudaGuard = new CudaRuntimeGuard({ platform, env, log })
     // The three llama.cpp providers run through one runtime class; what differs — backend ids, the
     // argument rules and Windows CUDA runtime repair — is decided by the provider it is given.
+    const attachmentMutations = new FifoLock()
     const drafters = new DrafterService(
       layout.root,
       registries.get(LOCAL_PROVIDER) as ModelRegistry,
@@ -306,12 +312,34 @@ export async function createAtomicCore(
       async (id, rollback) => upstreamRuntime.recreateSession(id, rollback),
       async () => curatedDrafters(await loadHostModelCatalog(options.env, options.fetch)),
       catalogCheckpointSources(catalogBaseline),
-      catalogCheckpointFiles(catalogBaseline)
+      catalogCheckpointFiles(catalogBaseline),
+      attachmentMutations
+    )
+    const mediaCheckpoints = new DrafterDiscovery(options.fetch ?? fetch)
+    const loras: LoraService = new LoraService(
+      layout.root,
+      downloader,
+      options.fetch ?? fetch,
+      catalogLoras(catalogBaseline),
+      (model, previous) => drafters.checkpoint(model, previous),
+      (model, rollback) => upstreamRuntime.recreateSession(model, rollback),
+      async () => catalogLoras(await loadHostModelCatalog(options.env, options.fetch)),
+      async (mode, model) => {
+        const entry = (catalogBaseline.models as Record<string, AtomicCatalogEntry>)[
+          'diffusion:' + model.split(':')[0]
+        ]
+        if (entry?.kind !== 'diffusion' || entry.definition.modality !== mode) return
+        const transformer = entry.definition.transformer as { repo?: string } | undefined
+        if (repoId(transformer?.repo))
+          return mediaCheckpoints.checkpoint(transformer.repo).catch(() => undefined)
+      },
+      attachmentMutations
     )
     const llamacppRuntime = (provider: LlamacppProviderId) =>
       new LlamacppRuntime({
         layout,
         registry: registries.get(provider) as ModelRegistry,
+        selectedLoraPath: (id) => loras.resolve('chat', id),
         selectedDsparkPath: (id) => drafters.resolve(id),
         instanceId: lock.instanceId,
         provider,
@@ -799,6 +827,7 @@ export async function createAtomicCore(
     })
 
     const diffusion = wireDiffusion({
+      acquireLora: (mode, model) => loras.acquire(mode, model),
       onFailure,
       layout,
       journal,
@@ -1277,6 +1306,7 @@ export async function createAtomicCore(
         ownerScope: scope,
         dataFolder: layout.root,
         drafters,
+        loras,
         environments: managed.service,
         environmentsSnapshot: managed.environments,
         environmentOperations: managed.operations,

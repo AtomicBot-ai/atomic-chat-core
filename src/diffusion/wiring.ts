@@ -1,3 +1,4 @@
+import type { LoraLease } from '../drafters/lora-service.js'
 import type { FailureObserver } from '../contracts/index.js'
 /**
  * How the owner builds the image-generation service: the child journal adapter (an `sd-server` is
@@ -15,6 +16,7 @@ import type { RemoteMediaGateway } from './remote-job.js'
 import type { DiffusionServiceDeps } from './service.js'
 
 export interface WireDiffusionOptions {
+  acquireLora?: (mode: 'image' | 'video', model: string) => Promise<LoraLease | undefined>
   onFailure?: FailureObserver
 
   layout: DataLayout
@@ -70,6 +72,7 @@ export function hardwareSystemInfo(hardware: {
 
 export function wireDiffusion(options: WireDiffusionOptions): DiffusionService {
   const service = new DiffusionService({
+    ...(options.acquireLora ? { acquireLora: options.acquireLora } : {}),
     paths: options.layout.diffusion,
     dataFolder: options.layout.root,
     emit: options.emit,

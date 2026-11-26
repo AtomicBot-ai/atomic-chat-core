@@ -121,6 +121,7 @@ export interface LoadPlanDeps {
   ensureGemmaMtpDraft: (modelId: string) => Promise<void>
   checkDflashSupport: (modelId: string) => boolean
   ensureDflashDraft: (modelId: string) => Promise<void>
+  selectedLoraPath?: (modelId: string) => Promise<string | undefined>
   selectedDsparkPath?: (modelId: string) => Promise<string | undefined>
   backendSupportsDsparkSpec?: (exePath: string, env: Record<string, string>) => Promise<boolean>
   backendSupportsDflashSpec: (exePath: string, env: Record<string, string>) => Promise<boolean>
@@ -348,8 +349,11 @@ export async function planLlamaLoad(input: LoadPlanInput, deps: LoadPlanDeps): P
     cfg.dflash = false
   }
 
+  delete cfg.lora_path
   delete cfg.dspark_draft_path
   if (input.provider === 'llamacpp-upstream' && !input.isEmbedding && !input.modelPath) {
+    const lora = await deps.selectedLoraPath?.(modelId)
+    if (lora) cfg.lora_path = lora
     const draft = await deps.selectedDsparkPath?.(modelId)
     if (draft) {
       if (!(await deps.backendSupportsDsparkSpec?.(exePath, env))) {

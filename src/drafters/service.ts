@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { FifoLock } from '../runtime/shared/fifo-lock.js'
+import { rm, stat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { optionalJson, save } from './storage.js'
 import { AtomicCoreError } from '../contracts/index.js'
 import type { Downloader } from '../downloads/index.js'
 import { sha256File } from '../downloads/index.js'
@@ -8,24 +9,6 @@ import { hfResolveUrl, inspectLocalGguf, readGgufMetadataFromFile } from '../mod
 import type { ModelRegistry } from '../models/index.js'
 import { DrafterDiscovery, fileId, repoId, type CheckpointFile, type Drafter } from './catalog.js'
 
-async function optionalJson<T>(path: string): Promise<T | undefined> {
-  try {
-    return JSON.parse(await readFile(path, 'utf8')) as T
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined
-    throw e
-  }
-}
-async function save(path: string, value: unknown) {
-  await mkdir(dirname(path), { recursive: true })
-  const temporary = path + '.' + randomUUID() + '.tmp'
-  try {
-    await writeFile(temporary, JSON.stringify(value))
-    await rename(temporary, path)
-  } finally {
-    await rm(temporary, { force: true })
-  }
-}
 interface Inventory {
   files: Drafter[]
 }
@@ -42,7 +25,6 @@ export class DrafterService {
   private readonly transfers = new Map<string, Promise<void>>()
   private readonly verified = new Map<string, string>()
   private readonly discovery: DrafterDiscovery
-  private tail: Promise<unknown> = Promise.resolve()
   constructor(
     private root: string,
     private registry: ModelRegistry,
@@ -52,7 +34,8 @@ export class DrafterService {
     private restart: Restart,
     private remoteCatalog?: () => Promise<Drafter[]>,
     private knownSources = new Map<string, string>(),
-    private checkpointFiles: CheckpointFile[] = []
+    private checkpointFiles: CheckpointFile[] = [],
+    private mutations = new FifoLock()
   ) {
     this.discovery = new DrafterDiscovery(request, (row) => this.remember([row]))
     this.discovery.trust(curated)
@@ -65,11 +48,6 @@ export class DrafterService {
       else if (row.moreVariants && row.repo === stored.repo && row.target === stored.target)
         this.entries.set(row.sha256, { ...stored, moreVariants: true })
     }
-  }
-  private exclusive<T>(fn: () => Promise<T>) {
-    const result = this.tail.then(fn, fn)
-    this.tail = result.catch(() => {})
-    return result
   }
   private get index() {
     return join(this.root, 'llamacpp', 'drafters', 'index.json')
@@ -176,7 +154,7 @@ export class DrafterService {
         'MODEL_FILE_CORRUPT',
         'The downloaded GGUF does not contain a DSpark Markov head.'
       )
-    await this.exclusive(async () => {
+    await this.mutations.run(async () => {
       const files = await this.inventory()
       await save(this.index, { files: [...files.filter((f) => f.sha256 !== row.sha256), row] })
     })
@@ -225,7 +203,7 @@ export class DrafterService {
       size: info.size,
     }
   }
-  private async identity(model: string) {
+  private async identity(model: string, cache = true) {
     const ctx = await this.context(model)
     if (ctx.binding?.target) return { ...ctx, target: ctx.binding.target, source: ctx.binding.source }
     const known = this.curated.find((d) => d.targetSha256 && d.targetSha256 === ctx.yml.model_sha256)
@@ -259,12 +237,17 @@ export class DrafterService {
         this.knownSources.get(source.toLowerCase()) ??
         (await this.discovery.checkpoint(source).catch(() => undefined))
     if (target && source) this.knownSources.set(source.toLowerCase(), target)
-    if (target)
+    if (target && cache)
       await save(ctx.settings, { id: ctx.binding?.id ?? null, signature: ctx.signature, target, source })
     return { ...ctx, target, source }
   }
+  async checkpoint(model: string, previous?: { target: string; signature: string }) {
+    if (previous && (await this.context(model)).signature === previous.signature) return previous
+    const { target, source, signature } = await this.identity(model, false)
+    return { target: target ?? source, signature }
+  }
   async choices(model: string) {
-    return this.exclusive(async () => {
+    return this.mutations.run(async () => {
       const ctx = await this.identity(model)
       const files = (await this.inventory()).filter(
         (d) => d.target.toLowerCase() === ctx.target?.toLowerCase()
@@ -298,7 +281,7 @@ export class DrafterService {
     return path
   }
   async select(model: string, id: string | null) {
-    return this.exclusive(() => this.change(model, id))
+    return this.mutations.run(() => this.change(model, id))
   }
   private async change(model: string, id: string | null) {
     const ctx =
@@ -325,7 +308,7 @@ export class DrafterService {
     }
   }
   async remove(id: string) {
-    return this.exclusive(async () => {
+    return this.mutations.run(async () => {
       const path = this.path(id)
       if (this.transfers.has(id)) throw new AtomicCoreError('JOB_BUSY', 'Wait for the download to finish.')
       for (const entry of await this.registry.list()) {

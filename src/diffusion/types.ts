@@ -65,6 +65,8 @@ export type SdMode = 'img_gen' | 'vid_gen'
 
 /** What `GET /sdcpp/v1/capabilities` said after the server came up. */
 export interface ServerCapabilities {
+  imageLora?: boolean
+  videoLora?: boolean
   /** `features_by_mode.img_gen.cancel_generating`. */
   cancelGenerating: boolean
   imgGenDefaults?: unknown

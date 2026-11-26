@@ -696,6 +696,24 @@
       ]
     },
     {
+      "flag": "--lora",
+      "severity": "break",
+      "emitters": {
+        "chat": [
+          {
+            "from": null,
+            "until": null
+          }
+        ],
+        "chat-dflash": [
+          {
+            "from": null,
+            "until": null
+          }
+        ]
+      }
+    },
+    {
       "flag": "--main-gpu",
       "severity": "break",
       "emitters": {

@@ -205,6 +205,24 @@ beforeEach(async () => {
 // ── the tests ─────────────────────────────────────────────────────────────────
 
 describe('owner lifecycle during job startup', () => {
+  it('releases the selected LoRA if the model is replaced while acquiring it', async () => {
+    const h = harness(0)
+    let released = false
+    h.deps.acquireLora = async () => {
+      h.state.spec = sampleSpec({ modelId: 'another-model' })
+      return {
+        file: 'selected.safetensors',
+        release: () => {
+          released = true
+        },
+      }
+    }
+    await expect(startImageJob(h.deps, sampleRequest())).rejects.toMatchObject({ code: 'CANCELLED' })
+    expect(released).toBe(true)
+    expect(h.state.activeJobId).toBeUndefined()
+    expect(h.jobStates()).toEqual([])
+  })
+
   it.each(['unload', 'replace', 'shutdown'] as const)(
     'refuses preparation overtaken by %s before registering a job',
     async (change) => {
@@ -257,12 +275,39 @@ describe('owner lifecycle during job startup', () => {
   )
 })
 
+describe('local LoRA jobs', () => {
+  it.each(['image', 'video'] as const)(
+    'rejects an unsupported %s adapter before submitting and releases the file',
+    async (mode) => {
+      const requests: string[] = []
+      const port = await stub((_method, path) => {
+        requests.push(path)
+        return json(400, {})
+      })
+      const h = mode === 'image' ? harness(port) : videoHarness(port)
+      let released = false
+      h.deps.acquireLora = async () => ({
+        file: 'test.safetensors',
+        release: () => {
+          released = true
+        },
+      })
+      const job =
+        mode === 'image' ? runImageJob(h.deps, sampleRequest()) : runVideoJob(h.deps, sampleVideoRequest())
+      await expect(job).rejects.toMatchObject({ code: 'MODEL_INCOMPATIBLE' })
+      expect(requests).toEqual([])
+      expect(released).toBe(true)
+    }
+  )
+})
+
 describe('a completed job', () => {
   it('saves its outputs and reports every transition', async () => {
     let polls = 0
     const port = await stub((method, path, body) => {
       if (method === 'POST' && path === '/sdcpp/v1/img_gen') {
         const sent = JSON.parse(body) as Record<string, unknown>
+        expect(sent['lora']).toEqual([{ path: 'image.safetensors', multiplier: 1 }])
         expect(sent['batch_count']).toBe(2)
         expect(sent['seed']).toBe(1234)
         expect((sent['sample_params'] as Record<string, unknown>)['sample_method']).toBe('euler')
@@ -286,6 +331,8 @@ describe('a completed job', () => {
       return json(404, {})
     })
     const h = harness(port)
+    h.server.handle.capabilities.imageLora = true
+    h.deps.acquireLora = async () => ({ file: 'image.safetensors', release: () => {} })
     const { id, done } = await startImageJob(h.deps, sampleRequest())
     expect(h.state.activeJobId).toBe(id)
     expect(h.state.activeJob(), 'status must expose the running job').not.toBeNull()
@@ -1056,6 +1103,7 @@ describe('a video job', () => {
     const port = await stub((method, path, body) => {
       if (method === 'POST' && path === '/sdcpp/v1/vid_gen') {
         const sent = JSON.parse(body) as Record<string, unknown>
+        expect(sent['lora']).toEqual([{ path: 'video.safetensors', multiplier: 1 }])
         expect(sent['video_frames']).toBe(25)
         expect(sent['fps']).toBe(24)
         expect(sent['output_format']).toBe('webm')
@@ -1083,6 +1131,8 @@ describe('a video job', () => {
       return json(404, {})
     })
     const h = videoHarness(port)
+    h.server.handle.capabilities.videoLora = true
+    h.deps.acquireLora = async () => ({ file: 'video.safetensors', release: () => {} })
     const { id, done } = await startVideoJob(h.deps, sampleVideoRequest())
     expect(h.state.activeJobId).toBe(id)
     expect(h.state.activeVideoJob()?.id).toBe(id)

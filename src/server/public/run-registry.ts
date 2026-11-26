@@ -235,7 +235,7 @@ export class ChatRunRegistry {
       for (const run of this.runs.values()) {
         if (
           run.finishedAt !== undefined &&
-          (oldest === undefined || run.finishedAt < (oldest.finishedAt ?? 0))
+          (oldest?.finishedAt === undefined || run.finishedAt < oldest.finishedAt)
         )
           oldest = run
       }

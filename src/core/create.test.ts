@@ -1412,6 +1412,24 @@ describe('the embedding model through the owner', () => {
   })
 })
 
+describe('LoRA checkpoint discovery through the owner', () => {
+  it('derives the base of a quantized media model from its declared provenance and respects the mode', async () => {
+    const core = await createCore({
+      fetch: async () => Response.json({ tags: ['base_model:quantized:black-forest-labs/FLUX.1-schnell'] }),
+    })
+    const choices = (mode: string) =>
+      fetch(core.control.url + '/atomic/v1/loras/choices/' + mode + '/flux.1:q4_k_m', {
+        headers: { authorization: 'Bearer ' + core.controlToken },
+      }).then((r) => r.json())
+    expect(await choices('image')).toEqual({
+      target: 'black-forest-labs/FLUX.1-schnell',
+      adapterId: null,
+      files: [],
+    })
+    expect(await choices('video')).toEqual({ adapterId: null, files: [] })
+  })
+})
+
 describe('remote media through the owner', () => {
   it('answers the catalog and a registered provider’s models over control', async () => {
     const fake = (async (input: string | URL | Request) => {

@@ -128,6 +128,7 @@ export interface LoadOptions {
 }
 
 export interface LlamacppRuntimeOptions {
+  selectedLoraPath?: (modelId: string) => Promise<string | undefined>
   selectedDsparkPath?: (modelId: string) => Promise<string | undefined>
   layout: DataLayout
   registry: ModelRegistry
@@ -639,6 +640,7 @@ export class LlamacppRuntime implements LocalRuntime {
       ensureGemmaMtpDraft: this.options.ensureGemmaMtpDraft ?? draftDownloadUnavailable,
       checkDflashSupport,
       ensureDflashDraft: this.options.ensureDflashDraft ?? draftDownloadUnavailable,
+      ...(this.options.selectedLoraPath ? { selectedLoraPath: this.options.selectedLoraPath } : {}),
       ...(this.options.selectedDsparkPath ? { selectedDsparkPath: this.options.selectedDsparkPath } : {}),
       backendSupportsDsparkSpec: (exePath, env) =>
         checkSpecTypeSupport(exePath, 'draft-dspark', env, dirname(exePath)),
@@ -935,7 +937,10 @@ export class LlamacppRuntime implements LocalRuntime {
       if (response.ok) {
         const slots = (await response.json()) as Array<{ is_processing?: boolean }>
         if (Array.isArray(slots) && slots.some((slot) => slot.is_processing))
-          throw new AtomicCoreError('JOB_BUSY', 'Wait for the current response before changing the drafter.')
+          throw new AtomicCoreError(
+            'JOB_BUSY',
+            'Wait for the current response before changing model attachments.'
+          )
       }
     }
     const ctxLen = this.getCtxSize(modelId)
