@@ -200,7 +200,12 @@ export class DrafterService {
   private async context(model: string) {
     const { dir, yml } = await this.installation(model)
     const path = this.registry.resolvePaths(yml).modelPath
-    const info = await stat(path)
+    const info = await stat(path).catch((error: unknown) => {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR')
+        throw new AtomicCoreError('MODEL_FILE_NOT_FOUND', 'The model file is missing.', path)
+      throw error
+    })
     const signature = JSON.stringify([path, info.size, info.mtimeMs])
     const settings = join(dir, 'upstream-drafter.json')
     const stored = await optionalJson<Binding>(settings)
