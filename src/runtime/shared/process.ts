@@ -124,12 +124,26 @@ export function spawnManaged(
   onLine?: ReadyOptions['onLine'],
   hooks: SpawnHooks = {}
 ): ManagedProcess {
-  const child = spawn(spec.exe, spec.args, {
-    env: spec.env,
-    cwd: spec.cwd,
-    stdio: [spec.stdin === 'pipe' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-  })
+  let child: ChildProcess
+  try {
+    child = spawn(spec.exe, spec.args, {
+      env: spec.env,
+      cwd: spec.cwd,
+      stdio: [spec.stdin === 'pipe' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+  } catch (error) {
+    // Some runtimes refuse a spawn synchronously instead of emitting `error` — Bun reports a failed
+    // `uv_spawn` that way (`EUNKNOWN: unknown error, uv_spawn`). Report it through this module's own
+    // code, with the runtime's words, so a caller sees one shape either way and the raw error never
+    // escapes the load chain. The original error stays as `cause`.
+    throw new AtomicCoreError(
+      'IO_ERROR',
+      'An input/output error occurred.',
+      error instanceof Error ? error.message : String(error),
+      { cause: error }
+    )
+  }
   // A child that dies first makes writes to its stdin fail with EPIPE; that is its exit, not an error.
   child.stdin?.on('error', () => {})
   const capture = hooks.captureOutput !== false
