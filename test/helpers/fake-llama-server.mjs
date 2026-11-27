@@ -235,7 +235,7 @@ function startServer() {
     if (url.pathname === '/props') {
       const embeddingProjector = argv.includes('--embedding') && argv.includes('--mmproj')
       return json(200, {
-        default_generation_settings: { n_ctx: 4096 },
+        default_generation_settings: { n_ctx: Number(flag('--ctx-size', flag('-c', '4096'))) || 4096 },
         total_slots: 1,
         chat_template: '{{ messages }}',
         modalities: {
